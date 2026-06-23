@@ -1,0 +1,99 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .codex/hooks/skill-read-guard/skill-read-guard.cjs",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "node .codex/hooks/structured-file-guard/structured-file-guard.cjs",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .codex/hooks/structured-file-guard/structured-file-guard.cjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "apply_patch|Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .codex/hooks/mlua-lsp/mlua-diagnose-post-tool-use.cjs",
+            "timeout": 120
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .codex/hooks/skill-log/skill-log.cjs",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .codex/hooks/mcp-log/mcp-log.cjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .codex/hooks/mlua-lsp/mlua-session-start.cjs",
+            "timeout": 120
+          }
+        ]
+      },
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .codex/hooks/update-check/update-check.cjs",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .codex/hooks/core-version-check/core-version-check.cjs",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "node .codex/hooks/skill-router-reminder/skill-router-reminder.cjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
