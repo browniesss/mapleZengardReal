@@ -35,7 +35,78 @@ function readInput() {
   }
 }
 
-readInput();
+const hookInput = readInput();
+
+function extractPrompt(input) {
+  if (!input || typeof input !== 'object') return '';
+  const candidates = [
+    input.prompt,
+    input.user_prompt,
+    input.message,
+    input.text,
+    input.input,
+  ];
+  for (const value of candidates) {
+    if (typeof value === 'string' && value.trim()) return value;
+  }
+  if (Array.isArray(input.messages)) {
+    return input.messages
+      .map((message) => {
+        if (typeof message === 'string') return message;
+        if (message && typeof message.content === 'string') return message.content;
+        return '';
+      })
+      .filter(Boolean)
+      .join('\n');
+  }
+  return '';
+}
+
+function envMode() {
+  const mode = String(process.env.MSW_SKILL_ROUTER_MODE || '').trim().toLowerCase();
+  if (mode === 'off' || mode === 'compact' || mode === 'full') return mode;
+  if (process.env.MSW_REMINDER_FULL === '1') return 'full';
+  return 'auto';
+}
+
+function needsFullReminder(prompt) {
+  const text = String(prompt || '').toLowerCase();
+  if (!text.trim()) return true;
+
+  const runtimeSignals = [
+    'msw', 'maplestory', 'maker', 'mlua', '.mlua', '.model', '.map', '.ui',
+    'sprite', 'ruid', 'avatar', 'monster', 'player', 'defaultplayer',
+    'component', 'logic', 'event', 'spawn', 'tilemapmode', 'datastorage',
+    'script', 'hud', 'popup', 'button', 'combat', 'damage',
+    '메이플스토리 월드', '메이플월드', '메월', '메월드', '메이커',
+    '스크립트', '컴포넌트', '모델', '맵', '스프라이트', '아바타',
+    '몬스터', '플레이어', '전투', '데미지', '버튼', '팝업', '루아',
+  ];
+  const metaSignals = [
+    'hook', 'hooks', 'mcp', 'msw-mcp', 'omx', 'codex', 'token', 'context',
+    'config', 'toml', 'log', 'logs', 'session', 'permission', 'acl',
+    'git', 'diff', 'commit', 'status', 'cost', 'cache',
+    '훅', '설정', '토큰', '컨텍스트', '로그', '세션', '권한', '비용',
+    '기록', '옮긴', '호출', '도구',
+  ];
+
+  const hasRuntimeSignal = runtimeSignals.some((signal) => text.includes(signal));
+  const hasMetaSignal = metaSignals.some((signal) => text.includes(signal));
+  return hasRuntimeSignal || !hasMetaSignal;
+}
+
+const mode = envMode();
+if (mode === 'off') process.exit(0);
+if (mode === 'compact' || (mode === 'auto' && !needsFullReminder(extractPrompt(hookInput)))) {
+  process.stdout.write(
+    `<msw-skill-router-reminder mode="compact">\n` +
+    `This user message looks like meta/config/log/tooling work, not MSW world implementation.\n` +
+    `Do not load MSW foundation skills, call msw-mcp tools, or emit the full MSW matrix unless the request actually touches MSW scripts, assets, UI, maps, models, Maker runtime, or resource lookup.\n` +
+    `If the task later turns into MSW implementation or runtime verification, re-classify then and load the required MSW skills/references before planning.\n` +
+    `</msw-skill-router-reminder>\n`
+  );
+  process.exit(0);
+}
 
 process.stdout.write(
   `<msw-skill-router-reminder>\n` +
