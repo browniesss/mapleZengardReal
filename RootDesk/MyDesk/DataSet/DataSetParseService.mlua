@@ -1,0 +1,126 @@
+@Logic
+script DataSetParseService extends Logic
+
+    method table ParseRows(string datasetName)
+        -- Parses a UserDataSet into an array of row tables keyed by column name.
+        local dataset = self:GetDataset(datasetName)
+        if dataset == nil then
+            log_warning(string.format("[DataSetParseService] dataset not found: %s", tostring(datasetName)))
+            return {}
+        end
+
+        local columns = self:CollectColumns(dataset)
+        local rowCount = dataset:GetRowCount()
+        local rows = {}
+
+        log(string.format("[DataSetParseService] ParseRows start dataset=%s rows=%d columns=%d", tostring(datasetName), rowCount, #columns))
+
+        for rowIndex = 1, rowCount do
+            rows[rowIndex] = self:BuildRowTable(dataset, columns, rowIndex)
+        end
+
+        log(string.format("[DataSetParseService] ParseRows complete dataset=%s rows=%d", tostring(datasetName), #rows))
+        return rows
+    end
+
+    method table ParseRowsAsStructs(string datasetName)
+        -- Parses a UserDataSet into an array of DataSetRowStruct values.
+        local dataset = self:GetDataset(datasetName)
+        if dataset == nil then
+            log_warning(string.format("[DataSetParseService] dataset not found: %s", tostring(datasetName)))
+            return {}
+        end
+
+        local columns = self:CollectColumns(dataset)
+        local rowCount = dataset:GetRowCount()
+        local rows = {}
+
+        log(string.format("[DataSetParseService] ParseRowsAsStructs start dataset=%s rows=%d columns=%d", tostring(datasetName), rowCount, #columns))
+
+        for rowIndex = 1, rowCount do
+            rows[rowIndex] = self:BuildRowStruct(dataset, columns, rowIndex)
+        end
+
+        log(string.format("[DataSetParseService] ParseRowsAsStructs complete dataset=%s rows=%d", tostring(datasetName), #rows))
+        return rows
+    end
+
+    method DataSetRowStruct ParseRowStruct(string datasetName, integer rowIndex)
+        -- Parses one dataset row into a DataSetRowStruct instance.
+        local dataset = self:GetDataset(datasetName)
+        if dataset == nil then
+            log_warning(string.format("[DataSetParseService] dataset not found: %s", tostring(datasetName)))
+            local emptyRow = DataSetRowStruct()
+            emptyRow.RowIndex = rowIndex
+            emptyRow.Values = {}
+            return emptyRow
+        end
+
+        local columns = self:CollectColumns(dataset)
+        return self:BuildRowStruct(dataset, columns, rowIndex)
+    end
+
+    method UserDataSet GetDataset(string datasetName)
+        -- Loads a dataset and returns nil when the dataset name is empty.
+        if datasetName == nil or datasetName == "" then
+            log_warning("[DataSetParseService] empty dataset name")
+            return nil
+        end
+
+        return _DataService:GetTable(datasetName)
+    end
+
+    method table CollectColumns(UserDataSet dataset)
+        -- Converts the read-only column list into a filtered Lua array.
+        local columns = {}
+        local rawColumns = dataset.Columns:ToTable()
+
+        for _, columnName in ipairs(rawColumns) do
+            if self:ShouldIncludeColumn(columnName) then
+                columns[#columns + 1] = columnName
+            end
+        end
+
+        return columns
+    end
+
+    method boolean ShouldIncludeColumn(string columnName)
+        -- Skips blank column names and memo columns that start with #.
+        if type(columnName) ~= "string" then
+            return false
+        end
+
+        if columnName == "" then
+            return false
+        end
+
+        return string.sub(columnName, 1, 1) ~= "#"
+    end
+
+    method table BuildRowTable(UserDataSet dataset, table columns, integer rowIndex)
+        -- Builds the keyed cell table for one row.
+        local rowValues = {}
+
+        for _, columnName in ipairs(columns) do
+            local cellValue = dataset:GetCell(rowIndex, columnName)
+            if cellValue == nil then
+                cellValue = ""
+            else
+                cellValue = tostring(cellValue)
+            end
+
+            rowValues[columnName] = cellValue
+        end
+
+        return rowValues
+    end
+
+    method DataSetRowStruct BuildRowStruct(UserDataSet dataset, table columns, integer rowIndex)
+        -- Wraps one parsed row table in the DataSetRowStruct type.
+        local rowStruct = DataSetRowStruct()
+        rowStruct.RowIndex = rowIndex
+        rowStruct.Values = self:BuildRowTable(dataset, columns, rowIndex)
+        return rowStruct
+    end
+
+end

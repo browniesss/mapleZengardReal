@@ -1,0 +1,7 @@
+@Struct
+script DataSetRowStruct
+
+    property integer RowIndex = 0
+    property any Values
+
+end
