@@ -1,0 +1,21 @@
+@Logic
+script JsonUtil extends Logic
+    -- config-dataset 공용 JSON 로더. 네이티브 _HttpService JSON 변환 래퍼.
+    -- ambient(ExecSpace 없음 = 호출측에서 실행). JSON 셀(중첩 데이터) 디코드에 사용.
+
+    method table Decode(string text)
+        -- JSON 문자열 -> Lua 테이블. 빈/누락 입력("" 또는 nil)은 빈 테이블로 방어(빈 셀 대비).
+        if text == nil or text == "" then
+            return {}
+        end
+        return _HttpService:JSONDecode(text)
+    end
+
+    method string Encode(table value)
+        -- Lua 테이블 -> JSON 문자열. nil은 빈 문자열.
+        if value == nil then
+            return ""
+        end
+        return _HttpService:JSONEncode(value)
+    end
+end

@@ -1,0 +1,4 @@
+﻿typeId,occupiable,blocksMove,modifiers,model
+plain,true,false,[],BoardCell
+block,false,true,[],BlockCell
+buffTile,true,false,"[{""stat"":""atk"",""type"":""percentMult"",""value"":0.2}]",BoardCell

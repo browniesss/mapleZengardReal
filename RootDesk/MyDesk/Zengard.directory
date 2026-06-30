@@ -1,0 +1,23 @@
+{
+  "Id": "",
+  "GameId": "",
+  "EntryKey": "directory://25fb4d28eb024274bbaa7c47a790d6a0",
+  "ContentType": "x-mod/directory",
+  "Content": "",
+  "Usage": 0,
+  "UsePublish": 1,
+  "UseService": 0,
+  "CoreVersion": "26.5.0.0",
+  "StudioVersion": "",
+  "DynamicLoading": 0,
+  "ContentProto": {
+    "Use": "Json",
+    "Json": {
+      "entry_id": "directory://25fb4d28eb024274bbaa7c47a790d6a0",
+      "name": "Zengard",
+      "lock": false,
+      "folding": false,
+      "nameEditable": true
+    }
+  }
+}
