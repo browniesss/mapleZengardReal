@@ -1,0 +1,109 @@
+@Logic
+script BoardRenderProbe extends Logic
+    -- 보드 런 오케스트레이터(§1.5). 서버 전용.
+    -- 플레이어 입장 -> BoardMap 동적복제 -> 이동 -> BoardCatalog/BoardService로 데이터구동 보드 빌드.
+    -- 이전: 5x5 하드코딩. 현재: GetBoardDef(layoutId) -> BoardService:BuildBoard.
+
+    property string SourceMapName = "BoardMap"     -- Maker static RectTile 소스맵
+    property string LayoutId = "classic_7x7"        -- BoardLayouts 데이터셋 레이아웃 id
+
+    property any userEnterHandler = nil
+    property integer runCounter = 0
+    property any runs = nil                          -- runMapName -> run 핸들
+
+    @ExecSpace("ServerOnly")
+    method void OnBeginPlay()
+        -- 입장 트리거 연결: 입장하는 플레이어마다 새 동적 보드를 만든다.
+        self.runs = {}
+        self.userEnterHandler = _UserService:ConnectEvent(UserEnterEvent, self.OnUserEnter)
+        log("[BoardProbe] ready — source=" .. self.SourceMapName .. " layout=" .. self.LayoutId)
+    end
+
+    @ExecSpace("ServerOnly")
+    method void OnEndPlay()
+        -- OnBeginPlay에서 연결한 구독 해제(필수).
+        if self.userEnterHandler then
+            _UserService:DisconnectEvent(UserEnterEvent, self.userEnterHandler)
+            self.userEnterHandler = nil
+        end
+    end
+
+    @ExecSpace("ServerOnly")
+    method void OnUserEnter(UserEnterEvent event)
+        -- 플레이어 입장 -> BoardMap을 런별 동적맵으로 복제하고 그 안으로 이동시킨다.
+        self.runCounter = self.runCounter + 1
+        local runMapName = self.SourceMapName .. "_run" .. tostring(self.runCounter)
+
+        local code = _DynamicMapService:CreateDynamicMap(self.SourceMapName, runMapName)
+        if code ~= DynamicMapResultCode.Success then
+            log_error("[BoardProbe] CreateDynamicMap 실패: code=" .. tostring(code) .. " source=" .. self.SourceMapName)
+            return
+        end
+        log("[BoardProbe] 동적맵 생성됨: " .. runMapName)
+
+        local playerEntity = self:FindUserEntity(event.UserId)
+        if not isvalid(playerEntity) then
+            log_error("[BoardProbe] 플레이어 엔티티 못 찾음 userId=" .. tostring(event.UserId))
+            return
+        end
+
+        -- 동적맵으로 이동(비동기 전환).
+        playerEntity.PlayerComponent:MoveToMapPosition(runMapName, Vector2(0, 0))
+        log("[BoardProbe] 이동 요청: " .. runMapName)
+
+        -- 전환 완료를 폴링한 뒤 보드를 빌드한다.
+        self:WaitAndBuild(runMapName, 0)
+    end
+
+    @ExecSpace("ServerOnly")
+    method Entity FindUserEntity(string userId)
+        -- 입장한 플레이어 엔티티를 UserService에서 해석.
+        for _, user in ipairs(_UserService.UserEntities.Values) do
+            if isvalid(user) and isvalid(user.PlayerComponent) and user.PlayerComponent.UserId == userId then
+                return user
+            end
+        end
+        return nil
+    end
+
+    @ExecSpace("ServerOnly")
+    method void WaitAndBuild(string runMapName, integer attempt)
+        -- 플레이어가 동적맵에 실제로 입장할 때까지 폴링 후 보드 빌드.
+        if attempt > 50 then
+            log_error("[BoardProbe] 맵 입장 대기 타임아웃: " .. runMapName)
+            return
+        end
+        local users = _UserService:GetUsersByMapName(runMapName)
+        if users and #users > 0 and isvalid(users[1]) and isvalid(users[1].CurrentMap) then
+            self:BuildBoard(users[1].CurrentMap, runMapName)
+            return
+        end
+        _TimerService:SetTimerOnce(function() self:WaitAndBuild(runMapName, attempt + 1) end, 0.2)
+    end
+
+    @ExecSpace("ServerOnly")
+    method void BuildBoard(Entity mapEntity, string runMapName)
+        -- 데이터구동 빌드: BoardDef 로드 -> run.board 셋업 -> BoardService:BuildBoard.
+        local def = _BoardCatalogLogic:GetBoardDef(self.LayoutId)
+        if def == nil then
+            log_error("[BoardProbe] BoardDef 없음 layout=" .. self.LayoutId)
+            return
+        end
+        local run = {
+            board = {
+                defId = self.LayoutId,
+                mapEntityRef = mapEntity,
+                originOffset = nil,
+                cells = {},
+                instanceSeq = 0,
+            },
+        }
+        self.runs[runMapName] = run
+
+        local summary = _BoardService:BuildBoard(run, def)
+        log("[BoardProbe] BuildBoard(data) map=" .. runMapName
+            .. " layout=" .. self.LayoutId
+            .. " cells=" .. tostring(summary.cellsSpawned) .. "/" .. tostring(summary.cellsTotal)
+            .. " placements=" .. tostring(summary.placementsApplied))
+    end
+end

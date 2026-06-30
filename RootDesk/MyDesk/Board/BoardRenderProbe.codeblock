@@ -1,0 +1,33 @@
+{
+  "Id": "",
+  "GameId": "",
+  "EntryKey": "codeblock://ef522829-2378-4a8a-a8d4-fcb2566a4ce8",
+  "ContentType": "x-mod/codeblock",
+  "Content": "",
+  "Usage": 0,
+  "UsePublish": 1,
+  "UseService": 0,
+  "CoreVersion": "26.5.0.0",
+  "StudioVersion": "",
+  "DynamicLoading": 0,
+  "ContentProto": {
+    "Use": "Json",
+    "Json": {
+      "CoreVersion": {
+        "Major": 0,
+        "Minor": 2
+      },
+      "ScriptVersion": {
+        "Major": 1,
+        "Minor": 1
+      },
+      "Description": "",
+      "Id": "ef522829-2378-4a8a-a8d4-fcb2566a4ce8",
+      "Language": 1,
+      "Name": "BoardRenderProbe",
+      "Type": 5,
+      "Source": 0,
+      "Target": null
+    }
+  }
+}

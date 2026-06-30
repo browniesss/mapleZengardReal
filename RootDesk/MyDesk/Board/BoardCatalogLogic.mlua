@@ -1,0 +1,305 @@
+@Logic
+script BoardCatalogLogic extends Logic
+    -- 계층 ②: 데이터셋(serveronly) -> 불변 BoardDef 파싱·검증·캐시(BOARD-SPEC §2/§4).
+    -- deep-copy 게터로 소비측 출처 무지(현행 StageCatalog 계약과 동일).
+    -- 서버 권위: 모든 게터는 ServerOnly. 클라는 호출해도 무시됨(데이터셋 serveronly).
+
+    property boolean RunSelfTest = false   -- OnBeginPlay 자가검증(빌드·검증 로그). 본배선 검증 완료로 off(필요시 on).
+
+    property any layoutCache = nil      -- layoutId -> BoardDef
+    property any cellTypeCache = nil     -- typeId -> def
+    property any objectTypeCache = nil   -- objectId -> def
+    property any auraTypeCache = nil     -- auraId -> def
+    property any itemTypeCache = nil     -- itemId -> def
+
+    @ExecSpace("ServerOnly")
+    method void OnBeginPlay()
+        -- 캐시 초기화. 실제 빌드는 최초 접근 시 지연 수행.
+        self.layoutCache = {}
+        log("[BoardCatalog] ready")
+        if self.RunSelfTest then
+            self:SelfTest()
+        end
+    end
+
+    -- ===== 공용 헬퍼 =====
+
+    method any DeepCopy(any value)
+        -- 테이블이면 재귀 복제, 아니면 그대로. 게터가 내부 캐시 참조 노출 차단.
+        if type(value) ~= "table" then
+            return value
+        end
+        local out = {}
+        for k, v in pairs(value) do
+            out[k] = self:DeepCopy(v)
+        end
+        return out
+    end
+
+    method any ParseJsonCell(string text, any fallback)
+        -- 빈 셀("" / nil)은 fallback, 그 외 JsonUtil로 디코드(중첩 JSON 셀).
+        if text == nil or text == "" then
+            return fallback
+        end
+        return _JsonUtil:Decode(text)
+    end
+
+    method boolean ToBool(string text, boolean fallback)
+        -- CSV 문자열 -> boolean. "true"/"1"=true, "false"/"0"=false, 빈값=fallback.
+        if text == nil or text == "" then return fallback end
+        if text == "true" or text == "1" then return true end
+        if text == "false" or text == "0" then return false end
+        return fallback
+    end
+
+    method integer CountKeys(any t)
+        -- 테이블 키 개수(로그용).
+        local n = 0
+        for _ in pairs(t) do n = n + 1 end
+        return n
+    end
+
+    method boolean IsInsideDef(any def, integer col, integer row)
+        -- 범위 내 + 비-void. 검증·게터 공용 술어.
+        if col < 0 or col >= def.cols or row < 0 or row >= def.rows then
+            return false
+        end
+        local cell = def.cells[col .. "_" .. row]
+        if cell ~= nil and cell.typeId == "void" then
+            return false
+        end
+        return true
+    end
+
+    -- ===== CellTypes =====
+
+    @ExecSpace("ServerOnly")
+    method any GetCellTypes()
+        -- 모든 CellTypes 행 적재(typeId -> def). 1회 캐시. void 행은 없음(예약 키워드).
+        if self.cellTypeCache ~= nil then
+            return self.cellTypeCache
+        end
+        local result = {}
+        local ds = _DataService:GetTable("CellTypes")
+        if ds == nil then
+            log_error("[BoardCatalog] CellTypes 데이터셋 없음")
+            self.cellTypeCache = result
+            return result
+        end
+        for _, row in ipairs(ds:GetAllRow()) do
+            local typeId = row:GetItem("typeId")
+            if typeId ~= nil and typeId ~= "" then
+                result[typeId] = {
+                    typeId = typeId,
+                    occupiable = self:ToBool(row:GetItem("occupiable"), true),
+                    blocksMove = self:ToBool(row:GetItem("blocksMove"), false),
+                    modifiers = self:ParseJsonCell(row:GetItem("modifiers"), {}),
+                    model = row:GetItem("model"),
+                }
+            end
+        end
+        self.cellTypeCache = result
+        return result
+    end
+
+    -- ===== ObjectTypes / AuraTypes / ItemTypes =====
+
+    @ExecSpace("ServerOnly")
+    method any GetObjectType(string objectId)
+        -- objectId -> def(deep-copy). 미존재 시 nil.
+        if self.objectTypeCache == nil then
+            self.objectTypeCache = {}
+            local ds = _DataService:GetTable("ObjectTypes")
+            if ds ~= nil then
+                for _, row in ipairs(ds:GetAllRow()) do
+                    local id = row:GetItem("objectId")
+                    if id ~= nil and id ~= "" then
+                        self.objectTypeCache[id] = {
+                            objectId = id,
+                            blocksMove = self:ToBool(row:GetItem("blocksMove"), false),
+                            blocksSkill = self:ToBool(row:GetItem("blocksSkill"), false),
+                            gimmickId = row:GetItem("gimmickId"),
+                            model = row:GetItem("model"),
+                        }
+                    end
+                end
+            end
+        end
+        return self:DeepCopy(self.objectTypeCache[objectId])
+    end
+
+    @ExecSpace("ServerOnly")
+    method any GetAuraType(string auraId)
+        -- auraId -> def(deep-copy). effect = Modifier[](§3.0).
+        if self.auraTypeCache == nil then
+            self.auraTypeCache = {}
+            local ds = _DataService:GetTable("AuraTypes")
+            if ds ~= nil then
+                for _, row in ipairs(ds:GetAllRow()) do
+                    local id = row:GetItem("auraId")
+                    if id ~= nil and id ~= "" then
+                        self.auraTypeCache[id] = {
+                            auraId = id,
+                            effect = self:ParseJsonCell(row:GetItem("effect"), {}),
+                            model = row:GetItem("model"),
+                        }
+                    end
+                end
+            end
+        end
+        return self:DeepCopy(self.auraTypeCache[auraId])
+    end
+
+    @ExecSpace("ServerOnly")
+    method any GetItemType(string itemId)
+        -- itemId -> def(deep-copy). buffEffect = Modifier[], turns = 지속 턴.
+        if self.itemTypeCache == nil then
+            self.itemTypeCache = {}
+            local ds = _DataService:GetTable("ItemTypes")
+            if ds ~= nil then
+                for _, row in ipairs(ds:GetAllRow()) do
+                    local id = row:GetItem("itemId")
+                    if id ~= nil and id ~= "" then
+                        self.itemTypeCache[id] = {
+                            itemId = id,
+                            buffEffect = self:ParseJsonCell(row:GetItem("buffEffect"), {}),
+                            turns = math.floor(tonumber(row:GetItem("turns")) or 0),
+                            model = row:GetItem("model"),
+                        }
+                    end
+                end
+            end
+        end
+        return self:DeepCopy(self.itemTypeCache[itemId])
+    end
+
+    -- ===== BoardDef =====
+
+    @ExecSpace("ServerOnly")
+    method any GetBoardDef(string layoutId)
+        -- 레이아웃 BoardDef 반환(deep-copy). 최초 1회 빌드·검증 후 캐시.
+        if self.layoutCache == nil then self.layoutCache = {} end
+        if self.layoutCache[layoutId] == nil then
+            local def = self:BuildBoardDef(layoutId)
+            if def == nil then return nil end
+            self.layoutCache[layoutId] = def
+        end
+        return self:DeepCopy(self.layoutCache[layoutId])
+    end
+
+    @ExecSpace("ServerOnly")
+    method any BuildBoardDef(string layoutId)
+        -- BoardLayouts 행 -> 불변 BoardDef 조립 + 적재시 검증(§6).
+        local ds = _DataService:GetTable("BoardLayouts")
+        if ds == nil then
+            log_error("[BoardCatalog] BoardLayouts 데이터셋 없음")
+            return nil
+        end
+        local row = ds:FindRow("layoutId", layoutId)
+        if row == nil then
+            log_error("[BoardCatalog] 레이아웃 없음: " .. layoutId)
+            return nil
+        end
+
+        local cols = math.floor(tonumber(row:GetItem("cols")) or 0)
+        local rows = math.floor(tonumber(row:GetItem("rows")) or 0)
+        local cellSize = tonumber(row:GetItem("cellSize")) or 1.0
+        local cellOverrides = self:ParseJsonCell(row:GetItem("cellOverrides"), {})
+        local zonesRaw = self:ParseJsonCell(row:GetItem("zones"), {})
+        local initialPlacements = self:ParseJsonCell(row:GetItem("initialPlacements"), {})
+
+        local def = {
+            layoutId = layoutId,
+            cols = cols,
+            rows = rows,
+            cellSize = cellSize,
+            cells = {},
+            cellTypes = self:DeepCopy(self:GetCellTypes()),
+            zones = {},
+            initialPlacements = initialPlacements,
+        }
+
+        -- cellOverrides -> cells map (기본=plain, 예외만 명시; void 포함)
+        for _, ov in ipairs(cellOverrides) do
+            local pos = ov.pos
+            if pos ~= nil and pos[1] ~= nil and pos[2] ~= nil then
+                local c = math.floor(pos[1])
+                local r = math.floor(pos[2])
+                if c >= 0 and c < cols and r >= 0 and r < rows then
+                    def.cells[c .. "_" .. r] = { typeId = ov.type }
+                else
+                    log_warning("[BoardCatalog] cellOverride 범위초과 layout=" .. layoutId .. " pos=" .. tostring(c) .. "," .. tostring(r))
+                end
+            end
+        end
+
+        -- zones 검증(IsInside) + 중복 dedup
+        for zoneName, coords in pairs(zonesRaw) do
+            local seen = {}
+            local cleaned = {}
+            for _, cell in ipairs(coords) do
+                local c = math.floor(cell[1])
+                local r = math.floor(cell[2])
+                local key = c .. "_" .. r
+                if not self:IsInsideDef(def, c, r) then
+                    log_warning("[BoardCatalog] zone '" .. zoneName .. "' 무효좌표(범위밖/void) " .. key .. " layout=" .. layoutId)
+                elseif seen[key] then
+                    log_warning("[BoardCatalog] zone '" .. zoneName .. "' 중복좌표 " .. key)
+                else
+                    seen[key] = true
+                    table.insert(cleaned, {c, r})
+                end
+            end
+            def.zones[zoneName] = cleaned
+        end
+
+        -- initialPlacements zone 참조 검증
+        for _, p in ipairs(initialPlacements) do
+            if p.place == "zone" then
+                if p.zone == nil or def.zones[p.zone] == nil then
+                    log_error("[BoardCatalog] initialPlacement 알수없는 zone 참조: " .. tostring(p.zone) .. " layout=" .. layoutId)
+                end
+            end
+        end
+
+        log("[BoardCatalog] BoardDef 빌드: " .. layoutId .. " " .. tostring(cols) .. "x" .. tostring(rows)
+            .. " cellSize=" .. tostring(cellSize)
+            .. " overrides=" .. tostring(#cellOverrides)
+            .. " zones=" .. tostring(self:CountKeys(def.zones))
+            .. " placements=" .. tostring(#initialPlacements))
+        return def
+    end
+
+    -- ===== 자가검증(임시) =====
+
+    @ExecSpace("ServerOnly")
+    method void SelfTest()
+        -- 데이터셋 로드·파싱·검증 동작 확인용. 본배선 후 RunSelfTest=false로 끈다.
+        local d7 = self:GetBoardDef("classic_7x7")
+        if d7 == nil then
+            log_error("[BoardCatalog][SelfTest] classic_7x7 로드 실패")
+        else
+            local blocked = d7.cells["1_1"]
+            local voided = d7.cells["0_6"]
+            log("[BoardCatalog][SelfTest] classic_7x7 cols=" .. tostring(d7.cols) .. " rows=" .. tostring(d7.rows)
+                .. " cell[1_1]=" .. tostring(blocked and blocked.typeId or "nil")
+                .. " cell[0_6]=" .. tostring(voided and voided.typeId or "nil")
+                .. " IsInside(0,6)=" .. tostring(self:IsInsideDef(d7, 0, 6))
+                .. " IsInside(3,3)=" .. tostring(self:IsInsideDef(d7, 3, 3))
+                .. " cellTypes=" .. tostring(self:CountKeys(d7.cellTypes))
+                .. " zones=" .. tostring(self:CountKeys(d7.zones)))
+        end
+        local aura = self:GetAuraType("rage")
+        local item = self:GetItemType("atkPotion")
+        local obj = self:GetObjectType("rock")
+        log("[BoardCatalog][SelfTest] aura.rage.effect[1].stat=" .. tostring(aura and aura.effect[1] and aura.effect[1].stat or "nil")
+            .. " item.atkPotion.turns=" .. tostring(item and item.turns or "nil")
+            .. " object.rock.blocksSkill=" .. tostring(obj and obj.blocksSkill or "nil"))
+
+        -- 게터 격리 검증: 반환본 변형이 캐시 원본에 영향 없어야 함(deep-copy).
+        local a = self:GetBoardDef("classic_7x7")
+        a.cols = -999
+        local b = self:GetBoardDef("classic_7x7")
+        log("[BoardCatalog][SelfTest] deep-copy 격리 OK=" .. tostring(b.cols == 7))
+    end
+end
