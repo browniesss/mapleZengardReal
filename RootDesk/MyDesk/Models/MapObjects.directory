@@ -1,0 +1,23 @@
+{
+  "Id": "",
+  "GameId": "",
+  "EntryKey": "directory://e14a81b1fbf74ea58d0f214660b2ba5e",
+  "ContentType": "x-mod/directory",
+  "Content": "",
+  "Usage": 0,
+  "UsePublish": 1,
+  "UseService": 0,
+  "CoreVersion": "26.5.0.0",
+  "StudioVersion": "",
+  "DynamicLoading": 0,
+  "ContentProto": {
+    "Use": "Json",
+    "Json": {
+      "entry_id": "directory://e14a81b1fbf74ea58d0f214660b2ba5e",
+      "name": "MapObjects",
+      "lock": false,
+      "folding": false,
+      "nameEditable": true
+    }
+  }
+}
