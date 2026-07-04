@@ -1,0 +1,2 @@
+﻿itemId,buffEffect,turns,model
+atkPotion,"[{""stat"":""atk"",""type"":""percentAdd"",""value"":0.5}]",3,AtkPotionItem

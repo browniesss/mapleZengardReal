@@ -1,0 +1,2 @@
+﻿auraId,effect,model
+rage,"[{""stat"":""atk"",""type"":""percentMult"",""value"":0.3}]",RageAura

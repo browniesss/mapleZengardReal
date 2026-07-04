@@ -1,0 +1,642 @@
+@Logic
+script BoardService extends Logic
+    -- 계층 ③: 무상태 레이어드 점유 + 지오메트리 + 배치해석 + 효과 훅(BOARD-SPEC §5~§8).
+    -- 무상태: 점유 상태는 인자로 받는 board 핸들(run.board)에만 산다. Logic은 상태 보관 안 함.
+    -- 타입 조회(object/aura/item)는 _BoardCatalogLogic 위임. 모든 점유/질의 API는 ServerOnly.
+    -- BuildBoard/스폰(생명주기)은 Step 3에서 추가.
+
+    property boolean RunSelfTest = false   -- OnBeginPlay 자가검증. 본배선 검증 완료로 off(필요시 on).
+
+    @ExecSpace("ServerOnly")
+    method void OnBeginPlay()
+        -- 무상태라 초기화할 것 없음. 자가검증만.
+        log("[BoardService] ready")
+        if self.RunSelfTest then
+            self:SelfTest()
+        end
+    end
+
+    -- ===== 순수 지오메트리 (ambient) =====
+
+    method string CellKey(integer col, integer row)
+        -- 칸 키 문자열. 전 레이어 공통.
+        return col .. "_" .. row
+    end
+
+    method boolean IsInside(any def, integer col, integer row)
+        -- 범위 내 + 비-void.
+        if col < 0 or col >= def.cols or row < 0 or row >= def.rows then
+            return false
+        end
+        local cell = def.cells[col .. "_" .. row]
+        if cell ~= nil and cell.typeId == "void" then
+            return false
+        end
+        return true
+    end
+
+    method Vector3 CellToWorld(any def, any board, integer col, integer row)
+        -- 셀(col,row) -> 월드 좌표(중심 기준). 아래 행(작은 row)이 앞(작은 z). originOffset 가산.
+        local halfC = (def.cols - 1) * 0.5
+        local halfR = (def.rows - 1) * 0.5
+        local x = (col - halfC) * def.cellSize
+        local y = (row - halfR) * def.cellSize
+        local z = row * 0.01
+        local off = board.originOffset
+        if off ~= nil then
+            return Vector3(x + off.x, y + off.y, z + off.z)
+        end
+        return Vector3(x, y, z)
+    end
+
+    method any WorldToCell(any def, any board, Vector3 pos)
+        -- 월드 좌표 -> 셀 {col,row}(반올림). 범위 밖이면 nil.
+        local ox = 0
+        local oy = 0
+        local off = board.originOffset
+        if off ~= nil then ox = off.x oy = off.y end
+        local halfC = (def.cols - 1) * 0.5
+        local halfR = (def.rows - 1) * 0.5
+        local col = math.floor((pos.x - ox) / def.cellSize + halfC + 0.5)
+        local row = math.floor((pos.y - oy) / def.cellSize + halfR + 0.5)
+        if col < 0 or col >= def.cols or row < 0 or row >= def.rows then
+            return nil
+        end
+        return { col = col, row = row }
+    end
+
+    -- ===== Ground 조회 =====
+
+    method any GetGround(any def, integer col, integer row)
+        -- 칸의 Ground 셀타입 def(기본 plain). void/미정의는 nil.
+        local cell = def.cells[col .. "_" .. row]
+        local typeId = "plain"
+        if cell ~= nil then typeId = cell.typeId end
+        if typeId == "void" then return nil end
+        return def.cellTypes[typeId]
+    end
+
+    -- ===== 레이어별 배치 술어 (§5) =====
+
+    method any GetCellRecord(any board, integer col, integer row)
+        -- board.cells[key] 레코드(없으면 nil).
+        return board.cells[col .. "_" .. row]
+    end
+
+    method boolean CanPlaceUnit(any def, any board, integer col, integer row)
+        -- IsInside ∧ occupiable ∧ ¬blocksMove ∧ ¬(Object.blocksMove) ∧ unit 빈칸.
+        if not self:IsInside(def, col, row) then return false end
+        local g = self:GetGround(def, col, row)
+        if g == nil or not g.occupiable or g.blocksMove then return false end
+        local rec = self:GetCellRecord(board, col, row)
+        if rec ~= nil then
+            if rec.unit ~= nil then return false end
+            if rec.object ~= nil then
+                local ot = _BoardCatalogLogic:GetObjectType(rec.object.objectId)
+                if ot ~= nil and ot.blocksMove then return false end
+            end
+        end
+        return true
+    end
+
+    method boolean CanPlaceObject(any def, any board, integer col, integer row)
+        -- IsInside ∧ ¬Ground.blocksMove ∧ object 빈칸.
+        if not self:IsInside(def, col, row) then return false end
+        local g = self:GetGround(def, col, row)
+        if g == nil or g.blocksMove then return false end
+        local rec = self:GetCellRecord(board, col, row)
+        if rec ~= nil and rec.object ~= nil then return false end
+        return true
+    end
+
+    method boolean CanPlaceAura(any def, any board, integer col, integer row)
+        -- IsInside ∧ aura 빈칸 (지형 무관).
+        if not self:IsInside(def, col, row) then return false end
+        local rec = self:GetCellRecord(board, col, row)
+        if rec ~= nil and rec.aura ~= nil then return false end
+        return true
+    end
+
+    method boolean CanPlaceItem(any def, any board, integer col, integer row)
+        -- IsInside ∧ occupiable ∧ item 빈칸.
+        if not self:IsInside(def, col, row) then return false end
+        local g = self:GetGround(def, col, row)
+        if g == nil or not g.occupiable then return false end
+        local rec = self:GetCellRecord(board, col, row)
+        if rec ~= nil and rec.item ~= nil then return false end
+        return true
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean CanPlace(any def, any board, integer col, integer row, string layer)
+        -- §5 레이어별 술어 통합 진입점.
+        if layer == "unit" then return self:CanPlaceUnit(def, board, col, row) end
+        if layer == "object" then return self:CanPlaceObject(def, board, col, row) end
+        if layer == "aura" then return self:CanPlaceAura(def, board, col, row) end
+        if layer == "item" then return self:CanPlaceItem(def, board, col, row) end
+        log_error("[BoardService] CanPlace 알수없는 layer: " .. tostring(layer))
+        return false
+    end
+
+    -- ===== 레이어드 점유 =====
+
+    method any EnsureCell(any board, integer col, integer row)
+        -- board.cells[key] 레코드 보장(없으면 생성).
+        local key = col .. "_" .. row
+        if board.cells[key] == nil then board.cells[key] = {} end
+        return board.cells[key]
+    end
+
+    method string NextInstanceId(any board)
+        -- board 단위 고유 instanceId 발급(휘발 카운터).
+        if board.instanceSeq == nil then board.instanceSeq = 0 end
+        board.instanceSeq = board.instanceSeq + 1
+        return "inst_" .. board.instanceSeq
+    end
+
+    @ExecSpace("ServerOnly")
+    method string TryOccupy(any def, any board, integer col, integer row, string layer, any payload)
+        -- CanPlace 통과 시 instanceId 발급·점유기록 후 반환, 실패 시 nil.
+        if not self:CanPlace(def, board, col, row, layer) then
+            return nil
+        end
+        local instanceId = self:NextInstanceId(board)
+        local rec = self:EnsureCell(board, col, row)
+        if layer == "unit" then
+            rec.unit = { occupantId = payload.occupantId, instanceId = instanceId, occupantKind = payload.occupantKind }
+        elseif layer == "object" then
+            rec.object = { objectId = payload.objectId, instanceId = instanceId }
+        elseif layer == "aura" then
+            rec.aura = { auraId = payload.auraId, instanceId = instanceId }
+        elseif layer == "item" then
+            rec.item = { itemId = payload.itemId, instanceId = instanceId }
+        else
+            log_error("[BoardService] TryOccupy 알수없는 layer: " .. tostring(layer))
+            return nil
+        end
+        return instanceId
+    end
+
+    @ExecSpace("ServerOnly")
+    method void Release(any board, integer col, integer row, string layer, string instanceId)
+        -- instanceId 일치 시에만 해제. 불일치 무시(late-kill 보호).
+        local rec = self:GetCellRecord(board, col, row)
+        if rec == nil then return end
+        local cur = rec[layer]
+        if cur == nil then return end
+        if cur.instanceId ~= instanceId then return end
+        rec[layer] = nil
+    end
+
+    @ExecSpace("ServerOnly")
+    method any GetCellLayer(any board, integer col, integer row, string layer)
+        -- 칸의 layer 점유 레코드(없으면 nil).
+        local rec = self:GetCellRecord(board, col, row)
+        if rec == nil then return nil end
+        return rec[layer]
+    end
+
+    @ExecSpace("ServerOnly")
+    method string ReplaceOccupant(any def, any board, integer col, integer row, string layer, string oldInstanceId, any payload)
+        -- old 일치 시 제거 후 재점유(CanPlace 검증). old 불일치/신규 불충족 시 nil.
+        local cur = self:GetCellLayer(board, col, row, layer)
+        if cur == nil or cur.instanceId ~= oldInstanceId then
+            return nil
+        end
+        local rec = self:GetCellRecord(board, col, row)
+        rec[layer] = nil
+        local newId = self:TryOccupy(def, board, col, row, layer, payload)
+        if newId == nil then
+            -- 재점유 실패: 원복하지 않고 비움(호출자 책임). 경고만.
+            log_warning("[BoardService] ReplaceOccupant 재점유 실패 layer=" .. tostring(layer) .. " " .. self:CellKey(col, row))
+        end
+        return newId
+    end
+
+    -- ===== 질의 =====
+
+    @ExecSpace("ServerOnly")
+    method boolean BlocksSkill(any def, any board, integer col, integer row)
+        -- Object.blocksSkill (combat 조회용).
+        local rec = self:GetCellRecord(board, col, row)
+        if rec == nil or rec.object == nil then return false end
+        local ot = _BoardCatalogLogic:GetObjectType(rec.object.objectId)
+        return ot ~= nil and ot.blocksSkill == true
+    end
+
+    @ExecSpace("ServerOnly")
+    method table GetEmptyCells(any def, any board, string layer, any zone)
+        -- CanPlace[layer] 만족 칸 목록(zone 지정 시 그 안만). 반환=[{col,row},...].
+        local result = {}
+        if zone ~= nil then
+            local coords = def.zones[zone]
+            if coords == nil then return result end
+            for _, cell in ipairs(coords) do
+                if self:CanPlace(def, board, cell[1], cell[2], layer) then
+                    table.insert(result, { cell[1], cell[2] })
+                end
+            end
+        else
+            for r = 0, def.rows - 1 do
+                for c = 0, def.cols - 1 do
+                    if self:CanPlace(def, board, c, r, layer) then
+                        table.insert(result, { c, r })
+                    end
+                end
+            end
+        end
+        return result
+    end
+
+    @ExecSpace("ServerOnly")
+    method integer GetOccupantCount(any board, string layer, any kind)
+        -- layer 점유 칸 수. unit+kind 지정 시 occupantKind 일치만 카운트.
+        local n = 0
+        for _, rec in pairs(board.cells) do
+            local cur = rec[layer]
+            if cur ~= nil then
+                if kind == nil then
+                    n = n + 1
+                elseif cur.occupantKind == kind then
+                    n = n + 1
+                end
+            end
+        end
+        return n
+    end
+
+    -- ===== 배치 해석 (§6) =====
+
+    method table ShuffleTake(table candidates, integer count)
+        -- 부분 Fisher-Yates: 후보에서 중복없이 min(count,#) 개 추출.
+        local n = #candidates
+        local take = count
+        if take > n then take = n end
+        for i = 1, take do
+            local j = _UtilLogic:RandomIntegerRange(i, n)
+            local tmp = candidates[i]
+            candidates[i] = candidates[j]
+            candidates[j] = tmp
+        end
+        local out = {}
+        for i = 1, take do
+            table.insert(out, candidates[i])
+        end
+        return out
+    end
+
+    @ExecSpace("ServerOnly")
+    method table ResolvePlacement(any run, any def, any spec, string layer)
+        -- §6: 항상 (col,row) 배열 반환(0=빈칸없음). count(생략=1)는 random/zone만.
+        local board = run.board
+        local place = spec.place
+        if place == nil then place = "random" end
+        local count = spec.count
+        if count == nil then count = 1 end
+
+        if place == "fixed" then
+            local pos = spec.pos
+            if pos ~= nil and self:CanPlace(def, board, pos[1], pos[2], layer) then
+                return { { pos[1], pos[2] } }
+            end
+            log_warning("[BoardService] fixed 배치 스킵(불충족) layer=" .. tostring(layer))
+            return {}
+        elseif place == "center" then
+            return self:NearestCenter(def, board, layer)
+        elseif place == "zone" then
+            local cands = self:GetEmptyCells(def, board, layer, spec.zone)
+            return self:ShuffleTake(cands, count)
+        else
+            -- random (기본)
+            local cands = self:GetEmptyCells(def, board, layer, nil)
+            return self:ShuffleTake(cands, count)
+        end
+    end
+
+    method table NearestCenter(any def, any board, string layer)
+        -- 보드중심 최근접 1칸(동률 랜덤). 0~1개.
+        local cands = self:GetEmptyCells(def, board, layer, nil)
+        if #cands == 0 then return {} end
+        local cx = (def.cols - 1) * 0.5
+        local cy = (def.rows - 1) * 0.5
+        local best = {}
+        local bestD = nil
+        for _, cell in ipairs(cands) do
+            local dx = cell[1] - cx
+            local dy = cell[2] - cy
+            local d = dx * dx + dy * dy
+            if bestD == nil or d < bestD then
+                bestD = d
+                best = { cell }
+            elseif d == bestD then
+                table.insert(best, cell)
+            end
+        end
+        if #best == 1 then return { best[1] } end
+        local pick = _UtilLogic:RandomIntegerRange(1, #best)
+        return { best[pick] }
+    end
+
+    -- ===== 효과 발화 훅 (§8) — 보드는 Modifier[] 생성·전달만 =====
+
+    method table CloneModifiersWithSource(any modifiers, string source, any duration)
+        -- Modifier[] 복제 + source/duration 채움(원본 def 비오염).
+        local out = {}
+        if modifiers == nil then return out end
+        for _, m in ipairs(modifiers) do
+            local copy = { stat = m.stat, type = m.type, value = m.value, source = source }
+            if duration ~= nil then copy.duration = duration end
+            table.insert(out, copy)
+        end
+        return out
+    end
+
+    @ExecSpace("ServerOnly")
+    method table OnUnitEnter(any def, any board, integer col, integer row)
+        -- 진입 칸의 cell modifier + aura.effect 수집(source 채움, duration 생략=소스관리).
+        -- item 점유 시: Item Release + buffEffect를 duration="turns:N"으로 포함(픽업).
+        local result = {}
+        -- 1) Ground cell modifiers
+        local g = self:GetGround(def, col, row)
+        if g ~= nil and g.modifiers ~= nil then
+            local mods = self:CloneModifiersWithSource(g.modifiers, "cell:" .. g.typeId, nil)
+            for _, m in ipairs(mods) do table.insert(result, m) end
+        end
+        local rec = self:GetCellRecord(board, col, row)
+        if rec == nil then return result end
+        -- 2) Aura effect
+        if rec.aura ~= nil then
+            local at = _BoardCatalogLogic:GetAuraType(rec.aura.auraId)
+            if at ~= nil then
+                local mods = self:CloneModifiersWithSource(at.effect, "aura:" .. rec.aura.auraId, nil)
+                for _, m in ipairs(mods) do table.insert(result, m) end
+            end
+        end
+        -- 3) Item pickup (consume)
+        if rec.item ~= nil then
+            local it = _BoardCatalogLogic:GetItemType(rec.item.itemId)
+            if it ~= nil then
+                local dur = "turns:" .. tostring(it.turns)
+                local mods = self:CloneModifiersWithSource(it.buffEffect, "item:" .. rec.item.itemId, dur)
+                for _, m in ipairs(mods) do table.insert(result, m) end
+            end
+            self:Release(board, col, row, "item", rec.item.instanceId)
+        end
+        return result
+    end
+
+    @ExecSpace("ServerOnly")
+    method table OnUnitExit(any def, any board, integer col, integer row)
+        -- 이탈로 해제할 source[](소스관리 duration). turns:N 아이템 버프는 해제 대상 아님.
+        local result = {}
+        local g = self:GetGround(def, col, row)
+        if g ~= nil and g.modifiers ~= nil and #g.modifiers > 0 then
+            table.insert(result, "cell:" .. g.typeId)
+        end
+        local rec = self:GetCellRecord(board, col, row)
+        if rec ~= nil and rec.aura ~= nil then
+            table.insert(result, "aura:" .. rec.aura.auraId)
+        end
+        return result
+    end
+
+    -- ===== 랜덤 셀 오버라이드 해석 (런마다, §3.1) =====
+
+    method table CollectReservedCells(any def)
+        -- 랜덤 셀 오버라이드가 피해야 할 예약칸 집합: zones 전체 + 고정(pos) initialPlacements.
+        -- 스폰존이 블록으로 막히거나 고정 배치(바위 등)가 스킵되는 것을 방지.
+        local reserved = {}
+        for _, coords in pairs(def.zones) do
+            for _, cell in ipairs(coords) do
+                reserved[cell[1] .. "_" .. cell[2]] = true
+            end
+        end
+        for _, p in ipairs(def.initialPlacements) do
+            if p.place == "fixed" and p.pos ~= nil then
+                reserved[p.pos[1] .. "_" .. p.pos[2]] = true
+            end
+        end
+        return reserved
+    end
+
+    @ExecSpace("ServerOnly")
+    method void ResolveRandomCellOverrides(any def)
+        -- place="random" 셀 오버라이드를 이 런의 def 복사본에 확정(런마다 다른 배치).
+        -- def는 GetBoardDef의 deep-copy라 카탈로그 캐시는 오염되지 않는다.
+        -- 후보 = 범위내(비-void) ∧ 미오버라이드(plain) ∧ 예약칸 제외. 부족하면 있는 만큼만+경고.
+        if def.randomCellOverrides == nil or #def.randomCellOverrides == 0 then return end
+        local reserved = self:CollectReservedCells(def)
+        for _, ov in ipairs(def.randomCellOverrides) do
+            local cands = {}
+            for r = 0, def.rows - 1 do
+                for c = 0, def.cols - 1 do
+                    local key = c .. "_" .. r
+                    if def.cells[key] == nil and reserved[key] == nil and self:IsInside(def, c, r) then
+                        table.insert(cands, { c, r })
+                    end
+                end
+            end
+            local picked = self:ShuffleTake(cands, ov.count)
+            if #picked < ov.count then
+                log_warning("[BoardService] random cellOverride 후보 부족 type=" .. tostring(ov.type)
+                    .. " " .. tostring(#picked) .. "/" .. tostring(ov.count))
+            end
+            for _, cell in ipairs(picked) do
+                def.cells[cell[1] .. "_" .. cell[2]] = { typeId = ov.type }
+                log("[BoardService] random cellOverride: " .. tostring(ov.type) .. " @ " .. self:CellKey(cell[1], cell[2]))
+            end
+        end
+    end
+
+    -- ===== 생명주기 (런타임 스폰 + initialPlacements 시딩, §1.5/§7) =====
+
+    @ExecSpace("ServerOnly")
+    method table BuildBoard(any run, any def)
+        -- 칸마다 BoardSlot 앵커(scale1, 비가시)를 셀 월드좌표에 스폰 -> 그 자식으로 Ground 타일을
+        -- local 원점(0,0)에 배치. 자식은 부모 slot 기준 local 좌표라 자동 중앙 정렬(좌표 재계산 불필요).
+        -- 점유/오브젝트/아이템/유닛도 같은 slot의 자식이 되어 정확히 칸 중앙에 놓인다. 점유는 run.board(휘발).
+        local board = run.board
+        local mapEntity = board.mapEntityRef
+        self:ResolveRandomCellOverrides(def)   -- 타일 스폰 전에 랜덤 지형 확정(블록 등)
+        board.slots = {}
+        local cellsSpawned = 0
+        local cellsTotal = 0
+        for r = 0, def.rows - 1 do
+            for c = 0, def.cols - 1 do
+                if self:IsInside(def, c, r) then
+                    cellsTotal = cellsTotal + 1
+                    -- 1) 칸 앵커 slot: 셀 월드좌표에 배치(맵의 자식)
+                    local slot = _SpawnService:SpawnByModelId("BoardSlot", "Slot_" .. c .. "_" .. r, self:CellToWorld(def, board, c, r), mapEntity)
+                    if not isvalid(slot) then
+                        log_error("[BoardService] slot 스폰 실패 (" .. c .. "," .. r .. ")")
+                    else
+                        board.slots[self:CellKey(c, r)] = slot
+                        -- 2) Ground 타일: slot의 자식, local 원점(=칸 중앙)
+                        local g = self:GetGround(def, c, r)
+                        local model = "BoardCell"
+                        if g ~= nil and g.model ~= nil and g.model ~= "" then
+                            model = g.model
+                        end
+                        local tile = _SpawnService:SpawnByModelId(model, "Tile_" .. c .. "_" .. r, Vector3(0, 0, 0), slot)
+                        if isvalid(tile) then
+                            cellsSpawned = cellsSpawned + 1
+                        else
+                            log_error("[BoardService] 타일 스폰 실패 (" .. c .. "," .. r .. ") model=" .. model)
+                        end
+                    end
+                end
+            end
+        end
+        local placementsApplied = self:ApplyInitialPlacements(run, def)
+        return { cellsSpawned = cellsSpawned, cellsTotal = cellsTotal, placementsApplied = placementsApplied }
+    end
+
+    method any PayloadFromSpec(any spec)
+        -- initialPlacement spec에서 레이어별 id 필드만 추출 -> TryOccupy payload.
+        local layer = spec.layer
+        if layer == "object" then return { objectId = spec.objectId } end
+        if layer == "aura" then return { auraId = spec.auraId } end
+        if layer == "item" then return { itemId = spec.itemId } end
+        if layer == "unit" then return { occupantId = spec.occupantId, occupantKind = spec.occupantKind } end
+        return {}
+    end
+
+    @ExecSpace("ServerOnly")
+    method void SpawnLayerVisual(any run, any def, integer col, integer row, string layer, any payload)
+        -- 점유 레이어 비주얼을 해당 칸 slot의 자식으로 local 원점에 스폰(자동 중앙). 셀보다 앞(z-0.05).
+        local board = run.board
+        local slot = board.slots[self:CellKey(col, row)]
+        if slot == nil or not isvalid(slot) then
+            log_warning("[BoardService] slot 없음 -> 비주얼 스킵 (" .. col .. "," .. row .. ") layer=" .. layer)
+            return
+        end
+        local model = nil
+        if layer == "object" then
+            local t = _BoardCatalogLogic:GetObjectType(payload.objectId)
+            if t ~= nil then model = t.model end
+        elseif layer == "aura" then
+            local t = _BoardCatalogLogic:GetAuraType(payload.auraId)
+            if t ~= nil then model = t.model end
+        elseif layer == "item" then
+            local t = _BoardCatalogLogic:GetItemType(payload.itemId)
+            if t ~= nil then model = t.model end
+        elseif layer == "unit" then
+            model = "BoardCell"   -- 임시 placeholder(유닛 비주얼은 웨이브/몬스터 시스템 소유)
+        end
+        if model == nil or model == "" then return end
+        local visual = _SpawnService:SpawnByModelId(model, layer .. "_" .. col .. "_" .. row, Vector3(0, 0, -0.05), slot)
+        if not isvalid(visual) then
+            log_warning("[BoardService] " .. layer .. " 비주얼 스폰 실패 (" .. col .. "," .. row .. ")")
+            return
+        end
+        -- 점유 레코드에 엔티티 핸들 부착(비주얼 생명주기 추적)
+        local rec = self:GetCellLayer(board, col, row, layer)
+        if rec ~= nil then rec.entity = visual end
+    end
+
+    @ExecSpace("ServerOnly")
+    method integer ApplyPlacements(any run, any def, table specs, string tag)
+        -- 배치 spec 목록 공용 적용기: ResolvePlacement -> TryOccupy -> 비주얼. tag는 로그 구분용.
+        local board = run.board
+        local applied = 0
+        for _, spec in ipairs(specs) do
+            local layer = spec.layer
+            if layer == nil then
+                log_warning("[BoardService] " .. tag .. " layer 누락")
+            else
+                local cells = self:ResolvePlacement(run, def, spec, layer)
+                for _, cell in ipairs(cells) do
+                    local payload = self:PayloadFromSpec(spec)
+                    local id = self:TryOccupy(def, board, cell[1], cell[2], layer, payload)
+                    if id ~= nil then
+                        applied = applied + 1
+                        log("[BoardService] " .. tag .. ": " .. layer .. " @ " .. self:CellKey(cell[1], cell[2]))
+                        self:SpawnLayerVisual(run, def, cell[1], cell[2], layer, payload)
+                    end
+                end
+            end
+        end
+        return applied
+    end
+
+    @ExecSpace("ServerOnly")
+    method integer ApplyInitialPlacements(any run, any def)
+        -- 웨이브 이전 사전배치(§3.1/§6).
+        return self:ApplyPlacements(run, def, def.initialPlacements, "initialPlacement")
+    end
+
+    @ExecSpace("ServerOnly")
+    method integer ApplyWavePlacements(any run, any def, any stageDef, integer wave)
+        -- 스테이지 웨이브 배치(§3.6): stageDef.wavePlacements 중 wave 번호 일치분만 적용.
+        -- WaveGen 페이즈(BoardFlowLogic)가 호출. stageDef 없거나 해당 웨이브 배치 없으면 0.
+        if stageDef == nil or stageDef.wavePlacements == nil then return 0 end
+        local specs = {}
+        for _, p in ipairs(stageDef.wavePlacements) do
+            if p.wave == wave then
+                table.insert(specs, p)
+            end
+        end
+        if #specs == 0 then return 0 end
+        return self:ApplyPlacements(run, def, specs, "wavePlacement(wave=" .. tostring(wave) .. ")")
+    end
+
+    -- ===== 자가검증(임시) =====
+
+    @ExecSpace("ServerOnly")
+    method void SelfTest()
+        -- 점유/술어/배치해석/효과훅 동작 확인. 본배선 후 RunSelfTest=false.
+        local def = _BoardCatalogLogic:GetBoardDef("classic_7x7")
+        if def == nil then
+            log_error("[BoardService][SelfTest] def 없음")
+            return
+        end
+        local board = { defId = "classic_7x7", cells = {}, instanceSeq = 0 }
+
+        -- 랜덤 셀 오버라이드 확정(런마다 다른 위치) 후 술어 확인
+        self:ResolveRandomCellOverrides(def)
+        local blockCells = 0
+        for _, cell in pairs(def.cells) do
+            if cell.typeId == "block" then blockCells = blockCells + 1 end
+        end
+        log("[BoardService][SelfTest] randomBlocks=" .. tostring(blockCells)
+            .. " CanPlaceUnit(0,0)=" .. tostring(self:CanPlaceUnit(def, board, 0, 0)))
+
+        -- 점유 + 배타
+        local u1 = self:TryOccupy(def, board, 0, 0, "unit", { occupantId = "orangemushroom", occupantKind = "monster" })
+        local u2 = self:TryOccupy(def, board, 0, 0, "unit", { occupantId = "x", occupantKind = "monster" })
+        log("[BoardService][SelfTest] occupy(0,0)=" .. tostring(u1) .. " dup=" .. tostring(u2)
+            .. " count.monster=" .. tostring(self:GetOccupantCount(board, "unit", "monster")))
+
+        -- object.blocksMove -> unit 차단
+        local o1 = self:TryOccupy(def, board, 3, 3, "object", { objectId = "rock" })
+        log("[BoardService][SelfTest] object(3,3)=" .. tostring(o1)
+            .. " CanPlaceUnit(3,3) after rock=" .. tostring(self:CanPlaceUnit(def, board, 3, 3))
+            .. " BlocksSkill(3,3)=" .. tostring(self:BlocksSkill(def, board, 3, 3)))
+
+        -- 효과 훅: aura + item 한 칸에 두고 진입
+        self:TryOccupy(def, board, 4, 4, "aura", { auraId = "rage" })
+        self:TryOccupy(def, board, 4, 4, "item", { itemId = "atkPotion" })
+        local mods = self:OnUnitEnter(def, board, 4, 4)
+        local desc = ""
+        for _, m in ipairs(mods) do
+            desc = desc .. "[" .. tostring(m.source) .. " " .. tostring(m.stat) .. " " .. tostring(m.type) .. " " .. tostring(m.value) .. " dur=" .. tostring(m.duration) .. "]"
+        end
+        log("[BoardService][SelfTest] OnUnitEnter(4,4) mods#=" .. tostring(#mods) .. " " .. desc
+            .. " itemReleasedNow=" .. tostring(self:GetCellLayer(board, 4, 4, "item") == nil))
+
+        -- 배치해석: random count 2 / zone spawnTop
+        local run = { board = board }
+        local r1 = self:ResolvePlacement(run, def, { place = "random", count = 2 }, "unit")
+        local r2 = self:ResolvePlacement(run, def, { place = "zone", zone = "spawnTop", count = 3 }, "unit")
+        local r3 = self:ResolvePlacement(run, def, { place = "center" }, "aura")
+        log("[BoardService][SelfTest] resolve random2#=" .. tostring(#r1)
+            .. " zoneSpawnTop#=" .. tostring(#r2)
+            .. " center#=" .. tostring(#r3))
+
+        -- 지오메트리 왕복
+        local w = self:CellToWorld(def, board, 3, 3)
+        local back = self:WorldToCell(def, board, w)
+        log("[BoardService][SelfTest] CellToWorld(3,3)=(" .. tostring(w.x) .. "," .. tostring(w.y) .. ") -> back=("
+            .. tostring(back and back.col or "nil") .. "," .. tostring(back and back.row or "nil") .. ")")
+    end
+end

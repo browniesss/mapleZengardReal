@@ -1,1 +1,9 @@
 .omx/
+
+# Agent runtime / local tooling
+.claude/
+.omc/
+.omc.directory
+
+# Dependencies
+node_modules/
