@@ -107,7 +107,7 @@ finalValue *= Π(1 + PercentMult)      # 곱연산 % (강버프, 개별 곱)
 | `layoutId` | `classic_7x7` | 스칼라 | 보드 식별자 |
 | `cols` / `rows` | `7` / `7` | 스칼라 | NxM 격자 크기 |
 | `cellSize` | `0.8` | 스칼라 | 셀 월드 크기(레이아웃별) |
-| `cellOverrides` | `[{"pos":[3,3],"type":"block"},{"pos":[0,6],"type":"void"}]` | JSON | 기본=평지, 예외 셀타입만. **비정형 격자**는 `"void"`(=셀 없음)으로 표현 |
+| `cellOverrides` | `[{"pos":[3,3],"type":"block"},{"pos":[0,6],"type":"void"},{"type":"block","place":"random","count":2}]` | JSON | 기본=평지, 예외 셀타입만. **비정형 격자**는 `"void"`(=셀 없음)으로 표현. `pos` 없는 `{"place":"random","count":N}` 항목은 **런마다** `BoardService:ResolveRandomCellOverrides`가 def 복사본에 확정(카탈로그 캐시에 박제 금지) — 후보는 평지 중 `zones` 전체·고정(`pos`) `initialPlacements` 예약칸 제외. `void`는 고정 `pos` 전용(랜덤 불가) |
 | `zones` | `{"spawnTop":[[0,0],[1,0]],"boss":[[3,3]]}` | JSON | 이름붙은 칸 집합(배치 해석용) |
 | `initialPlacements` | `[{"layer":"object","objectId":"rock","place":"fixed","pos":[2,2]}, {"layer":"aura","auraId":"rage","place":"zone","zone":"boss"}, {"layer":"item","itemId":"atkPotion","place":"random","count":2}, {"layer":"unit","occupantId":"orangemushroom","occupantKind":"monster","place":"zone","zone":"spawnTop"}]` | JSON | **웨이브 이전 초기상태**. 레이어별 id 필드 통일: `objectId`/`auraId`/`itemId`/`occupantId`(+`occupantKind`). `place`/`pos`/`zone`/`count`는 §6 `ResolvePlacement`가 소비, **id 필드만 추출해 `TryOccupy`의 payload로 전달** |
 
@@ -145,6 +145,15 @@ finalValue *= Π(1 + PercentMult)      # 곱연산 % (강버프, 개별 곱)
 | `buffEffect` (JSON) | 픽업 시 부여할 **Modifier[]** (§3.0). 예: `[{"stat":"atk","type":"percentAdd","value":0.5}]`. source=`item:<itemId>` |
 | `turns` | 지속 턴 수 → 부여되는 Modifier의 `duration="turns:N"` |
 | `model` | 픽업 비주얼 |
+
+### 3.6 `StageDefs` (전체 스테이지 관리)
+| 컬럼 | 예시 | 설명 |
+|---|---|---|
+| `stageId` | `stage01` | 스테이지 식별자. `BoardRenderProbe.StageId`가 이걸 참조해 런을 시작 |
+| `layoutId` | `classic_7x7` | 이 스테이지가 쓰는 보드 레이아웃(§3.1 참조). 스테이지 교체로 보드 구조 교체 가능 |
+| `wavePlacements` | `[{"wave":1,"layer":"unit","occupantId":"orangemushroom","occupantKind":"monster","place":"zone","zone":"spawnTop","count":3},{"wave":2,"layer":"item","itemId":"atkPotion","place":"random","count":1}]` | JSON. **"몇 젠(웨이브)에서 무엇이 몇 개 등장"** 스케줄. 각 항목 = `wave`(정수 ≥1, 일치하는 WaveGen에서만 적용) + `initialPlacements`와 동일한 레이어별 id 필드/`place` 문법(§6). `BoardCatalogLogic:GetStageDef`가 적재·검증(layoutId 존재·wave 번호·zone 참조), `BoardService:ApplyWavePlacements(run, def, stageDef, wave)`가 WaveGen 페이즈(BoardFlowLogic)에서 소비 |
+
+> `run.stageDef`/`run.def`는 `BoardRenderProbe.BuildBoard`가 런 시작 시 deep-copy로 실어 두고, 이후 페이즈는 데이터셋 재조회 없이 run 핸들만 소비한다.
 
 ---
 

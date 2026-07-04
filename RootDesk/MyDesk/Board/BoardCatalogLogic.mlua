@@ -7,6 +7,7 @@ script BoardCatalogLogic extends Logic
     property boolean RunSelfTest = false   -- OnBeginPlay 자가검증(빌드·검증 로그). 본배선 검증 완료로 off(필요시 on).
 
     property any layoutCache = nil      -- layoutId -> BoardDef
+    property any stageDefCache = nil     -- stageId -> StageDef
     property any cellTypeCache = nil     -- typeId -> def
     property any objectTypeCache = nil   -- objectId -> def
     property any auraTypeCache = nil     -- auraId -> def
@@ -214,15 +215,25 @@ script BoardCatalogLogic extends Logic
             rows = rows,
             cellSize = cellSize,
             cells = {},
+            randomCellOverrides = {},
             cellTypes = self:DeepCopy(self:GetCellTypes()),
             zones = {},
             initialPlacements = initialPlacements,
         }
 
         -- cellOverrides -> cells map (기본=plain, 예외만 명시; void 포함)
+        -- pos 있는 항목=고정(적재시 확정). pos 없는 place="random" 항목=랜덤 스펙만 보관하고
+        -- 런마다 BoardService:ResolveRandomCellOverrides가 def 복사본에 확정(§3.1/§6) — 캐시에 박제 금지.
         for _, ov in ipairs(cellOverrides) do
             local pos = ov.pos
-            if pos ~= nil and pos[1] ~= nil and pos[2] ~= nil then
+            if pos == nil and ov.place == "random" then
+                if ov.type == "void" then
+                    log_warning("[BoardCatalog] random cellOverride에 void 불가(비정형 격자는 고정 pos 전용) layout=" .. layoutId)
+                else
+                    local cnt = math.floor(tonumber(ov.count) or 1)
+                    table.insert(def.randomCellOverrides, { type = ov.type, count = cnt })
+                end
+            elseif pos ~= nil and pos[1] ~= nil and pos[2] ~= nil then
                 local c = math.floor(pos[1])
                 local r = math.floor(pos[2])
                 if c >= 0 and c < cols and r >= 0 and r < rows then
@@ -230,6 +241,8 @@ script BoardCatalogLogic extends Logic
                 else
                     log_warning("[BoardCatalog] cellOverride 범위초과 layout=" .. layoutId .. " pos=" .. tostring(c) .. "," .. tostring(r))
                 end
+            else
+                log_warning("[BoardCatalog] cellOverride 형식 오류(pos 또는 place=random 필요) layout=" .. layoutId)
             end
         end
 
@@ -265,8 +278,75 @@ script BoardCatalogLogic extends Logic
         log("[BoardCatalog] BoardDef 빌드: " .. layoutId .. " " .. tostring(cols) .. "x" .. tostring(rows)
             .. " cellSize=" .. tostring(cellSize)
             .. " overrides=" .. tostring(#cellOverrides)
+            .. " randomOverrides=" .. tostring(#def.randomCellOverrides)
             .. " zones=" .. tostring(self:CountKeys(def.zones))
             .. " placements=" .. tostring(#initialPlacements))
+        return def
+    end
+
+    -- ===== StageDef (전체 스테이지 관리, §3.6) =====
+
+    @ExecSpace("ServerOnly")
+    method any GetStageDef(string stageId)
+        -- stageId -> StageDef(deep-copy). 스테이지 = 보드 레이아웃 참조 + 웨이브별 배치 스케줄.
+        -- wavePlacements: [{wave=N, layer/id필드/place/pos/zone/count}] — wave 번호가 일치하는
+        -- 젠(WaveGen)에서 BoardService:ApplyWavePlacements가 소비(§6 place 문법 그대로).
+        if self.stageDefCache == nil then self.stageDefCache = {} end
+        if self.stageDefCache[stageId] == nil then
+            local def = self:BuildStageDef(stageId)
+            if def == nil then return nil end
+            self.stageDefCache[stageId] = def
+        end
+        return self:DeepCopy(self.stageDefCache[stageId])
+    end
+
+    @ExecSpace("ServerOnly")
+    method any BuildStageDef(string stageId)
+        -- StageDefs 행 -> StageDef 조립 + 적재시 검증(layoutId 존재, wave 번호, zone 참조).
+        local ds = _DataService:GetTable("StageDefs")
+        if ds == nil then
+            log_error("[BoardCatalog] StageDefs 데이터셋 없음")
+            return nil
+        end
+        local row = ds:FindRow("stageId", stageId)
+        if row == nil then
+            log_error("[BoardCatalog] 스테이지 없음: " .. stageId)
+            return nil
+        end
+
+        local layoutId = row:GetItem("layoutId")
+        local wavePlacements = self:ParseJsonCell(row:GetItem("wavePlacements"), {})
+
+        local boardDef = self:GetBoardDef(layoutId)
+        if boardDef == nil then
+            log_error("[BoardCatalog] StageDef의 layoutId 무효: " .. tostring(layoutId) .. " stage=" .. stageId)
+            return nil
+        end
+
+        -- wavePlacements 검증: wave 번호(정수 ≥1) + zone 참조
+        local cleaned = {}
+        for _, p in ipairs(wavePlacements) do
+            local wave = math.floor(tonumber(p.wave) or 0)
+            if wave < 1 then
+                log_warning("[BoardCatalog] wavePlacement wave 번호 무효(≥1 필요) stage=" .. stageId)
+            elseif p.layer == nil then
+                log_warning("[BoardCatalog] wavePlacement layer 누락 stage=" .. stageId .. " wave=" .. tostring(wave))
+            else
+                if p.place == "zone" and (p.zone == nil or boardDef.zones[p.zone] == nil) then
+                    log_error("[BoardCatalog] wavePlacement 알수없는 zone 참조: " .. tostring(p.zone) .. " stage=" .. stageId)
+                end
+                p.wave = wave
+                table.insert(cleaned, p)
+            end
+        end
+
+        local def = {
+            stageId = stageId,
+            layoutId = layoutId,
+            wavePlacements = cleaned,
+        }
+        log("[BoardCatalog] StageDef 빌드: " .. stageId .. " layout=" .. tostring(layoutId)
+            .. " wavePlacements=" .. tostring(#cleaned))
         return def
     end
 
@@ -279,12 +359,10 @@ script BoardCatalogLogic extends Logic
         if d7 == nil then
             log_error("[BoardCatalog][SelfTest] classic_7x7 로드 실패")
         else
-            local blocked = d7.cells["1_1"]
-            local voided = d7.cells["0_6"]
+            local rnd1 = d7.randomCellOverrides[1]
             log("[BoardCatalog][SelfTest] classic_7x7 cols=" .. tostring(d7.cols) .. " rows=" .. tostring(d7.rows)
-                .. " cell[1_1]=" .. tostring(blocked and blocked.typeId or "nil")
-                .. " cell[0_6]=" .. tostring(voided and voided.typeId or "nil")
-                .. " IsInside(0,6)=" .. tostring(self:IsInsideDef(d7, 0, 6))
+                .. " randomOverrides=" .. tostring(#d7.randomCellOverrides)
+                .. " rnd1=" .. tostring(rnd1 and rnd1.type or "nil") .. "x" .. tostring(rnd1 and rnd1.count or 0)
                 .. " IsInside(3,3)=" .. tostring(self:IsInsideDef(d7, 3, 3))
                 .. " cellTypes=" .. tostring(self:CountKeys(d7.cellTypes))
                 .. " zones=" .. tostring(self:CountKeys(d7.zones)))

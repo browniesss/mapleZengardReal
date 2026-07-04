@@ -400,6 +400,54 @@ script BoardService extends Logic
         return result
     end
 
+    -- ===== 랜덤 셀 오버라이드 해석 (런마다, §3.1) =====
+
+    method table CollectReservedCells(any def)
+        -- 랜덤 셀 오버라이드가 피해야 할 예약칸 집합: zones 전체 + 고정(pos) initialPlacements.
+        -- 스폰존이 블록으로 막히거나 고정 배치(바위 등)가 스킵되는 것을 방지.
+        local reserved = {}
+        for _, coords in pairs(def.zones) do
+            for _, cell in ipairs(coords) do
+                reserved[cell[1] .. "_" .. cell[2]] = true
+            end
+        end
+        for _, p in ipairs(def.initialPlacements) do
+            if p.place == "fixed" and p.pos ~= nil then
+                reserved[p.pos[1] .. "_" .. p.pos[2]] = true
+            end
+        end
+        return reserved
+    end
+
+    @ExecSpace("ServerOnly")
+    method void ResolveRandomCellOverrides(any def)
+        -- place="random" 셀 오버라이드를 이 런의 def 복사본에 확정(런마다 다른 배치).
+        -- def는 GetBoardDef의 deep-copy라 카탈로그 캐시는 오염되지 않는다.
+        -- 후보 = 범위내(비-void) ∧ 미오버라이드(plain) ∧ 예약칸 제외. 부족하면 있는 만큼만+경고.
+        if def.randomCellOverrides == nil or #def.randomCellOverrides == 0 then return end
+        local reserved = self:CollectReservedCells(def)
+        for _, ov in ipairs(def.randomCellOverrides) do
+            local cands = {}
+            for r = 0, def.rows - 1 do
+                for c = 0, def.cols - 1 do
+                    local key = c .. "_" .. r
+                    if def.cells[key] == nil and reserved[key] == nil and self:IsInside(def, c, r) then
+                        table.insert(cands, { c, r })
+                    end
+                end
+            end
+            local picked = self:ShuffleTake(cands, ov.count)
+            if #picked < ov.count then
+                log_warning("[BoardService] random cellOverride 후보 부족 type=" .. tostring(ov.type)
+                    .. " " .. tostring(#picked) .. "/" .. tostring(ov.count))
+            end
+            for _, cell in ipairs(picked) do
+                def.cells[cell[1] .. "_" .. cell[2]] = { typeId = ov.type }
+                log("[BoardService] random cellOverride: " .. tostring(ov.type) .. " @ " .. self:CellKey(cell[1], cell[2]))
+            end
+        end
+    end
+
     -- ===== 생명주기 (런타임 스폰 + initialPlacements 시딩, §1.5/§7) =====
 
     @ExecSpace("ServerOnly")
@@ -409,6 +457,7 @@ script BoardService extends Logic
         -- 점유/오브젝트/아이템/유닛도 같은 slot의 자식이 되어 정확히 칸 중앙에 놓인다. 점유는 run.board(휘발).
         local board = run.board
         local mapEntity = board.mapEntityRef
+        self:ResolveRandomCellOverrides(def)   -- 타일 스폰 전에 랜덤 지형 확정(블록 등)
         board.slots = {}
         local cellsSpawned = 0
         local cellsTotal = 0
@@ -486,14 +535,14 @@ script BoardService extends Logic
     end
 
     @ExecSpace("ServerOnly")
-    method integer ApplyInitialPlacements(any run, any def)
-        -- 웨이브 이전 사전배치(§3.1/§6). ResolvePlacement -> TryOccupy -> 비주얼.
+    method integer ApplyPlacements(any run, any def, table specs, string tag)
+        -- 배치 spec 목록 공용 적용기: ResolvePlacement -> TryOccupy -> 비주얼. tag는 로그 구분용.
         local board = run.board
         local applied = 0
-        for _, spec in ipairs(def.initialPlacements) do
+        for _, spec in ipairs(specs) do
             local layer = spec.layer
             if layer == nil then
-                log_warning("[BoardService] initialPlacement layer 누락")
+                log_warning("[BoardService] " .. tag .. " layer 누락")
             else
                 local cells = self:ResolvePlacement(run, def, spec, layer)
                 for _, cell in ipairs(cells) do
@@ -501,12 +550,34 @@ script BoardService extends Logic
                     local id = self:TryOccupy(def, board, cell[1], cell[2], layer, payload)
                     if id ~= nil then
                         applied = applied + 1
+                        log("[BoardService] " .. tag .. ": " .. layer .. " @ " .. self:CellKey(cell[1], cell[2]))
                         self:SpawnLayerVisual(run, def, cell[1], cell[2], layer, payload)
                     end
                 end
             end
         end
         return applied
+    end
+
+    @ExecSpace("ServerOnly")
+    method integer ApplyInitialPlacements(any run, any def)
+        -- 웨이브 이전 사전배치(§3.1/§6).
+        return self:ApplyPlacements(run, def, def.initialPlacements, "initialPlacement")
+    end
+
+    @ExecSpace("ServerOnly")
+    method integer ApplyWavePlacements(any run, any def, any stageDef, integer wave)
+        -- 스테이지 웨이브 배치(§3.6): stageDef.wavePlacements 중 wave 번호 일치분만 적용.
+        -- WaveGen 페이즈(BoardFlowLogic)가 호출. stageDef 없거나 해당 웨이브 배치 없으면 0.
+        if stageDef == nil or stageDef.wavePlacements == nil then return 0 end
+        local specs = {}
+        for _, p in ipairs(stageDef.wavePlacements) do
+            if p.wave == wave then
+                table.insert(specs, p)
+            end
+        end
+        if #specs == 0 then return 0 end
+        return self:ApplyPlacements(run, def, specs, "wavePlacement(wave=" .. tostring(wave) .. ")")
     end
 
     -- ===== 자가검증(임시) =====
@@ -521,10 +592,14 @@ script BoardService extends Logic
         end
         local board = { defId = "classic_7x7", cells = {}, instanceSeq = 0 }
 
-        -- 술어
-        log("[BoardService][SelfTest] CanPlaceUnit(0,0)=" .. tostring(self:CanPlaceUnit(def, board, 0, 0))
-            .. " (1,1=block)=" .. tostring(self:CanPlaceUnit(def, board, 1, 1))
-            .. " (0,6=void)=" .. tostring(self:CanPlaceUnit(def, board, 0, 6)))
+        -- 랜덤 셀 오버라이드 확정(런마다 다른 위치) 후 술어 확인
+        self:ResolveRandomCellOverrides(def)
+        local blockCells = 0
+        for _, cell in pairs(def.cells) do
+            if cell.typeId == "block" then blockCells = blockCells + 1 end
+        end
+        log("[BoardService][SelfTest] randomBlocks=" .. tostring(blockCells)
+            .. " CanPlaceUnit(0,0)=" .. tostring(self:CanPlaceUnit(def, board, 0, 0)))
 
         -- 점유 + 배타
         local u1 = self:TryOccupy(def, board, 0, 0, "unit", { occupantId = "orangemushroom", occupantKind = "monster" })
