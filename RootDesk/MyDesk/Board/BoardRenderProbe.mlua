@@ -5,7 +5,7 @@ script BoardRenderProbe extends Logic
     -- 이전: 5x5 하드코딩. 현재: GetBoardDef(layoutId) -> BoardService:BuildBoard.
 
     property string SourceMapName = "BoardMap"     -- Maker static RectTile 소스맵
-    property string LayoutId = "classic_7x7"        -- BoardLayouts 데이터셋 레이아웃 id
+    property string StageId = "stage01"             -- StageDefs 데이터셋 스테이지 id(레이아웃+웨이브 스케줄 소유)
 
     property any userEnterHandler = nil
     property integer runCounter = 0
@@ -16,7 +16,7 @@ script BoardRenderProbe extends Logic
         -- 입장 트리거 연결: 입장하는 플레이어마다 새 동적 보드를 만든다.
         self.runs = {}
         self.userEnterHandler = _UserService:ConnectEvent(UserEnterEvent, self.OnUserEnter)
-        log("[BoardProbe] ready — source=" .. self.SourceMapName .. " layout=" .. self.LayoutId)
+        log("[BoardProbe] ready — source=" .. self.SourceMapName .. " stage=" .. self.StageId)
     end
 
     @ExecSpace("ServerOnly")
@@ -83,15 +83,23 @@ script BoardRenderProbe extends Logic
 
     @ExecSpace("ServerOnly")
     method void BuildBoard(Entity mapEntity, string runMapName)
-        -- 데이터구동 빌드: BoardDef 로드 -> run.board 셋업 -> BoardService:BuildBoard.
-        local def = _BoardCatalogLogic:GetBoardDef(self.LayoutId)
+        -- 데이터구동 빌드: StageDef(스테이지 관리 데이터) -> BoardDef -> run 셋업 -> BoardService:BuildBoard.
+        -- run.def/run.stageDef를 run 핸들에 실어 이후 페이즈(WaveGen 등)가 데이터 재조회 없이 소비.
+        local stageDef = _BoardCatalogLogic:GetStageDef(self.StageId)
+        if stageDef == nil then
+            log_error("[BoardProbe] StageDef 없음 stage=" .. self.StageId)
+            return
+        end
+        local def = _BoardCatalogLogic:GetBoardDef(stageDef.layoutId)
         if def == nil then
-            log_error("[BoardProbe] BoardDef 없음 layout=" .. self.LayoutId)
+            log_error("[BoardProbe] BoardDef 없음 layout=" .. tostring(stageDef.layoutId))
             return
         end
         local run = {
+            stageDef = stageDef,
+            def = def,
             board = {
-                defId = self.LayoutId,
+                defId = stageDef.layoutId,
                 mapEntityRef = mapEntity,
                 originOffset = nil,
                 cells = {},
@@ -102,8 +110,12 @@ script BoardRenderProbe extends Logic
 
         local summary = _BoardService:BuildBoard(run, def)
         log("[BoardProbe] BuildBoard(data) map=" .. runMapName
-            .. " layout=" .. self.LayoutId
+            .. " stage=" .. self.StageId
+            .. " layout=" .. tostring(stageDef.layoutId)
             .. " cells=" .. tostring(summary.cellsSpawned) .. "/" .. tostring(summary.cellsTotal)
             .. " placements=" .. tostring(summary.placementsApplied))
+
+        -- 보드 빌드 완료 → 게임 사이클 FSM 시작(Init 진입). 이후 전이는 BoardFlowLogic 소유.
+        _BoardFlowLogic:StartRun(run)
     end
 end
