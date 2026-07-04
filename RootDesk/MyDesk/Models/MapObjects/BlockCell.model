@@ -30,7 +30,7 @@
             "$type": "MODNativeType",
             "type": "System.String, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
           },
-          "Value": "8718b48deb7b47139d9196d9d5d2bd62"
+          "Value": "f37a1e99915c4a0492f0c5d781e32c47"
         },
         {
           "TargetType": "MOD.Core.TransformComponent",
@@ -41,8 +41,8 @@
           },
           "Value": {
             "$type": "MOD.Core.MODVector3, MOD.Core",
-            "x": 0.6,
-            "y": 0.6,
+            "x": 0.625,
+            "y": 0.625,
             "z": 1
           }
         }

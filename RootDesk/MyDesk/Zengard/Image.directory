@@ -1,20 +1,20 @@
 {
   "Id": "",
   "GameId": "",
-  "EntryKey": "directory://a09c05f5845e467a87a2f050e220d00c",
+  "EntryKey": "directory://a2c24b6643d84a108a8766bef82afdba",
   "ContentType": "x-mod/directory",
   "Content": "",
   "Usage": 0,
   "UsePublish": 1,
   "UseService": 0,
   "CoreVersion": "26.5.0.0",
-  "StudioVersion": "0.1.0.0",
+  "StudioVersion": "",
   "DynamicLoading": 0,
   "ContentProto": {
     "Use": "Json",
     "Json": {
-      "entry_id": "directory://a09c05f5845e467a87a2f050e220d00c",
-      "name": "Board",
+      "entry_id": "directory://a2c24b6643d84a108a8766bef82afdba",
+      "name": "Image",
       "lock": false,
       "folding": false,
       "nameEditable": true
