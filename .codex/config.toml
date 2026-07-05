@@ -1,7 +1,0 @@
-[mcp_servers.msw-maker-mcp]
-command = "cmd.exe"
-args = ["/c", "call", "D:\\Nexon\\MapleStory Worlds\\MakerMCP\\msw-maker-mcp.bat"]
-
-[mcp_servers.msw-mcp]
-url = "https://msw-mcp.nexon.com/mcp"
-bearer_token_env_var = "MSW_MCP_API_KEY"
