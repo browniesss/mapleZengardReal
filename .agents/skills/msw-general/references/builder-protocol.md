@@ -1083,7 +1083,7 @@ Verify that the `.mlua` actually exists and the target property is declared befo
 
 **Failure ordering** — `b.write({ bind })` runs `validate()` and pre-bakes the `.mlua` patch in memory **before** writing `.ui`. If anything before the `.ui` write throws (validation error, missing entity, undeclared property, duplicate property), neither file is touched. If strict `ui_lint` fails after `.ui` is on disk, the `.ui` is removed (rolled back) and `.mlua` is left untouched. `.mlua` is written last, only after `.ui` + lint pass. Property replacement is line-anchored and skips Lua line comments (`--`) and block comments (`--[[ ... ]]`), so a commented-out `property string Foo = "..."` is never overwritten.
 
-**`b.validate()`** — call directly to inspect findings (`{ severity, rule, message }[]`) without writing. `write()` calls it internally and throws on any `severity: "error"`. Rules: `U001` invalid number (NaN / Infinity), `U002` int32 component field, `U003` finite-number component field, `U004` boolean component field.
+**`b.validate()`** — call directly to inspect findings (`{ severity, rule, message }[]`) without writing. `write()` calls it internally and throws on any `severity: "error"`. Rules: `U001` invalid number (NaN / Infinity), `U002` int32 component field, `U003` finite-number component field, `U004` boolean component field, `U005` Vector2-shape component field (e.g. `GridViewComponent.Spacing` — must be `{ x, y }` with finite numbers).
 
 **Naming convention (recommended)**:
 
