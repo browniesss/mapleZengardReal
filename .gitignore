@@ -7,3 +7,5 @@
 
 # Dependencies
 node_modules/
+
+.codex/config.toml
