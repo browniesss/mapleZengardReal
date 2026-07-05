@@ -1,0 +1,154 @@
+@Logic
+script RewardTypeCatalogLogic extends Logic
+    -- 계층 ①: RewardTypes 데이터셋을 적재·검증·캐시하는 보상 타입 조회 레이어.
+    -- 모든 조회는 ServerOnly. 필터 nil=전체, string/table=부분 조회를 지원한다.
+
+    property boolean RunSelfTest = false
+
+    property any rewardTypeList = nil
+    property any rewardTypeMap = nil
+
+    @ExecSpace("ServerOnly")
+    method void OnBeginPlay()
+        -- 캐시를 초기화하고 준비 로그를 남긴다.
+        self.rewardTypeList = nil
+        self.rewardTypeMap = nil
+        log("[RewardTypeCatalog] ready")
+        if self.RunSelfTest then
+            self:SelfTest()
+        end
+    end
+
+    method any DeepCopy(any value)
+        -- 테이블이면 재귀 복제하고, 원시값은 그대로 반환한다.
+        if type(value) ~= "table" then
+            return value
+        end
+        local out = {}
+        for key, child in pairs(value) do
+            out[key] = self:DeepCopy(child)
+        end
+        return out
+    end
+
+    @ExecSpace("ServerOnly")
+    method void EnsureCache()
+        -- RewardTypes 데이터셋을 1회 적재해 순서 배열과 맵 캐시를 구축한다.
+        if self.rewardTypeList ~= nil and self.rewardTypeMap ~= nil then
+            return
+        end
+
+        self.rewardTypeList = {}
+        self.rewardTypeMap = {}
+
+        local ds = _DataService:GetTable("RewardTypes")
+        if ds == nil then
+            log_error("[RewardTypeCatalog] RewardTypes 데이터셋 없음")
+            return
+        end
+
+        for _, row in ipairs(ds:GetAllRow()) do
+            local rewardType = row:GetItem("rewardType")
+            local label = row:GetItem("label")
+
+            if rewardType == nil or rewardType == "" then
+                log_warning("[RewardTypeCatalog] 빈 rewardType 행 스킵")
+            elseif self.rewardTypeMap[rewardType] ~= nil then
+                log_warning("[RewardTypeCatalog] 중복 rewardType 스킵: " .. rewardType)
+            else
+                local def = {
+                    rewardType = rewardType,
+                    label = (label ~= nil and label ~= "") and label or rewardType,
+                }
+                self.rewardTypeMap[rewardType] = def
+                table.insert(self.rewardTypeList, def)
+            end
+        end
+
+        log("[RewardTypeCatalog] loaded count=" .. tostring(#self.rewardTypeList))
+    end
+
+    method void TryAppendRewardType(table result, any seen, string rewardType)
+        -- 존재하는 rewardType이면 중복 없이 결과 배열에 추가한다.
+        if rewardType == nil or rewardType == "" then
+            return
+        end
+        if seen[rewardType] then
+            return
+        end
+
+        local def = self.rewardTypeMap[rewardType]
+        if def == nil then
+            log_warning("[RewardTypeCatalog] 알 수 없는 rewardType 필터: " .. tostring(rewardType))
+            return
+        end
+
+        seen[rewardType] = true
+        table.insert(result, self:DeepCopy(def))
+    end
+
+    @ExecSpace("ServerOnly")
+    method any GetRewardType(string rewardType)
+        -- 단일 보상 타입 정의를 deep-copy로 반환한다. 없으면 nil.
+        self:EnsureCache()
+        return self:DeepCopy(self.rewardTypeMap[rewardType])
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean HasRewardType(string rewardType)
+        -- 보상 타입 존재 여부를 반환한다.
+        self:EnsureCache()
+        return self.rewardTypeMap[rewardType] ~= nil
+    end
+
+    @ExecSpace("ServerOnly")
+    method table GetRewardTypes(any filter)
+        -- nil=전체, string=단일, table=여러 타입 필터를 적용한 정의 목록을 반환한다.
+        self:EnsureCache()
+
+        if filter == nil then
+            return self:DeepCopy(self.rewardTypeList)
+        end
+
+        local result = {}
+        local seen = {}
+
+        if type(filter) == "string" then
+            self:TryAppendRewardType(result, seen, filter)
+            return result
+        end
+
+        if type(filter) == "table" then
+            for _, rewardType in ipairs(filter) do
+                if type(rewardType) == "string" then
+                    self:TryAppendRewardType(result, seen, rewardType)
+                end
+            end
+            return result
+        end
+
+        log_warning("[RewardTypeCatalog] 지원하지 않는 필터 타입: " .. tostring(type(filter)))
+        return result
+    end
+
+    @ExecSpace("ServerOnly")
+    method table GetRewardTypeIds(any filter)
+        -- 필터에 해당하는 rewardType id 배열만 반환한다.
+        local defs = self:GetRewardTypes(filter)
+        local result = {}
+        for _, def in ipairs(defs) do
+            table.insert(result, def.rewardType)
+        end
+        return result
+    end
+
+    @ExecSpace("ServerOnly")
+    method void SelfTest()
+        -- 데이터셋 적재와 기본 조회 계약을 로그로 검증한다.
+        local defs = self:GetRewardTypes(nil)
+        local first = defs[1]
+        log("[RewardTypeCatalog][SelfTest] count=" .. tostring(#defs)
+            .. " first=" .. tostring(first and first.rewardType or "nil")
+            .. " label=" .. tostring(first and first.label or "nil"))
+    end
+end
