@@ -9,3 +9,5 @@
 node_modules/
 
 .codex/config.toml
+# Local MCP config (contains auth token)
+.mcp.json
