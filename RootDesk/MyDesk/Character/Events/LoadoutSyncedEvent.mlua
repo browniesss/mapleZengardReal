@@ -1,0 +1,6 @@
+@Event
+script LoadoutSyncedEvent extends EventType
+    -- 로드아웃 요약의 클라 동기화 (설계서 §4.3). 소유 클라에서 LocalPlayer 엔티티에 발행 — 스킬 패널 UI 소비.
+    -- slots = [{ skillId, name, level, iconRuid, tagsText }, ...] (공격 슬롯 순서)
+    property table slots = {}
+end

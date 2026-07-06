@@ -1,0 +1,6 @@
+﻿statusId,name,params
+stun,스턴,{}
+freeze,빙결,{}
+poison,중독,"{""dot"":true}"
+taunt,도발,{}
+defIgnore,방어무시,{}

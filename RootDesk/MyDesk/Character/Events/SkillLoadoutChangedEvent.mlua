@@ -1,0 +1,5 @@
+@Event
+script SkillLoadoutChangedEvent extends EventType
+    -- 로드아웃 변경 알림 (설계서 §4.3). 소비자: 스킬 순서 리스트/빌드 바 UI.
+    property string reason = ""   -- acquire | levelup | replace | synthesize | reroll | order
+end

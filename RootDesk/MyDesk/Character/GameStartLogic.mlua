@@ -1,0 +1,92 @@
+@Logic
+script GameStartLogic extends Logic
+    -- 게임 시작 진입점: 로비 UI(클라)의 시작 요청 -> 보드 런 생성 위임 -> 보드 준비 완료 시
+    -- 플레이어 컴포넌트 부착 + 캐릭터 런 시작 (설계서 §7 I-1/I-2 배선).
+    -- 플레이어 입장 시 자동 입장하던 기존 플로우를 대체 — 유저는 로비(map01)에 머물다
+    -- '게임 시작' 버튼으로 진입한다 (2026-07-05 사용자 결정).
+
+    property any pendingJobs = nil   -- userId -> 선택 직업 (직업 선택 UI 도입 전엔 기본 ARC)
+
+    @ExecSpace("ServerOnly")
+    method void OnBeginPlay()
+        -- 상태 초기화.
+        self.pendingJobs = {}
+        log("[GameStart] ready")
+    end
+
+    @ExecSpace("Server")
+    method void RequestStartGame(string job)
+        -- 클라(로비 UI) -> 서버 시작 요청. senderUserId로 요청자 검증 후 보드 런 생성 위임.
+        -- 서버 측 중복 차단: 준비 중(pendingJobs) 또는 런 진행 중이면 무시 (연타/조작 클라 방어).
+        if job == nil or job == "" then job = "ARC" end
+        if _SkillCatalogLogic:GetJobBase(job) == nil then
+            log_error("[GameStart] 알 수 없는 직업 요청: " .. tostring(job) .. " (userId=" .. senderUserId .. ")")
+            return
+        end
+        if self.pendingJobs[senderUserId] ~= nil then
+            log_warning("[GameStart] 이미 시작 준비 중 — 중복 요청 무시: " .. senderUserId)
+            return
+        end
+        local playerEntity = _BoardRenderProbe:FindUserEntity(senderUserId)
+        if isvalid(playerEntity) then
+            ---@type PlayerRunComponent
+            local runComp = playerEntity:GetComponent("script.PlayerRunComponent")
+            if runComp ~= nil and runComp.RunActive then
+                log_warning("[GameStart] 런 진행 중 — 중복 요청 무시: " .. senderUserId)
+                return
+            end
+        end
+        self.pendingJobs[senderUserId] = job
+        log("[GameStart] 시작 요청: userId=" .. senderUserId .. " job=" .. job)
+        _BoardRenderProbe:StartRunForUser(senderUserId)
+    end
+
+    @ExecSpace("ServerOnly")
+    method void EnsureRunComponents(Entity playerEntity)
+        -- 캐릭터 런 컴포넌트 5종 부착(미부착 시). 아바타 = 보드 말(I-3)이므로 플레이어 엔티티에 직접.
+        local names = {
+            "PlayerStatComponent",
+            "PlayerJobComponent",
+            "SkillLoadoutComponent",
+            "PlayerGrowthComponent",
+            "PlayerRunComponent",
+        }
+        for _, name in ipairs(names) do
+            local typename = "script." .. name
+            if playerEntity:GetComponent(typename) == nil then
+                playerEntity:AddComponent(typename)
+                if playerEntity:GetComponent(typename) == nil then
+                    log_error("[GameStart] 컴포넌트 부착 실패: " .. typename)
+                end
+            end
+        end
+    end
+
+    @ExecSpace("ServerOnly")
+    method void OnBoardReady(Entity playerEntity, any run, any def)
+        -- 보드 빌드 완료 콜백 (BoardRenderProbe가 호출): 컴포넌트 부착 + 런 시작.
+        if not isvalid(playerEntity) then
+            log_error("[GameStart] OnBoardReady: 플레이어 엔티티 무효")
+            return
+        end
+        self:EnsureRunComponents(playerEntity)
+        local userId = playerEntity.PlayerComponent.UserId
+        local job = self.pendingJobs[userId]
+        self.pendingJobs[userId] = nil   -- 소비 즉시 정리 (중복 차단 가드와 세트)
+        if job == nil then
+            log_warning("[GameStart] 시작 요청 없이 OnBoardReady 호출 — 기본 직업 폴백: " .. userId)
+            job = "ARC"
+        end
+        ---@type PlayerRunComponent
+        local runComp = playerEntity:GetComponent("script.PlayerRunComponent")
+        if runComp == nil then
+            log_error("[GameStart] PlayerRunComponent 없음 — 런 시작 불가")
+            return
+        end
+        runComp:StartRun(job, run, def)
+        -- [임시 스텁 배선] 진입 초기 몬스터 2~4 선배치(규칙서 §3.2) + 인게임 UI 활성 통지
+        -- — BoardFlowLogic 도입 시 이 블록만 교체/제거
+        _MonsterStubLogic:SpawnWave(run, def, _UtilLogic:RandomIntegerRange(2, 4))
+        _TurnFlowStubLogic:NotifyPhaseClient("run_start", 0, false, userId)
+    end
+end

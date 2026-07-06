@@ -1,0 +1,33 @@
+{
+  "Id": "",
+  "GameId": "",
+  "EntryKey": "codeblock://6138f2c5-2beb-4a79-b83e-7d030c4236c1",
+  "ContentType": "x-mod/codeblock",
+  "Content": "",
+  "Usage": 0,
+  "UsePublish": 1,
+  "UseService": 0,
+  "CoreVersion": "26.5.0.0",
+  "StudioVersion": "",
+  "DynamicLoading": 0,
+  "ContentProto": {
+    "Use": "Json",
+    "Json": {
+      "CoreVersion": {
+        "Major": 0,
+        "Minor": 2
+      },
+      "ScriptVersion": {
+        "Major": 1,
+        "Minor": 1
+      },
+      "Description": "",
+      "Id": "6138f2c5-2beb-4a79-b83e-7d030c4236c1",
+      "Language": 1,
+      "Name": "SkillLoadoutComponent",
+      "Type": 1,
+      "Source": 0,
+      "Target": null
+    }
+  }
+}

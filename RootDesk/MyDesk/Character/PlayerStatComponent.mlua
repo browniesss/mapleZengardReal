@@ -1,0 +1,133 @@
+@Component
+script PlayerStatComponent extends Component
+    -- per-player 스탯 = JobBase 기본치 + Modifier 스택 (설계서 §4.2).
+    -- Modifier는 보드 계약 포맷 { stat, type(flat|percentAdd|percentMult), value, source, duration }
+    -- 그대로 소비 — 보드 OnUnitEnter 산출물/장비/버프/아웃게임이 전부 같은 입구(ApplyModifiers)로 유입.
+    -- 최종치 = (base + Σflat) × (1 + ΣpercentAdd) × Π(1 + percentMult). 상태 변경은 전부 ServerOnly.
+
+    @Sync property number FinalAtk = 0
+    @Sync property number FinalCritRate = 0
+    @Sync property number FinalCritDmg = 0
+    @Sync property number FinalDefPen = 0
+
+    property any baseStats = nil    -- { atk, critRate, critDmg, defPen }
+    property any modifiers = nil    -- [{ stat, type, value, source, turnsLeft? }]
+
+    @ExecSpace("ServerOnly")
+    method void OnBeginPlay()
+        -- 런 시작 전 기본값. 실제 초기화는 ResetForRun.
+        self.baseStats = { atk = 0, critRate = 0, critDmg = 0, defPen = 0 }
+        self.modifiers = {}
+    end
+
+    @ExecSpace("ServerOnly")
+    method void ResetForRun(any base)
+        -- 런 시작: JobBase 기본치 적용 + modifier 전체 초기화.
+        self.baseStats = { atk = base.atk, critRate = base.critRate, critDmg = base.critDmg, defPen = base.defPen }
+        self.modifiers = {}
+        self:Recompute()
+    end
+
+    method integer ParseTurns(any duration)
+        -- duration "turns:N" -> N. 그 외(nil 포함)는 소스관리형 -> nil 반환.
+        if type(duration) ~= "string" then return nil end
+        local n = string.match(duration, "^turns:(%d+)$")
+        if n == nil then return nil end
+        return math.floor(tonumber(n))
+    end
+
+    @ExecSpace("ServerOnly")
+    method void ApplyModifiers(table mods)
+        -- Modifier[] 일괄 적용 — 보드 OnUnitEnter 반환값을 그대로 넘기면 된다 (통합 지점 I-5).
+        if mods == nil or #mods == 0 then return end
+        for _, m in ipairs(mods) do
+            local entry = { stat = m.stat, type = m.type, value = m.value, source = m.source }
+            entry.turnsLeft = self:ParseTurns(m.duration)
+            table.insert(self.modifiers, entry)
+        end
+        self:Recompute()
+    end
+
+    @ExecSpace("ServerOnly")
+    method void RemoveBySource(string source)
+        -- 소스관리형 해제 — 보드 OnUnitExit 반환 source[]의 각 항목으로 호출.
+        local removed = false
+        for i = #self.modifiers, 1, -1 do
+            if self.modifiers[i].source == source then
+                table.remove(self.modifiers, i)
+                removed = true
+            end
+        end
+        if removed then self:Recompute() end
+    end
+
+    @ExecSpace("ServerOnly")
+    method void TickTurnDurations()
+        -- 턴 종료 훅: turns:N 지속 modifier 차감, 만료 제거 (통합 지점 I-1).
+        local changed = false
+        for i = #self.modifiers, 1, -1 do
+            local m = self.modifiers[i]
+            if m.turnsLeft ~= nil then
+                m.turnsLeft = m.turnsLeft - 1
+                if m.turnsLeft <= 0 then
+                    table.remove(self.modifiers, i)
+                    changed = true
+                end
+            end
+        end
+        if changed then self:Recompute() end
+    end
+
+    @ExecSpace("ServerOnly")
+    method number GetFinal(string statKey)
+        -- (base + Σflat) × (1 + ΣpercentAdd) × Π(1 + percentMult).
+        local base = self.baseStats[statKey]
+        if base == nil then
+            log_error("[PlayerStat] 알 수 없는 statKey: " .. tostring(statKey))
+            return 0
+        end
+        local flat = 0
+        local percentAdd = 0
+        local percentMult = 1
+        for _, m in ipairs(self.modifiers) do
+            if m.stat == statKey then
+                if m.type == "flat" then
+                    flat = flat + m.value
+                elseif m.type == "percentAdd" then
+                    percentAdd = percentAdd + m.value
+                elseif m.type == "percentMult" then
+                    percentMult = percentMult * (1 + m.value)
+                else
+                    log_warning("[PlayerStat] 알 수 없는 modifier type: " .. tostring(m.type))
+                end
+            end
+        end
+        return (base + flat) * (1 + percentAdd) * percentMult
+    end
+
+    @ExecSpace("ServerOnly")
+    method void Recompute()
+        -- @Sync 표시값 갱신 + StatChangedEvent 발행.
+        self.FinalAtk = self:GetFinal("atk")
+        self.FinalCritRate = self:GetFinal("critRate")
+        self.FinalCritDmg = self:GetFinal("critDmg")
+        self.FinalDefPen = self:GetFinal("defPen")
+        local ev = StatChangedEvent()
+        ev.atk = self.FinalAtk
+        ev.critRate = self.FinalCritRate
+        ev.critDmg = self.FinalCritDmg
+        ev.defPen = self.FinalDefPen
+        self.Entity:SendEvent(ev)
+    end
+
+    @ExecSpace("ServerOnly")
+    method any GetStatsSnapshot()
+        -- 공격 해석 ctx용 스냅샷 { atk, critRate, critDmg, defPen }.
+        return {
+            atk = self.FinalAtk,
+            critRate = self.FinalCritRate,
+            critDmg = self.FinalCritDmg,
+            defPen = self.FinalDefPen,
+        }
+    end
+end

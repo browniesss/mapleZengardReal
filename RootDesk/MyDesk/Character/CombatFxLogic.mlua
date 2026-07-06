@@ -1,0 +1,40 @@
+@Logic
+script CombatFxLogic extends Logic
+    -- 전투 연출 헬퍼(무상태): 메이플 네이티브 데미지 스킨 재생. HitPlan 소비자(몬스터 측)가 호출.
+    -- 다단 히트/타격 간 딜레이/크리티컬 표기는 전부 _DamageSkinService가 처리(damages 배열 + delayPerAttack).
+    -- 스킨 재생은 클라 전용이므로 Multicast로 전 클라에 중계한다.
+
+    property string DamageSkinId = "6ba67548f43f48f29eb23dafd0766383"   -- 기본 메이플 데미지 스킨 (DamageSkinSettingComponent 기본값)
+    property number DelayPerAttack = 0.13    -- 다단 히트 타격 간 딜레이(초)
+
+    @ExecSpace("ServerOnly")
+    method void OnBeginPlay()
+        log("[CombatFx] ready")
+    end
+
+    @ExecSpace("ServerOnly")
+    method void SpawnDamageNumbers(any run, table hit)
+        -- HitPlan 1건 -> 타격 횟수만큼 데미지 배열을 만들어 스킨 재생.
+        -- 기준 엔티티는 몬스터가 아니라 칸 슬롯 — 처치로 몬스터가 파괴돼도 재생이 끊기지 않는다.
+        if run == nil or run.board == nil then return end
+        local slot = run.board.slots[hit.cell.col .. "_" .. hit.cell.row]
+        if slot == nil or not isvalid(slot) then return end
+        -- 재생 조건(실측): 대상 엔티티에 DamageSkinSpawnerComponent가 있어야 스킨이 출력된다
+        if not isvalid(slot.DamageSkinSpawnerComponent) then
+            slot:AddComponent(DamageSkinSpawnerComponent)
+        end
+        local damages = {}
+        for _ = 1, hit.hitCount do
+            table.insert(damages, math.floor(hit.damagePerHit + 0.5))
+        end
+        self:PlayDamageSkin(slot, damages, hit.isCrit == true)
+    end
+
+    @ExecSpace("Multicast")
+    method void PlayDamageSkin(Entity target, table damages, boolean bCritical)
+        -- 클라에서 실제 재생 (서버 실행분은 렌더러가 없어 무해한 노옵).
+        if not isvalid(target) then return end
+        _DamageSkinService:Play(target, self.DamageSkinId, self.DelayPerAttack, damages,
+            DamageSkinTweenType.Default, bCritical, Vector2(0, 0.3), Vector2(0.8, 0.8))
+    end
+end

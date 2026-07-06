@@ -1,0 +1,332 @@
+@Logic
+script CombatResolveLogic extends Logic
+    -- 공격 해석기(설계서 §5): 스킬 순서 큐 -> 패턴 회전·태그 확장 -> 공격 타입 해석 -> HitPlan 산출.
+    -- 무상태: 보드 점유는 (run, boardDef)를 인자로 받아 _BoardService 질의로만 조회. HP 차감/사망은
+    -- HitPlan 소비자(몬스터 측) 소관 — 여기서는 계산과 판정만 한다. 모든 API ServerOnly.
+    -- 크리티컬은 스킬 발동 1회당 1판정(타격마다 아님 — 기획 미세칙 미정, 단순 규칙 채택).
+
+    property boolean RunSelfTest = false   -- OnBeginPlay 자가검증. 본배선 검증 완료로 off(필요시 on).
+
+    @ExecSpace("ServerOnly")
+    method void OnBeginPlay()
+        -- 무상태라 초기화할 것 없음. 자가검증만.
+        log("[CombatResolve] ready")
+        if self.RunSelfTest then
+            self:SelfTest()
+        end
+    end
+
+    -- ===== 방향/회전 (I-4: facing <-> (dcol,drow) 매핑은 이 구획에만 존재. 보드 축 의미 확정 시 여기만 수정) =====
+
+    method any FacingVector(string facing)
+        -- facing -> 전방 단위 오프셋 {dc, dr}. 기준: CellToWorld의 row+ = 월드 위.
+        if facing == "UP" then return { dc = 0, dr = 1 } end
+        if facing == "RIGHT" then return { dc = 1, dr = 0 } end
+        if facing == "DOWN" then return { dc = 0, dr = -1 } end
+        if facing == "LEFT" then return { dc = -1, dr = 0 } end
+        log_error("[CombatResolve] 알 수 없는 facing: " .. tostring(facing))
+        return nil
+    end
+
+    method any RotateOffset(string facing, integer dc, integer dr)
+        -- 작성 기준 UP 오프셋을 facing으로 회전. 시계방향 90° k회: (dc,dr) -> (dr,-dc).
+        local k = 0
+        if facing == "RIGHT" then k = 1
+        elseif facing == "DOWN" then k = 2
+        elseif facing == "LEFT" then k = 3
+        end
+        local c = dc
+        local r = dr
+        for _ = 1, k do
+            local nc = r
+            local nr = -c
+            c = nc
+            r = nr
+        end
+        return { dc = c, dr = r }
+    end
+
+    -- ===== 태그 효과 집계 =====
+
+    @ExecSpace("ServerOnly")
+    method any BuildTagEffects(any inst)
+        -- 인스턴스 보유 태그 -> 집계 효과 { hitAdd, rangeAdd, pierce, element, elementStacks }.
+        -- count/range는 중첩 가산(사양서 §3-3). 유효 element는 최다 중첩 우선, 동률이면 나중 태그
+        -- (잠정 규칙 — 태그 다중 속성 우선순위는 기획 확정 대기, 설계서 §9). elementStacks는
+        -- "같은 속성 중복 시 효과 강화" 소비자(몬스터 측)용 중첩 수.
+        local eff = { hitAdd = 0, rangeAdd = 0, pierce = false, element = nil, elementStacks = {} }
+        for _, tagId in ipairs(inst.tags) do
+            local def = _SkillCatalogLogic:GetTagDef(tagId)
+            if def ~= nil then
+                if def.effect.hitAdd ~= nil then
+                    eff.hitAdd = eff.hitAdd + math.floor(def.effect.hitAdd)
+                end
+                if def.effect.rangeAdd ~= nil then
+                    eff.rangeAdd = eff.rangeAdd + math.floor(def.effect.rangeAdd)
+                end
+                if def.effect.pierce == true then
+                    eff.pierce = true
+                end
+                if def.effect.element ~= nil then
+                    local el = def.effect.element
+                    eff.elementStacks[el] = (eff.elementStacks[el] or 0) + 1
+                    if eff.element == nil or eff.elementStacks[el] >= eff.elementStacks[eff.element] then
+                        eff.element = el
+                    end
+                end
+            end
+        end
+        return eff
+    end
+
+    -- ===== 범위 셀 계산 =====
+
+    @ExecSpace("ServerOnly")
+    method table ComputeRangeCells(any pattern, any eff, string facing, any playerCell, any boardDef)
+        -- 패턴 오프셋 -> (회전) -> (rangeAdd 전방 연장) -> 절대 셀. 맵 밖/void는 버림(A안, 설계서 §5).
+        -- 반환 [{col,row,fwd,side}] — fwd/side는 투사체 경로 정렬용(전방거리/측면거리).
+        local fv = self:FacingVector(facing)
+        if fv == nil then return {} end
+        local offsets = {}
+        local maxFwd = 0
+        for _, o in ipairs(pattern.offsets) do
+            local rotated = { dc = o.dc, dr = o.dr }
+            if pattern.dirDependent then
+                rotated = self:RotateOffset(facing, o.dc, o.dr)
+            end
+            table.insert(offsets, rotated)
+            local fwd = rotated.dc * fv.dc + rotated.dr * fv.dr
+            if fwd > maxFwd then maxFwd = fwd end
+        end
+        -- rangeAdd: 방향 종속 패턴은 **최전방 행 전체**를 전방으로 1행씩 복제 연장.
+        -- LINE 계열(폭 1)은 끝 1칸 연장으로 종전과 동일, FRONT_WIDE/FAN(폭 n)은 n칸 행이 늘어난다
+        -- (2026-07-05 사용자 확정 — 비직선 광역도 사거리 증가 체감이 있어야 함).
+        if eff.rangeAdd > 0 then
+            if pattern.dirDependent then
+                local frontRow = {}
+                for _, o in ipairs(offsets) do
+                    if o.dc * fv.dc + o.dr * fv.dr == maxFwd then
+                        table.insert(frontRow, o)
+                    end
+                end
+                for i = 1, eff.rangeAdd do
+                    for _, o in ipairs(frontRow) do
+                        table.insert(offsets, { dc = o.dc + fv.dc * i, dr = o.dr + fv.dr * i })
+                    end
+                end
+            else
+                log_warning("[CombatResolve] rangeAdd는 방향 무관 패턴 미지원(기획 미정): " .. tostring(pattern.rangeId))
+            end
+        end
+        local cells = {}
+        for _, o in ipairs(offsets) do
+            local col = playerCell.col + o.dc
+            local row = playerCell.row + o.dr
+            if _BoardService:IsInside(boardDef, col, row) then
+                table.insert(cells, {
+                    col = col,
+                    row = row,
+                    fwd = o.dc * fv.dc + o.dr * fv.dr,
+                    side = math.abs(o.dc * fv.dr - o.dr * fv.dc),
+                })
+            end
+        end
+        return cells
+    end
+
+    -- ===== 타겟 확정 =====
+
+    method any MonsterAt(any board, integer col, integer row)
+        -- 칸의 몬스터 unit 점유 레코드(없으면 nil).
+        local rec = _BoardService:GetCellLayer(board, col, row, "unit")
+        if rec ~= nil and rec.occupantKind == "monster" then
+            return rec
+        end
+        return nil
+    end
+
+    @ExecSpace("ServerOnly")
+    method table SelectTargets(string attackType, any eff, integer targetCount, table cells, any run, any boardDef, any playerCell)
+        -- 공격 타입별 해석(사양서 §4-4). 반환 [{col,row,occupantId,instanceId}].
+        -- targetCount < 1은 1로 보정 — projectile(첫 적 1체)과 target/area 간 최소 동작 통일.
+        if targetCount < 1 then targetCount = 1 end
+        local board = run.board
+        local targets = {}
+        if attackType == "projectile" then
+            -- 전방 가까운 순 경로 스캔: 차단 오브젝트에서 중단, 첫 적에서 멈춤(관통 태그 시 통과).
+            table.sort(cells, function(a, b)
+                if a.fwd ~= b.fwd then return a.fwd < b.fwd end
+                return a.side < b.side
+            end)
+            for _, cell in ipairs(cells) do
+                if _BoardService:BlocksSkill(boardDef, board, cell.col, cell.row) then
+                    break
+                end
+                local mon = self:MonsterAt(board, cell.col, cell.row)
+                if mon ~= nil then
+                    table.insert(targets, { col = cell.col, row = cell.row, occupantId = mon.occupantId, instanceId = mon.instanceId })
+                    if not eff.pierce then break end
+                    if #targets >= targetCount then break end
+                end
+            end
+        else
+            -- target(범위 내 선택) / area(범위 내 전체) — 둘 다 플레이어 최근접 순으로 targetCount 상한.
+            for _, cell in ipairs(cells) do
+                local mon = self:MonsterAt(board, cell.col, cell.row)
+                if mon ~= nil then
+                    local dist = math.max(math.abs(cell.col - playerCell.col), math.abs(cell.row - playerCell.row))
+                    table.insert(targets, { col = cell.col, row = cell.row, occupantId = mon.occupantId, instanceId = mon.instanceId, dist = dist })
+                end
+            end
+            table.sort(targets, function(a, b) return a.dist < b.dist end)
+            while #targets > targetCount do
+                table.remove(targets)
+            end
+        end
+        return targets
+    end
+
+    -- ===== 메인 진입점 =====
+
+    @ExecSpace("ServerOnly")
+    method any ResolveAttack(any ctx, any run, any boardDef)
+        -- 공격 페이즈 1회 해석. 젠 플로우(보드 측)가 호출 (통합 지점 I-1).
+        -- ctx = { stats={atk,critRate,critDmg,defPen}, order=[SkillInstance,...],
+        --         playerCell={col,row}, facing="UP"|"RIGHT"|"DOWN"|"LEFT" }
+        -- 반환 { hits=[HitPlan 항목], fired=[{skillId,cooldownTurns}], skipped=[skillId] }.
+        -- 상태 불변(쿨다운 차감·HP 적용은 호출자/소비자 몫). 헛탕(타겟 0)도 fired에 포함.
+        local result = { hits = {}, fired = {}, skipped = {} }
+        for _, inst in ipairs(ctx.order) do
+            if inst.cooldownLeft ~= nil and inst.cooldownLeft > 0 then
+                table.insert(result.skipped, inst.skillId)
+            else
+                local skillDef = _SkillCatalogLogic:GetSkill(inst.skillId)
+                if skillDef == nil then
+                    log_error("[CombatResolve] 알 수 없는 스킬: " .. tostring(inst.skillId))
+                else
+                    local pattern = _SkillCatalogLogic:GetRangePattern(skillDef.rangeId)
+                    if pattern == nil then
+                        log_error("[CombatResolve] 범위 패턴 없음: " .. tostring(skillDef.rangeId) .. " skill=" .. inst.skillId)
+                    else
+                        local eff = self:BuildTagEffects(inst)
+                        local cells = self:ComputeRangeCells(pattern, eff, ctx.facing, ctx.playerCell, boardDef)
+                        local targets = self:SelectTargets(skillDef.attackType, eff, skillDef.targetCount, cells, run, boardDef, ctx.playerCell)
+
+                        local totalHits = skillDef.hitCount + eff.hitAdd
+                        if totalHits < 1 then totalHits = 1 end
+                        local perHit = ctx.stats.atk * skillDef.perHitCoefLv3 * _SkillCatalogLogic:LevelFactor(inst.level)
+                        local isCrit = _UtilLogic:RandomDouble() < ctx.stats.critRate
+                        if isCrit then
+                            perHit = perHit * (1 + ctx.stats.critDmg)
+                        end
+                        -- 유효 속성: 태그 우선, 없으면 마스터 element 폴백 (속성 스킬은 데이터상
+                        -- 동일 속성 baseTag를 함께 들고 있어 태그 경로가 표준이고 폴백은 방어용).
+                        local element = eff.element
+                        local elementStacks = 0
+                        if element ~= nil then
+                            elementStacks = eff.elementStacks[element]
+                        else
+                            element = skillDef.element
+                            if element ~= nil and element ~= "none" then
+                                elementStacks = 1
+                            end
+                        end
+
+                        for _, t in ipairs(targets) do
+                            table.insert(result.hits, {
+                                skillId = inst.skillId,
+                                cell = { col = t.col, row = t.row },
+                                occupantId = t.occupantId,
+                                instanceId = t.instanceId,
+                                hitCount = totalHits,
+                                damagePerHit = perHit,
+                                isCrit = isCrit,
+                                element = element,
+                                elementStacks = elementStacks,
+                                defPen = ctx.stats.defPen,
+                                onHitStatus = skillDef.onHitStatus,
+                            })
+                        end
+                        table.insert(result.fired, { skillId = inst.skillId, cooldownTurns = skillDef.cooldownTurns })
+                    end
+                end
+            end
+        end
+        return result
+    end
+
+    -- ===== 자가검증(임시) =====
+
+    method string DescribeHits(table hits)
+        -- HitPlan 로그 문자열.
+        local desc = ""
+        for _, h in ipairs(hits) do
+            desc = desc .. "[" .. h.skillId .. "->" .. tostring(h.occupantId)
+                .. "@" .. h.cell.col .. "_" .. h.cell.row
+                .. " x" .. tostring(h.hitCount) .. " dmg=" .. tostring(h.damagePerHit)
+                .. " crit=" .. tostring(h.isCrit) .. " elem=" .. tostring(h.element) .. "]"
+        end
+        return desc
+    end
+
+    @ExecSpace("ServerOnly")
+    method void SelfTest()
+        -- 목 보드 위 시나리오 검증: target 최근접 / projectile 관통+차단 / area 방향무관 / 쿨다운 스킵 / rangeAdd.
+        local boardDef = _BoardCatalogLogic:GetBoardDef("classic_7x7")
+        if boardDef == nil then
+            log_error("[CombatResolve][SelfTest] BoardDef 없음")
+            return
+        end
+        local run = { board = { defId = "classic_7x7", cells = {}, instanceSeq = 0 } }
+        local board = run.board
+
+        -- 몬스터 3: (3,2) 인접 / (3,3) / (3,5). 스킬차단 바위: (3,4).
+        _BoardService:TryOccupy(boardDef, board, 3, 2, "unit", { occupantId = "monA", occupantKind = "monster" })
+        _BoardService:TryOccupy(boardDef, board, 3, 3, "unit", { occupantId = "monB", occupantKind = "monster" })
+        _BoardService:TryOccupy(boardDef, board, 3, 5, "unit", { occupantId = "monC", occupantKind = "monster" })
+        _BoardService:TryOccupy(boardDef, board, 3, 4, "object", { objectId = "rock" })
+
+        local dbl = _SkillInstanceLogic:NewInstance("ARC_DOUBLESHOT")
+        local fire = _SkillInstanceLogic:NewInstance("MAG_FIREARROW")
+        local bolt = _SkillInstanceLogic:NewInstance("MAG_THUNDERBOLT")
+        if dbl == nil or fire == nil or bolt == nil then
+            log_error("[CombatResolve][SelfTest] 인스턴스 생성 실패")
+            return
+        end
+        local ctx = {
+            stats = { atk = 10, critRate = 0, critDmg = 0.5, defPen = 0 },
+            order = { dbl, fire, bolt },
+            playerCell = { col = 3, row = 1 },
+            facing = "UP",
+        }
+
+        -- 기대: dbl(target,LINE_4) -> 최근접 monA 1체, x2타(hit2), perHit=10×0.7×0.75=5.25
+        --       fire(projectile,LINE_5,관통) -> monA, monB 관통 후 (3,4) 바위에서 차단(monC 미도달)
+        --       bolt(area,AROUND_8,방향무관) -> 인접 monA 1체, elem=thunder
+        local r1 = self:ResolveAttack(ctx, run, boardDef)
+        log("[CombatResolve][SelfTest] hits#=" .. tostring(#r1.hits)
+            .. " fired#=" .. tostring(#r1.fired) .. " skipped#=" .. tostring(#r1.skipped)
+            .. " (기대 4/3/0) " .. self:DescribeHits(r1.hits))
+
+        -- 쿨다운 스킵: fire 쿨다운 중이면 skipped
+        fire.cooldownLeft = 1
+        local r2 = self:ResolveAttack(ctx, run, boardDef)
+        log("[CombatResolve][SelfTest] 쿨다운 -> skipped#=" .. tostring(#r2.skipped)
+            .. " (기대 1: " .. tostring(r2.skipped[1]) .. "=MAG_FIREARROW)")
+        fire.cooldownLeft = 0
+
+        -- rangeAdd: dbl에 rangeUp 이식 -> LINE_4가 (3,6)까지 연장(범위 5칸). monC(3,5)도 범위 포함,
+        -- 단 target 최근접 1체 규칙이라 여전히 monA. 범위 셀 수로 검증.
+        table.insert(dbl.tags, "rangeUp")
+        local pattern = _SkillCatalogLogic:GetRangePattern("LINE_4")
+        local eff = self:BuildTagEffects(dbl)
+        local cells = self:ComputeRangeCells(pattern, eff, "UP", ctx.playerCell, boardDef)
+        log("[CombatResolve][SelfTest] rangeUp -> LINE_4 셀#=" .. tostring(#cells) .. " (기대 5)")
+
+        -- 회전 검증: LEFT면 LINE_4가 (2,1),(1,1),(0,1)... 방향으로.
+        local cellsLeft = self:ComputeRangeCells(pattern, { hitAdd = 0, rangeAdd = 0, pierce = false }, "LEFT", ctx.playerCell, boardDef)
+        local desc = ""
+        for _, c in ipairs(cellsLeft) do desc = desc .. "(" .. c.col .. "," .. c.row .. ")" end
+        log("[CombatResolve][SelfTest] LINE_4 LEFT cells=" .. desc .. " (기대 (2,1)(1,1)(0,1) — 맵밖 버림)")
+    end
+end

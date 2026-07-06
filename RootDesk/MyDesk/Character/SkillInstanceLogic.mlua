@@ -1,0 +1,189 @@
+@Logic
+script SkillInstanceLogic extends Logic
+    -- 스킬 인스턴스(런타임) 조작: 생성/레벨업/합성 태그 이식/교체 계승/재추첨 (설계서 §4.2/사양서 §3-3~§3-5).
+    -- 무상태 순수 함수 모음 — 인스턴스는 인자로 받는 테이블에만 산다(보드 run 핸들과 동일 스타일).
+    -- SkillInstance = { skillId, level(1~3), tags=[tagId,...](중복=중첩), cooldownLeft,
+    --                   lastInheritPool, lastInheritedTag } — 마지막 두 필드는 재추첨 근거.
+    -- 규칙: 공격 방식(method) 태그는 이식/계승 풀에서 항상 제외 (사양서 §4 정책 "공격 방식 태그 고정").
+
+    property boolean RunSelfTest = false   -- OnBeginPlay 자가검증. 본배선 검증 완료로 off(필요시 on).
+
+    @ExecSpace("ServerOnly")
+    method void OnBeginPlay()
+        -- 무상태라 초기화할 것 없음. 자가검증만.
+        log("[SkillInstance] ready")
+        if self.RunSelfTest then
+            self:SelfTest()
+        end
+    end
+
+    @ExecSpace("ServerOnly")
+    method any NewInstance(string skillId)
+        -- 마스터 def 기반 새 인스턴스. 미존재 스킬이면 nil.
+        local def = _SkillCatalogLogic:GetSkill(skillId)
+        if def == nil then
+            log_error("[SkillInstance] 알 수 없는 스킬: " .. tostring(skillId))
+            return nil
+        end
+        local tags = {}
+        for _, tagId in ipairs(def.baseTags) do
+            table.insert(tags, tagId)
+        end
+        return {
+            skillId = skillId,
+            level = 1,
+            tags = tags,
+            cooldownLeft = 0,
+            lastInheritPool = nil,
+            lastInheritedTag = nil,
+        }
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean LevelUpInstance(any inst)
+        -- 같은 스킬 재획득 시 레벨업. 최대 Lv.3 (사양서 §2-2). 성공 여부 반환.
+        if inst.level >= 3 then
+            return false
+        end
+        inst.level = inst.level + 1
+        return true
+    end
+
+    @ExecSpace("ServerOnly")
+    method table GetTransferablePool(any inst)
+        -- 이식/계승 가능한 태그 풀 = 보유 태그 중 inSynthesisPool=true (method 태그 제외).
+        -- 중복 보유(중첩)는 풀에도 중복 포함 — 확률 가중으로 동작(기획 미세칙 미정, 단순 규칙 채택).
+        local pool = {}
+        for _, tagId in ipairs(inst.tags) do
+            local def = _SkillCatalogLogic:GetTagDef(tagId)
+            if def ~= nil and def.inSynthesisPool then
+                table.insert(pool, tagId)
+            end
+        end
+        return pool
+    end
+
+    method any PickRandom(table pool, any excludeTagId)
+        -- 풀에서 랜덤 1개(excludeTagId 제외). 후보 없으면 nil.
+        local cands = {}
+        for _, tagId in ipairs(pool) do
+            if tagId ~= excludeTagId then
+                table.insert(cands, tagId)
+            end
+        end
+        if #cands == 0 then return nil end
+        return cands[_UtilLogic:RandomIntegerRange(1, #cands)]
+    end
+
+    @ExecSpace("ServerOnly")
+    method any SynthesizeInto(any targetInst, any sourceInst)
+        -- 합성: 소스의 이식 가능 태그 **전부**를 타겟에 승계(중복 = 중첩 가산). 이식 tagId 배열 반환(없으면 nil).
+        -- (사양서 초안 "랜덤 1종"에서 변경 — 2026-07-05 사용자 확정: 이미 먹인 태그가 재합성으로
+        --  사라지면 안 되고, 같은 태그는 중첩(×2)으로 쌓여야 한다. 재료 소멸이 그 대가.)
+        -- 소스 인스턴스 삭제(슬롯 정리)는 호출자(로드아웃) 책임.
+        local pool = self:GetTransferablePool(sourceInst)
+        if #pool == 0 then
+            log("[SkillInstance] 합성: 이식 가능 태그 없음 source=" .. tostring(sourceInst.skillId))
+            return nil
+        end
+        for _, tagId in ipairs(pool) do
+            table.insert(targetInst.tags, tagId)
+        end
+        -- 재추첨(§3-5) 근거는 마지막 이식분 1종 기준 유지 (재추첨 UI 도입 시 다건 정책 재검토)
+        targetInst.lastInheritPool = pool
+        targetInst.lastInheritedTag = pool[#pool]
+        return pool
+    end
+
+    @ExecSpace("ServerOnly")
+    method any ReplaceWith(any oldInst, string newSkillId)
+        -- 교체(사양서 §3-4): 새 인스턴스 생성 + 기존 태그 중 랜덤 1종 계승(method 제외).
+        -- 반환 { inst, inheritedTag } (inheritedTag는 nil 가능). 실패 시 nil.
+        local newInst = self:NewInstance(newSkillId)
+        if newInst == nil then
+            return nil
+        end
+        local pool = self:GetTransferablePool(oldInst)
+        local picked = self:PickRandom(pool, nil)
+        if picked ~= nil then
+            table.insert(newInst.tags, picked)
+            newInst.lastInheritPool = pool
+            newInst.lastInheritedTag = picked
+        end
+        return { inst = newInst, inheritedTag = picked }
+    end
+
+    @ExecSpace("ServerOnly")
+    method any RerollInheritedTag(any inst, boolean excludePrev)
+        -- 재추첨(사양서 §3-5): 마지막 계승 태그를 제거하고 같은 풀에서 다시 추첨.
+        -- excludePrev=true면 직전 결과 제외(기획 미정 항목 — 파라미터로 열어둠).
+        -- 횟수 제한/전리품 소모는 호출자(로드아웃/성장) 책임. 새 tagId 반환(불가 시 nil, 상태 불변).
+        if inst.lastInheritPool == nil or inst.lastInheritedTag == nil then
+            log_warning("[SkillInstance] 재추첨 불가: 계승 이력 없음 skill=" .. tostring(inst.skillId))
+            return nil
+        end
+        local exclude = nil
+        if excludePrev then exclude = inst.lastInheritedTag end
+        local picked = self:PickRandom(inst.lastInheritPool, exclude)
+        if picked == nil then
+            log("[SkillInstance] 재추첨: 대체 후보 없음 skill=" .. tostring(inst.skillId))
+            return nil
+        end
+        -- 마지막 계승분 1개 제거(뒤에서부터 탐색 — 이식은 항상 append이므로 마지막 일치가 계승분)
+        for i = #inst.tags, 1, -1 do
+            if inst.tags[i] == inst.lastInheritedTag then
+                table.remove(inst.tags, i)
+                break
+            end
+        end
+        table.insert(inst.tags, picked)
+        inst.lastInheritedTag = picked
+        return picked
+    end
+
+    -- ===== 자가검증(임시) =====
+
+    @ExecSpace("ServerOnly")
+    method void SelfTest()
+        -- 기획 합성 예시 재현: 더블샷 + 파이어애로우 -> 태그 이식. 본배선 후 RunSelfTest=false.
+        local dbl = self:NewInstance("ARC_DOUBLESHOT")
+        local fire = self:NewInstance("MAG_FIREARROW")
+        if dbl == nil or fire == nil then
+            log_error("[SkillInstance][SelfTest] 인스턴스 생성 실패")
+            return
+        end
+        log("[SkillInstance][SelfTest] dbl.tags#=" .. tostring(#dbl.tags)
+            .. " fire.tags#=" .. tostring(#fire.tags))
+
+        -- 레벨업 (Lv.3 캡)
+        local up1 = self:LevelUpInstance(dbl)
+        local up2 = self:LevelUpInstance(dbl)
+        local up3 = self:LevelUpInstance(dbl)
+        log("[SkillInstance][SelfTest] levelUp x3 -> level=" .. tostring(dbl.level)
+            .. " 3rd=" .. tostring(up3) .. " (false 기대)")
+
+        -- 합성: fire 소스 풀 = {fire} (pierce는 method라 제외)
+        local transferred = self:SynthesizeInto(dbl, fire)
+        log("[SkillInstance][SelfTest] synthesize -> transferred=" .. tostring(transferred)
+            .. " (fire 기대) dbl.tags#=" .. tostring(#dbl.tags))
+
+        -- 재추첨: 풀에 fire 1종뿐 + 직전 제외 -> nil 기대, 상태 불변
+        local rerolled = self:RerollInheritedTag(dbl, true)
+        log("[SkillInstance][SelfTest] reroll(excludePrev) -> " .. tostring(rerolled)
+            .. " (nil 기대) tags#=" .. tostring(#dbl.tags))
+
+        -- 교체: dbl -> ARC_ARROWBLOW, 계승 풀 = {hit2, fire}
+        local rep = self:ReplaceWith(dbl, "ARC_ARROWBLOW")
+        if rep == nil then
+            log_error("[SkillInstance][SelfTest] 교체 실패")
+            return
+        end
+        log("[SkillInstance][SelfTest] replace -> inherited=" .. tostring(rep.inheritedTag)
+            .. " (hit2|fire 기대) newTags#=" .. tostring(#rep.inst.tags))
+
+        -- 교체 후 재추첨: 풀 {hit2, fire}에서 직전 제외 -> 나머지 1종 기대
+        local rerolled2 = self:RerollInheritedTag(rep.inst, true)
+        log("[SkillInstance][SelfTest] reroll after replace -> " .. tostring(rerolled2)
+            .. " (직전과 다른 태그 기대) tags#=" .. tostring(#rep.inst.tags))
+    end
+end

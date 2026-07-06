@@ -1,0 +1,54 @@
+@Component
+script PlayerJobComponent extends Component
+    -- per-player 직업·전직 상태 (설계서 §4.2, 초안 기획서 §9 전직 구조).
+    -- 전직 활성 = 선택지 3회 노출 + 전리품 충분. 전리품 획득 경로(몬스터 드랍)는 몬스터 측 소관 —
+    -- AddLoot 입구만 제공. 전직 비용 수치는 기획 미정 -> AdvanceLootCost 플레이스홀더.
+
+    @Sync property string Job = ""
+    @Sync property integer Tier = 1
+    @Sync property integer LootCount = 0
+
+    property integer choiceExposure = 0
+    property integer AdvanceLootCost = 3          -- 기획 미정 플레이스홀더 (밸런스 문서 대기)
+    property integer ExposureThreshold = 3        -- 선택지 3회 노출 시 전직 활성 (초안 §9)
+
+    @ExecSpace("ServerOnly")
+    method void ResetForRun(string job)
+        -- 런 시작: 직업 확정, 1차부터. 전리품은 판 내 재화이므로 함께 초기화.
+        self.Job = job
+        self.Tier = 1
+        self.LootCount = 0
+        self.choiceExposure = 0
+    end
+
+    @ExecSpace("ServerOnly")
+    method void AddChoiceExposure()
+        -- 선택지 1회 노출 카운트 (전직 게이트 조건).
+        self.choiceExposure = self.choiceExposure + 1
+    end
+
+    @ExecSpace("ServerOnly")
+    method void AddLoot(integer amount)
+        -- 전리품 획득 (몬스터 처치 드랍 등 외부 유입 입구).
+        self.LootCount = self.LootCount + amount
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean CanAdvance()
+        -- 전직 가능 = 노출 3회 이상 + 전리품 충분 + 4차 미만.
+        if self.Tier >= 4 then return false end
+        if self.choiceExposure < self.ExposureThreshold then return false end
+        return self.LootCount >= self.AdvanceLootCost
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean Advance()
+        -- 전직: 전리품 소모, 차수+1 (스킬 풀 해금은 tier 필터가 자동 반영). 노출 카운트 리셋.
+        if not self:CanAdvance() then return false end
+        self.LootCount = self.LootCount - self.AdvanceLootCost
+        self.Tier = self.Tier + 1
+        self.choiceExposure = 0
+        log("[PlayerJob] 전직: " .. self.Job .. " -> " .. tostring(self.Tier) .. "차")
+        return true
+    end
+end

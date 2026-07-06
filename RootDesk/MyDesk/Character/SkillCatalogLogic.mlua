@@ -1,0 +1,427 @@
+@Logic
+script SkillCatalogLogic extends Logic
+    -- 캐릭터 데이터 카탈로그: 데이터셋(serveronly) -> 불변 def 파싱·검증·캐시 (설계서 §3/§4.1).
+    -- BoardCatalogLogic과 동일 패턴: lazy 캐시 + deep-copy 게터 + 적재 시 검증. 모든 게터 ServerOnly.
+    -- 범위 grid 마스크는 적재 시 (dcol,drow) 오프셋 목록으로 변환해 캐시한다.
+
+    property boolean RunSelfTest = false   -- OnBeginPlay 자가검증. 본배선 검증 완료로 off(필요시 on).
+
+    property any skillCache = nil          -- skillId -> def
+    property any rangeCache = nil          -- rangeId -> def(offsets 포함)
+    property any tagCache = nil            -- tagId -> def
+    property any statusCache = nil         -- statusId -> def
+    property any growthCache = nil         -- level -> requiredExp
+    property any jobCache = nil            -- job -> def
+    property any statChoiceCache = nil     -- [스탯 선택지 def]
+
+    @ExecSpace("ServerOnly")
+    method void OnBeginPlay()
+        -- lazy 캐시라 초기화할 것 없음. 자가검증만.
+        log("[SkillCatalog] ready")
+        if self.RunSelfTest then
+            self:SelfTest()
+        end
+    end
+
+    -- ===== 공용 헬퍼 (BoardCatalogLogic 계약과 동일) =====
+
+    method any DeepCopy(any value)
+        -- 테이블이면 재귀 복제. 게터가 내부 캐시 참조를 노출하지 않게 차단.
+        if type(value) ~= "table" then
+            return value
+        end
+        local out = {}
+        for k, v in pairs(value) do
+            out[k] = self:DeepCopy(v)
+        end
+        return out
+    end
+
+    method any ParseJsonCell(string text, any fallback)
+        -- 빈 셀("" / nil)은 fallback, 그 외 JsonUtil로 디코드.
+        if text == nil or text == "" then
+            return fallback
+        end
+        return _JsonUtil:Decode(text)
+    end
+
+    method boolean ToBool(string text, boolean fallback)
+        -- CSV 문자열 -> boolean.
+        if text == nil or text == "" then return fallback end
+        if text == "true" or text == "1" then return true end
+        if text == "false" or text == "0" then return false end
+        return fallback
+    end
+
+    -- ===== 공용 규칙 =====
+
+    method string TierToRarity(integer tier)
+        -- 전직 차수 -> 레어도 자동 유도 (사양서 §3-2 / 마스터 테이블 §0).
+        if tier <= 1 then return "N" end
+        if tier == 2 then return "R" end
+        if tier == 3 then return "E" end
+        return "U"
+    end
+
+    method number LevelFactor(integer level)
+        -- 공통 레벨 곡선: Lv1=Lv3×0.75, Lv2=×0.88, Lv3=×1.0 (마스터 테이블 §0).
+        if level <= 1 then return 0.75 end
+        if level == 2 then return 0.88 end
+        return 1.0
+    end
+
+    -- ===== TagDef =====
+
+    @ExecSpace("ServerOnly")
+    method any GetTagDefs()
+        -- 모든 태그 def 적재(tagId -> def). 1회 캐시.
+        if self.tagCache ~= nil then
+            return self.tagCache
+        end
+        local result = {}
+        local ds = _DataService:GetTable("TagDef")
+        if ds == nil then
+            log_error("[SkillCatalog] TagDef 데이터셋 없음")
+            self.tagCache = result
+            return result
+        end
+        for _, row in ipairs(ds:GetAllRow()) do
+            local tagId = row:GetItem("tagId")
+            if tagId ~= nil and tagId ~= "" then
+                result[tagId] = {
+                    tagId = tagId,
+                    name = row:GetItem("name"),
+                    category = row:GetItem("category"),
+                    inSynthesisPool = self:ToBool(row:GetItem("inSynthesisPool"), false),
+                    effect = self:ParseJsonCell(row:GetItem("effect"), {}),
+                }
+            end
+        end
+        self.tagCache = result
+        return result
+    end
+
+    @ExecSpace("ServerOnly")
+    method any GetTagDef(string tagId)
+        -- tagId -> def(deep-copy). 미존재 시 nil.
+        local defs = self:GetTagDefs()
+        return self:DeepCopy(defs[tagId])
+    end
+
+    -- ===== RangePattern =====
+
+    method any ParseGridOffsets(string rangeId, any grid)
+        -- grid 문자열 배열 -> P 원점 기준 (dcol,drow) 오프셋 목록.
+        -- 텍스트 첫 줄 = 가장 위 = drow가 큰 쪽 (설계서 §2: UP = (0,+1), CellToWorld의 row+ = 위).
+        local pRow = nil
+        local pCol = nil
+        local hitCells = {}
+        for r, line in ipairs(grid) do
+            for c = 1, #line do
+                local ch = string.sub(line, c, c)
+                if ch == "P" then
+                    if pRow ~= nil then
+                        log_error("[SkillCatalog] RangePattern P 중복: " .. rangeId)
+                        return nil
+                    end
+                    pRow = r
+                    pCol = c
+                elseif ch == "1" then
+                    table.insert(hitCells, { r = r, c = c })
+                elseif ch ~= "0" then
+                    log_error("[SkillCatalog] RangePattern 잘못된 문자 '" .. ch .. "': " .. rangeId)
+                    return nil
+                end
+            end
+        end
+        if pRow == nil then
+            log_error("[SkillCatalog] RangePattern P 없음: " .. rangeId)
+            return nil
+        end
+        local offsets = {}
+        for _, cell in ipairs(hitCells) do
+            -- 위 줄일수록(r 작을수록) drow가 큼.
+            table.insert(offsets, { dc = cell.c - pCol, dr = pRow - cell.r })
+        end
+        return offsets
+    end
+
+    @ExecSpace("ServerOnly")
+    method any GetRangePattern(string rangeId)
+        -- rangeId -> { rangeId, facingBase, dirDependent, offsets=[{dc,dr},...] } (deep-copy).
+        if self.rangeCache == nil then
+            self.rangeCache = {}
+            local ds = _DataService:GetTable("RangePattern")
+            if ds == nil then
+                log_error("[SkillCatalog] RangePattern 데이터셋 없음")
+            else
+                for _, row in ipairs(ds:GetAllRow()) do
+                    local id = row:GetItem("rangeId")
+                    if id ~= nil and id ~= "" then
+                        local grid = self:ParseJsonCell(row:GetItem("grid"), {})
+                        local offsets = self:ParseGridOffsets(id, grid)
+                        if offsets ~= nil then
+                            self.rangeCache[id] = {
+                                rangeId = id,
+                                facingBase = row:GetItem("facingBase"),
+                                dirDependent = self:ToBool(row:GetItem("dirDependent"), false),
+                                offsets = offsets,
+                            }
+                        end
+                    end
+                end
+            end
+        end
+        return self:DeepCopy(self.rangeCache[rangeId])
+    end
+
+    -- ===== SkillMaster =====
+
+    method integer CountBaseHits(any def)
+        -- 기본 최종 타격수 = hitCount + 기본 태그의 hitAdd 합 (설계서 §3: coefLv3 나눗셈 기준).
+        local hits = def.hitCount
+        local tags = self:GetTagDefs()
+        for _, tagId in ipairs(def.baseTags) do
+            local tag = tags[tagId]
+            if tag ~= nil and tag.effect.hitAdd ~= nil then
+                hits = hits + math.floor(tag.effect.hitAdd)
+            end
+        end
+        if hits < 1 then hits = 1 end
+        return hits
+    end
+
+    @ExecSpace("ServerOnly")
+    method void EnsureSkillCache()
+        -- SkillMaster 전체 적재(1회). rarity/perHitCoefLv3는 적재 시 산출.
+        if self.skillCache == nil then
+            self.skillCache = {}
+            local ds = _DataService:GetTable("SkillMaster")
+            if ds == nil then
+                log_error("[SkillCatalog] SkillMaster 데이터셋 없음")
+            else
+                for _, row in ipairs(ds:GetAllRow()) do
+                    local id = row:GetItem("skillId")
+                    if id ~= nil and id ~= "" then
+                        local def = {
+                            skillId = id,
+                            name = row:GetItem("name"),
+                            job = row:GetItem("job"),
+                            tier = math.floor(tonumber(row:GetItem("tier")) or 1),
+                            attackType = row:GetItem("attackType"),
+                            hitCount = math.floor(tonumber(row:GetItem("hitCount")) or 1),
+                            targetCount = math.floor(tonumber(row:GetItem("targetCount")) or 1),
+                            rangeId = row:GetItem("rangeId"),
+                            element = row:GetItem("element"),
+                            baseTags = self:ParseJsonCell(row:GetItem("baseTags"), {}),
+                            coefLv3 = tonumber(row:GetItem("coefLv3")) or 1.0,
+                            onHitStatus = row:GetItem("onHitStatus"),
+                            cooldownTurns = math.floor(tonumber(row:GetItem("cooldownTurns")) or 0),
+                            iconRuid = row:GetItem("iconRuid"),
+                            hitFxRuid = row:GetItem("hitFxRuid"),
+                            desc = row:GetItem("desc"),
+                        }
+                        def.rarity = self:TierToRarity(def.tier)
+                        def.perHitCoefLv3 = def.coefLv3 / self:CountBaseHits(def)
+                        self:ValidateSkill(def)
+                        self.skillCache[id] = def
+                    end
+                end
+            end
+        end
+    end
+
+    @ExecSpace("ServerOnly")
+    method any GetSkill(string skillId)
+        -- skillId -> def(deep-copy). 미존재 시 nil.
+        self:EnsureSkillCache()
+        return self:DeepCopy(self.skillCache[skillId])
+    end
+
+    @ExecSpace("ServerOnly")
+    method void ValidateSkill(any def)
+        -- 적재 시 참조 무결성 검증: rangeId/baseTags/onHitStatus 존재 확인 (경고만, 차단 안 함).
+        if self:GetRangePattern(def.rangeId) == nil then
+            log_error("[SkillCatalog] 스킬 " .. def.skillId .. " rangeId 무효: " .. tostring(def.rangeId))
+        end
+        local tags = self:GetTagDefs()
+        for _, tagId in ipairs(def.baseTags) do
+            if tags[tagId] == nil then
+                log_error("[SkillCatalog] 스킬 " .. def.skillId .. " baseTag 무효: " .. tostring(tagId))
+            end
+        end
+        if def.onHitStatus ~= nil and def.onHitStatus ~= "" and self:GetStatusEffect(def.onHitStatus) == nil then
+            log_error("[SkillCatalog] 스킬 " .. def.skillId .. " onHitStatus 무효: " .. tostring(def.onHitStatus))
+        end
+    end
+
+    @ExecSpace("ServerOnly")
+    method table GetSkillIdsByJobTier(string job, integer maxTier)
+        -- 직업 + 차수 상한 필터 스킬 id 목록 (선택지 풀).
+        self:EnsureSkillCache()
+        local result = {}
+        for id, def in pairs(self.skillCache) do
+            if def.job == job and def.tier <= maxTier then
+                table.insert(result, id)
+            end
+        end
+        return result
+    end
+
+    -- ===== StatusEffectDef =====
+
+    @ExecSpace("ServerOnly")
+    method any GetStatusEffect(string statusId)
+        -- statusId -> def(deep-copy). 미존재 시 nil.
+        if self.statusCache == nil then
+            self.statusCache = {}
+            local ds = _DataService:GetTable("StatusEffectDef")
+            if ds == nil then
+                log_error("[SkillCatalog] StatusEffectDef 데이터셋 없음")
+            else
+                for _, row in ipairs(ds:GetAllRow()) do
+                    local id = row:GetItem("statusId")
+                    if id ~= nil and id ~= "" then
+                        self.statusCache[id] = {
+                            statusId = id,
+                            name = row:GetItem("name"),
+                            params = self:ParseJsonCell(row:GetItem("params"), {}),
+                        }
+                    end
+                end
+            end
+        end
+        return self:DeepCopy(self.statusCache[statusId])
+    end
+
+    -- ===== GrowthCurve =====
+
+    @ExecSpace("ServerOnly")
+    method any GetRequiredExp(integer level)
+        -- 해당 레벨에서 다음 레벨까지 필요한 EXP. 곡선 범위 밖이면 마지막 값 유지.
+        if self.growthCache == nil then
+            self.growthCache = { maxLevel = 0, byLevel = {} }
+            local ds = _DataService:GetTable("GrowthCurve")
+            if ds == nil then
+                log_error("[SkillCatalog] GrowthCurve 데이터셋 없음")
+            else
+                for _, row in ipairs(ds:GetAllRow()) do
+                    local lv = math.floor(tonumber(row:GetItem("level")) or 0)
+                    local exp = math.floor(tonumber(row:GetItem("requiredExp")) or 0)
+                    if lv >= 1 then
+                        self.growthCache.byLevel[lv] = exp
+                        if lv > self.growthCache.maxLevel then
+                            self.growthCache.maxLevel = lv
+                        end
+                    end
+                end
+            end
+        end
+        if self.growthCache.maxLevel == 0 then return nil end
+        local capped = level
+        if capped > self.growthCache.maxLevel then capped = self.growthCache.maxLevel end
+        if capped < 1 then capped = 1 end
+        return self.growthCache.byLevel[capped]
+    end
+
+    -- ===== JobBase =====
+
+    @ExecSpace("ServerOnly")
+    method any GetJobBase(string job)
+        -- job -> { job, baseStats={atk,critRate,critDmg,defPen}, firstSkillPair } (deep-copy).
+        -- stat 키는 보드 Modifier 계약과 동일 (설계서 §1.2-2).
+        if self.jobCache == nil then
+            self.jobCache = {}
+            local ds = _DataService:GetTable("JobBase")
+            if ds == nil then
+                log_error("[SkillCatalog] JobBase 데이터셋 없음")
+            else
+                for _, row in ipairs(ds:GetAllRow()) do
+                    local id = row:GetItem("job")
+                    if id ~= nil and id ~= "" then
+                        self.jobCache[id] = {
+                            job = id,
+                            baseStats = {
+                                atk = tonumber(row:GetItem("baseAtk")) or 0,
+                                critRate = tonumber(row:GetItem("critRate")) or 0,
+                                critDmg = tonumber(row:GetItem("critDmg")) or 0,
+                                defPen = tonumber(row:GetItem("defPen")) or 0,
+                            },
+                            firstSkillPair = self:ParseJsonCell(row:GetItem("firstSkillPair"), {}),
+                        }
+                    end
+                end
+            end
+        end
+        return self:DeepCopy(self.jobCache[job])
+    end
+
+    -- ===== StatChoiceDef =====
+
+    @ExecSpace("ServerOnly")
+    method table GetStatChoices()
+        -- 능력치 선택지 목록(deep-copy). Modifier 계약 필드(stat/modType/value)로 구성.
+        if self.statChoiceCache == nil then
+            self.statChoiceCache = {}
+            local ds = _DataService:GetTable("StatChoiceDef")
+            if ds == nil then
+                log_error("[SkillCatalog] StatChoiceDef 데이터셋 없음")
+            else
+                for _, row in ipairs(ds:GetAllRow()) do
+                    local id = row:GetItem("choiceId")
+                    if id ~= nil and id ~= "" then
+                        table.insert(self.statChoiceCache, {
+                            choiceId = id,
+                            name = row:GetItem("name"),
+                            stat = row:GetItem("stat"),
+                            modType = row:GetItem("modType"),
+                            value = tonumber(row:GetItem("value")) or 0,
+                            desc = row:GetItem("desc"),
+                            iconRuid = row:GetItem("iconRuid"),
+                        })
+                    end
+                end
+            end
+        end
+        return self:DeepCopy(self.statChoiceCache)
+    end
+
+    -- ===== 자가검증(임시) =====
+
+    @ExecSpace("ServerOnly")
+    method void SelfTest()
+        -- 데이터셋 로드·파싱·검증 확인. 본배선 후 RunSelfTest=false.
+        local dbl = self:GetSkill("ARC_DOUBLESHOT")
+        if dbl == nil then
+            log_error("[SkillCatalog][SelfTest] ARC_DOUBLESHOT 로드 실패")
+        else
+            log("[SkillCatalog][SelfTest] ARC_DOUBLESHOT rarity=" .. dbl.rarity
+                .. " perHitCoefLv3=" .. tostring(dbl.perHitCoefLv3)
+                .. " baseTags#=" .. tostring(#dbl.baseTags))
+        end
+        local line4 = self:GetRangePattern("LINE_4")
+        local cross = self:GetRangePattern("CROSS_4")
+        log("[SkillCatalog][SelfTest] LINE_4 offsets#=" .. tostring(line4 and #line4.offsets or "nil")
+            .. " dirDep=" .. tostring(line4 and line4.dirDependent or "nil")
+            .. " CROSS_4 offsets#=" .. tostring(cross and #cross.offsets or "nil"))
+        if line4 ~= nil then
+            local desc = ""
+            for _, o in ipairs(line4.offsets) do
+                desc = desc .. "(" .. o.dc .. "," .. o.dr .. ")"
+            end
+            log("[SkillCatalog][SelfTest] LINE_4 offsets=" .. desc)
+        end
+        local hit2 = self:GetTagDef("hit2")
+        log("[SkillCatalog][SelfTest] tag hit2 pool=" .. tostring(hit2 and hit2.inSynthesisPool or "nil")
+            .. " hitAdd=" .. tostring(hit2 and hit2.effect.hitAdd or "nil"))
+        local arcPool = self:GetSkillIdsByJobTier("ARC", 1)
+        local magPool = self:GetSkillIdsByJobTier("MAG", 1)
+        log("[SkillCatalog][SelfTest] pool ARC(tier<=1)#=" .. tostring(#arcPool)
+            .. " MAG(tier<=1)#=" .. tostring(#magPool))
+        local jb = self:GetJobBase("ARC")
+        log("[SkillCatalog][SelfTest] JobBase.ARC atk=" .. tostring(jb and jb.baseStats.atk or "nil")
+            .. " firstPair#=" .. tostring(jb and #jb.firstSkillPair or "nil"))
+        log("[SkillCatalog][SelfTest] requiredExp(1)=" .. tostring(self:GetRequiredExp(1))
+            .. " requiredExp(99,클램프)=" .. tostring(self:GetRequiredExp(99)))
+    end
+end

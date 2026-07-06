@@ -1,0 +1,192 @@
+@Component
+script PlayerRunComponent extends Component
+    -- per-player 런 오케스트레이터 (설계서 §4.2): 하위 컴포넌트(스탯/직업/로드아웃/성장) 일괄 리셋,
+    -- 공격 페이즈/턴 종료 훅의 단일 진입점. 보드 run/def 핸들은 런 시작 시 주입(통합 지점 I-2).
+    -- 이어하기(RestoreRun)는 세이브 스키마를 보드와 합의 후 후속 구현 (설계서 §6).
+
+    @Sync property boolean RunActive = false
+
+    property any run = nil            -- 보드 run 핸들 (run.board 점유 상태)
+    property any boardDef = nil       -- BoardDef (deep-copy본)
+    property any cameraAnchor = nil   -- 고정 카메라 앵커 엔티티 (런 동안 유지)
+
+    @ExecSpace("ServerOnly")
+    method any Stat()
+        -- 형제 컴포넌트 조회 헬퍼.
+        return self.Entity:GetComponent("script.PlayerStatComponent")
+    end
+
+    @ExecSpace("ServerOnly")
+    method any Loadout()
+        -- 형제 컴포넌트 조회 헬퍼.
+        return self.Entity:GetComponent("script.SkillLoadoutComponent")
+    end
+
+    @ExecSpace("ServerOnly")
+    method any Growth()
+        -- 형제 컴포넌트 조회 헬퍼.
+        return self.Entity:GetComponent("script.PlayerGrowthComponent")
+    end
+
+    @ExecSpace("ServerOnly")
+    method any JobComp()
+        -- 형제 컴포넌트 조회 헬퍼.
+        return self.Entity:GetComponent("script.PlayerJobComponent")
+    end
+
+    @ExecSpace("ServerOnly")
+    method void StartRun(string job, any run, any def)
+        -- 런 시작: 직업 확정 -> 스탯 베이스 -> 로드아웃/성장 리셋 -> 진입 선택지(2중1) 노출.
+        local jb = _SkillCatalogLogic:GetJobBase(job)
+        if jb == nil then
+            log_error("[PlayerRun] JobBase 없음: " .. tostring(job) .. " — 런 시작 중단")
+            return
+        end
+        -- 하위 컴포넌트 부착 실패(EnsureRunComponents 에러) 시 nil 역참조 방지
+        if self:JobComp() == nil or self:Stat() == nil or self:Loadout() == nil or self:Growth() == nil then
+            log_error("[PlayerRun] 하위 컴포넌트 누락 — 런 시작 중단")
+            return
+        end
+        self.run = run
+        self.boardDef = def
+        self:JobComp():ResetForRun(job)
+        self:Stat():ResetForRun(jb.baseStats)
+        self:Loadout():ResetForRun()
+        self:Growth():ResetForRun()
+        self:SetFreeMoveEnabled(false)   -- 아바타 = 보드 말(I-3): WASD 자유 이동 잠금, 이동은 젠 재배치로만
+        self:SetupFixedCamera()          -- 카메라 고정: 보드 전체 뷰 (재배치 시 카메라 이동 없음)
+        self.RunActive = true
+        log("[PlayerRun] 런 시작: job=" .. job .. " layout=" .. tostring(def.layoutId))
+        self:Growth():PresentFirstEntryChoices()
+    end
+
+    @ExecSpace("ServerOnly")
+    method void SetFreeMoveEnabled(boolean enabled)
+        -- 입력 기반 자유 이동 토글. PlayerControllerComponent가 입력->이동을 담당하므로 그것만 끈다.
+        local pc = self.Entity.PlayerControllerComponent
+        if isvalid(pc) then
+            pc.Enable = enabled
+        end
+        if not enabled and isvalid(self.Entity.MovementComponent) then
+            self.Entity.MovementComponent:Stop()
+        end
+        log("[PlayerRun] 자유 이동 " .. (enabled and "해제(허용)" or "잠금"))
+    end
+
+    @ExecSpace("ServerOnly")
+    method void SetupFixedCamera()
+        -- 보드 중앙(월드 원점 — CellToWorld가 중앙 정렬)에 고정 카메라 앵커를 만들어 전환.
+        -- 플레이어 추적 카메라 대신 보드판+플레이어가 항상 한 화면에 들어온다.
+        local mapEntity = self.run.board.mapEntityRef
+        if not isvalid(mapEntity) then
+            log_error("[PlayerRun] 맵 엔티티 무효 — 고정 카메라 생략")
+            return
+        end
+        -- ScreenOffset은 전환된 고정 카메라에 반영되지 않는 것이 실측됨(기본 0.655 유지 —
+        -- 타겟이 화면 위에서 65.5% 지점에 렌더). 앵커를 보드 중심 아래(-1.3유닛)에 두면
+        -- 카메라가 내려가 보드 중심이 화면 세로 중앙에 온다: (0.655-0.5) × 세로시야(7.2/0.85) ≈ 1.3
+        local anchor = _SpawnService:SpawnByModelId("BoardSlot", "CameraAnchor", Vector3(0, -1.3, 0), mapEntity)
+        if not isvalid(anchor) then
+            log_error("[PlayerRun] 카메라 앵커 스폰 실패")
+            return
+        end
+        ---@type CameraComponent
+        local cam = anchor:AddComponent(CameraComponent)
+        if cam == nil then
+            log_error("[PlayerRun] CameraComponent 부착 실패")
+            anchor:Destroy()
+            return
+        end
+        cam.ZoomRatio = 85   -- 살짝 줌아웃 — 최대 9×9 보드도 상하 여유 확보
+        self.cameraAnchor = anchor
+        _CameraService:SwitchCameraTo(cam, self.Entity.PlayerComponent.UserId)
+        log("[PlayerRun] 고정 카메라 전환 (보드 전체 뷰)")
+    end
+
+    @ExecSpace("ServerOnly")
+    method void RestorePlayerCamera()
+        -- 런 종료: 플레이어 추적 카메라 복귀 + 앵커 정리.
+        if isvalid(self.Entity.CameraComponent) then
+            _CameraService:SwitchCameraTo(self.Entity.CameraComponent, self.Entity.PlayerComponent.UserId)
+        end
+        if isvalid(self.cameraAnchor) then
+            self.cameraAnchor:Destroy()
+        end
+        self.cameraAnchor = nil
+    end
+
+    @ExecSpace("ServerOnly")
+    method void TeleportToCell(any run, any def, integer col, integer row)
+        -- 보드 셀 좌표로 아바타 순간이동 (젠 재배치용). RectTile Kinematicbody는 직접 Position 쓰기가
+        -- 물리에 덮이므로 SetWorldPosition 사용.
+        local pos = _BoardService:CellToWorld(def, run.board, col, row)
+        local body = self.Entity.KinematicbodyComponent
+        if isvalid(body) then
+            body:SetWorldPosition(Vector2(pos.x, pos.y))
+        else
+            log_error("[PlayerRun] KinematicbodyComponent 없음 — 텔레포트 실패")
+        end
+    end
+
+    @ExecSpace("ServerOnly")
+    method any ResolveSingleSkill(any inst, string facing, any playerCell)
+        -- 단일 스킬 발동 해석 (통합 지점 I-1 — 순차 발동): 젠 플로우가 발동 순서대로 하나씩 호출.
+        -- 앞 스킬의 처치가 보드에 반영된 뒤 호출되므로 죽은 적은 다음 스킬 타겟에서 자연 제외된다.
+        -- HitPlan 산출 + 쿨다운 개시 + 스킬별 AttackResolvedEvent 발행. HP 적용은 소비자(몬스터) 몫.
+        if not self.RunActive then
+            log_warning("[PlayerRun] 런 비활성 상태에서 공격 해석 호출")
+            return nil
+        end
+        local ctx = {
+            stats = self:Stat():GetStatsSnapshot(),
+            order = { inst },
+            playerCell = playerCell,
+            facing = facing,
+        }
+        local result = _CombatResolveLogic:ResolveAttack(ctx, self.run, self.boardDef)
+        self:Loadout():ApplyFired(result.fired)
+        local ev = AttackResolvedEvent()
+        ev.hits = result.hits
+        ev.fired = result.fired
+        ev.skipped = result.skipped
+        self.Entity:SendEvent(ev)
+        return result
+    end
+
+    @ExecSpace("ServerOnly")
+    method void OnTurnEnd()
+        -- 턴 종료 훅 (통합 지점 I-1): 쿨다운/지속 버프 차감. 젠 플로우가 호출.
+        if not self.RunActive then return end
+        self:Loadout():TickCooldowns()
+        self:Stat():TickTurnDurations()
+    end
+
+    @ExecSpace("ServerOnly")
+    method void ApplyCellEnter(table mods)
+        -- 재배치로 칸 진입 시 보드 OnUnitEnter 산출 Modifier[] 유입 (통합 지점 I-5).
+        self:Stat():ApplyModifiers(mods)
+    end
+
+    @ExecSpace("ServerOnly")
+    method void ApplyCellExit(table sources)
+        -- 칸 이탈 시 보드 OnUnitExit 산출 source[] 해제 (통합 지점 I-5).
+        for _, source in ipairs(sources) do
+            self:Stat():RemoveBySource(source)
+        end
+    end
+
+    @ExecSpace("ServerOnly")
+    method void EndRun(string result)
+        -- 런 종료: 상태 비활성 + 이벤트. 데이터 초기화는 다음 StartRun이 수행.
+        if not self.RunActive then return end
+        self.RunActive = false
+        self.run = nil
+        self.boardDef = nil
+        self:SetFreeMoveEnabled(true)   -- 로비 복귀 대비 자유 이동 복원
+        self:RestorePlayerCamera()
+        local ev = RunEndedEvent()
+        ev.result = result
+        self.Entity:SendEvent(ev)
+        log("[PlayerRun] 런 종료: " .. result)
+    end
+end

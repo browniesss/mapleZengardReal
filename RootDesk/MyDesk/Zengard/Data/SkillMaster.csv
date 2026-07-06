@@ -1,0 +1,11 @@
+﻿skillId,name,job,tier,attackType,hitCount,targetCount,rangeId,element,baseTags,coefLv3,onHitStatus,cooldownTurns,iconRuid,hitFxRuid,desc
+WAR_POWERSTRIKE,파워 스트라이크,WAR,1,target,1,1,CROSS_4,none,"[""target""]",1.85,,0,e4acdf27d68549db8858d6082169c70c,8d5f87e0fbcf4e6f8ef40645cd47ab80,인접 4칸의 적 하나를 강하게 내려친다
+WAR_SLASHBLAST,슬래시 블러스트,WAR,1,area,1,6,AROUND_8,none,"[""area""]",1.05,,0,1dc02c9673284efb94da9c86e7414eeb,3391f7b171ad447eb82c8968f5a329df,주변 8칸의 적을 한꺼번에 벤다
+ARC_DOUBLESHOT,더블 샷,ARC,1,target,1,1,LINE_4,none,"[""target"",""hit2""]",1.4,,0,2e5d538e525a4e98a4287b52c15d594a,9a389de7a9a24a9bb70a37a901e39306,직선 4칸의 적 하나에게 화살 2발을 쏜다
+ARC_ARROWBLOW,애로우 블로우,ARC,1,target,1,1,LINE_4,none,"[""target""]",1.6,,0,3f0ca15a193b4933acce1332cbccf20d,d102da7303a94e89aa842696211d8285,직선 4칸의 적 하나에게 강한 화살을 쏜다
+ARC_IRONARROW,아이언 애로우,ARC,1,projectile,1,4,LINE_5,none,"[""pierce""]",1.6,,1,0cfe777a9cd04df9bbb22a18a598e9b7,ac3bb2f149804b2d8a605e8974129661,직선 5칸을 관통하며 최대 4체를 꿰뚫는다
+ARC_ARROWRAIN,애로우 레인,ARC,1,area,1,8,FRONT_WIDE,none,"[""area""]",1.5,,1,4de93d7ef4af460aa062b46db693c235,c2c6a9a68218450db2083e06c8df8c9d,전방 넓은 범위에 화살비를 쏟아붓는다
+MAG_FIREARROW,파이어 애로우,MAG,2,projectile,1,3,LINE_5,fire,"[""pierce"",""fire""]",1.9,,1,32fbde383e424077b18662ed1598fa4d,7614d50d45764b37867b9d2f8dec5883,직선 5칸을 관통하는 화염 화살을 날린다
+MAG_COLDBEAM,콜드 빔,MAG,2,target,1,1,LINE_5,ice,"[""target"",""ice""]",1.9,freeze,1,582433ef9f984f03850a570b664ba082,3d97ae3330c34f068d899c4da4f3da5d,직선 5칸의 적 하나를 얼음 광선으로 빙결시킨다
+MAG_THUNDERBOLT,썬더 볼트,MAG,2,area,1,6,AROUND_8,thunder,"[""area"",""thunder""]",1.3,,1,335bbd0543c64a4fbe063601be94c7f5,4bbaacc879104c7a9d9bdb786769f2ac,주변 8칸에 번개를 내리친다
+THF_LUCKYSEVEN,럭키 세븐,THF,1,target,1,1,LINE_6,none,"[""target"",""hit2""]",1.4,,0,a49c086a08b14c19bb7b9ae483dff2cc,24ca7d365c1242d4bfedfd399042cc6b,직선 6칸의 적 하나에게 표창 2개를 던진다

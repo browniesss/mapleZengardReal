@@ -1,0 +1,5 @@
+@Event
+script LevelUpEvent extends EventType
+    -- 판 내 레벨업 알림 (설계서 §4.3). PlayerGrowthComponent가 소유 엔티티에 발행.
+    property integer newLevel = 1
+end

@@ -1,0 +1,7 @@
+@Event
+script ChoicePresentedEvent extends EventType
+    -- 레벨업 선택지 노출 (설계서 §4.3, 규칙서 §6.1). 소비자: 선택지 오버레이 UI(후속).
+    -- choices = [{ kind="skill", skillId, name, rarity }, ...]
+    property table choices = {}
+    property boolean isFirstEntry = false
+end

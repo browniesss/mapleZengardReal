@@ -1,0 +1,6 @@
+@Event
+script ChoiceCommittedEvent extends EventType
+    -- 선택지 확정 결과 (설계서 §4.3). 소비자: 선택지 오버레이 닫기/빌드 바 갱신.
+    property string skillId = ""
+    property string resultStatus = ""   -- acquired | leveled | full
+end

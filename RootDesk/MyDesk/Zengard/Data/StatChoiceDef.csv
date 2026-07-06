@@ -1,0 +1,4 @@
+﻿choiceId,name,stat,modType,value,desc,iconRuid
+statAtk10,공격력 강화,atk,percentAdd,0.1,공격력이 10% 증가한다,1a20af5416dc428fa25ac2ef9e1836cf
+statCrit5,크리티컬 확률,critRate,flat,0.05,크리티컬 확률이 5%p 증가한다,0bd163b58c3b46c59dbc1656b5c6b314
+statCritDmg20,크리티컬 데미지,critDmg,flat,0.2,크리티컬 데미지가 20%p 증가한다,0bd163b58c3b46c59dbc1656b5c6b314

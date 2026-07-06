@@ -1,0 +1,5 @@
+@Event
+script RunEndedEvent extends EventType
+    -- 런 종료 알림 (설계서 §4.2). 소비자: 결과 화면/보상 정산(후속).
+    property string result = ""   -- clear | fail | abort
+end

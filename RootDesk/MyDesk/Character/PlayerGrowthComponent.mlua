@@ -1,0 +1,338 @@
+@Component
+script PlayerGrowthComponent extends Component
+    -- per-player 판 내 성장 (설계서 §4.2, 규칙서 §6): EXP -> 레벨업 -> 선택지.
+    -- 판마다 Lv.1 초기화(계정 레벨 없음). 진입 즉시 2중1 강제(1차 스킬 — 데드락 차단, 규칙서 §6.1).
+    -- 장비 선택지(10%)는 장비 시스템 미구현으로 EquipChance=0 잠정 — 도입 시 값만 올리면 됨.
+
+    @Sync property integer Level = 1
+    @Sync property integer Exp = 0
+    @Sync property integer NextExp = 0   -- 다음 레벨 필요 EXP (HUD 프로필 표시용 — 곡선은 서버 데이터셋)
+
+    property any pendingChoices = nil   -- 노출 중 선택지 [{kind,skillId,name,rarity,...}] (nil=없음)
+    property boolean levelUpHold = false -- 공격 해소 중 레벨업 보류 — 체인 종료 후 일괄 판정 (2026-07-05 사용자 확정)
+    property number EquipChance = 0     -- 장비 등장 확률 (기획 10% — 장비 시스템 도입 시 활성)
+    property integer ChoiceCount = 3    -- 기본 선택지 수 (전리품 확장 시 5)
+    property number SynthesisChance = 1 -- 합성 선택지 등장 확률 (기획 "확률적" — 테스트 동안 100%)
+
+    @ExecSpace("ServerOnly")
+    method void ResetForRun()
+        -- 런 시작: Lv.1/EXP 0. 진입 선택지는 PlayerRunComponent가 PresentFirstEntryChoices로 트리거.
+        self.Level = 1
+        self.Exp = 0
+        self.NextExp = _SkillCatalogLogic:GetRequiredExp(1) or 0
+        self.pendingChoices = nil
+        self.levelUpHold = false
+    end
+
+    @ExecSpace("ServerOnly")
+    method any GetJobComponent()
+        -- 형제 직업 컴포넌트 조회.
+        return self.Entity:GetComponent("script.PlayerJobComponent")
+    end
+
+    @ExecSpace("ServerOnly")
+    method void PresentFirstEntryChoices()
+        -- 진입 즉시 2중1: 직업의 1차 공격 스킬 페어 (규칙서 §6.1 데드락 차단).
+        local jobComp = self:GetJobComponent()
+        local jb = _SkillCatalogLogic:GetJobBase(jobComp.Job)
+        if jb == nil then
+            log_error("[PlayerGrowth] JobBase 없음: " .. tostring(jobComp.Job))
+            return
+        end
+        local choices = {}
+        for _, skillId in ipairs(jb.firstSkillPair) do
+            local def = _SkillCatalogLogic:GetSkill(skillId)
+            if def ~= nil then
+                table.insert(choices, { kind = "skill", skillId = skillId, name = def.name, rarity = def.rarity,
+                    iconRuid = def.iconRuid, desc = def.desc })
+            end
+        end
+        self:PresentChoices(choices, true)
+    end
+
+    @ExecSpace("ServerOnly")
+    method void PresentChoices(table choices, boolean isFirstEntry)
+        -- 선택지 노출: pending 보관 + 이벤트 발행(서버) + 소유 클라 UI 통지 + 노출 카운트(전직 게이트).
+        self.pendingChoices = choices
+        local jobComp = self:GetJobComponent()
+        if jobComp ~= nil then jobComp:AddChoiceExposure() end
+        local ev = ChoicePresentedEvent()
+        ev.choices = choices
+        ev.isFirstEntry = isFirstEntry
+        self.Entity:SendEvent(ev)
+        local desc = ""
+        for _, c in ipairs(choices) do
+            desc = desc .. "[" .. tostring(c.skillId or c.name) .. "/" .. tostring(c.rarity) .. "]"
+        end
+        log("[PlayerGrowth] 선택지 노출 (" .. tostring(#choices) .. "개): " .. desc)
+        self:ShowChoicesOnClient(choices, isFirstEntry, self.Entity.PlayerComponent.UserId)
+    end
+
+    @ExecSpace("Client")
+    method void ShowChoicesOnClient(table choices, boolean isFirstEntry)
+        -- 소유 클라에서 실행: 선택지 오버레이 UI에 로컬 이벤트로 전달 (UI는 LocalPlayer 구독).
+        local ev = ChoicePresentedEvent()
+        ev.choices = choices
+        ev.isFirstEntry = isFirstEntry
+        self.Entity:SendEvent(ev)
+    end
+
+    @ExecSpace("Server")
+    method void RequestCommitChoice(integer index)
+        -- 클라(선택지 UI) -> 서버 커밋 요청. 소유자 검증 후 CommitChoice.
+        if senderUserId ~= self.Entity.PlayerComponent.UserId then
+            log_warning("[PlayerGrowth] 비소유자 커밋 요청 무시: " .. senderUserId)
+            return
+        end
+        self:CommitChoice(index)
+    end
+
+    @ExecSpace("ServerOnly")
+    method string RollRarity()
+        -- 레어도 추첨: N60 / R28 / E10 / U2 (사양서 §3-2).
+        local r = _UtilLogic:RandomDouble() * 100
+        if r < 60 then return "N" end
+        if r < 88 then return "R" end
+        if r < 98 then return "E" end
+        return "U"
+    end
+
+    method integer RarityToTier(string rarity)
+        -- 레어도 -> 전직 차수 (마스터 테이블 §0 자동 규칙의 역방향).
+        if rarity == "N" then return 1 end
+        if rarity == "R" then return 2 end
+        if rarity == "E" then return 3 end
+        return 4
+    end
+
+    @ExecSpace("ServerOnly")
+    method table RollChoices(integer count)
+        -- 레벨업 선택지 조립 (규칙서 §6.1 / 초안 §8 / 사양서 §3):
+        --   ① 합성 후보(있으면 확률 등장, 1슬롯) ② 능력치 후보(최소 1슬롯 보장 — 데드락 방지)
+        --   ③ 나머지는 스킬 후보(슬롯 만석이면 신규 제외, 보유 스킬 레벨업만)
+        -- 스킬 후보가 고갈돼도 능력치로 채우므로 선택지가 항상 count개 구성된다. 마지막에 셔플.
+        local jobComp = self:GetJobComponent()
+        ---@type SkillLoadoutComponent
+        local loadout = self.Entity:GetComponent("script.SkillLoadoutComponent")
+        local choices = {}
+        local usedStatIds = {}
+
+        local synth = self:RollSynthesisChoice(loadout)
+        if synth ~= nil and _UtilLogic:RandomDouble() < self.SynthesisChance then
+            table.insert(choices, synth)
+        end
+
+        local statChoice = self:RollStatChoice(loadout, usedStatIds)
+        if statChoice ~= nil then
+            table.insert(choices, statChoice)
+        end
+
+        while #choices < count do
+            local skillChoice = self:RollSkillChoice(jobComp, loadout)
+            if skillChoice ~= nil then
+                table.insert(choices, skillChoice)
+            else
+                local filler = self:RollStatChoice(loadout, usedStatIds)
+                if filler == nil then break end   -- 스탯 종류까지 소진되면 그만 (count 미만 허용)
+                table.insert(choices, filler)
+            end
+        end
+
+        -- 위치 편향 제거 셔플
+        for i = #choices, 2, -1 do
+            local j = _UtilLogic:RandomIntegerRange(1, i)
+            choices[i], choices[j] = choices[j], choices[i]
+        end
+        return choices
+    end
+
+    @ExecSpace("ServerOnly")
+    method any RollSkillChoice(any jobComp, any loadout)
+        -- 스킬 후보 1개: 레어도 추첨 -> 직업·차수 풀. 후보 부족 시 차수 하향 폴백.
+        -- 공격 슬롯 만석이면 신규 스킬은 제외하고 보유 스킬(Lv<3) 레벨업만 후보 (논리 일관성).
+        -- Lv.3 만렙 보유 스킬은 항상 제외. 후보 전무 시 nil.
+        local isFull = #loadout.attackSlots >= loadout.MaxAttackSlots
+        local rarity = self:RollRarity()
+        local tier = self:RarityToTier(rarity)
+        if tier > jobComp.Tier then tier = jobComp.Tier end
+        while tier >= 1 do
+            local pool = _SkillCatalogLogic:GetSkillIdsByJobTier(jobComp.Job, tier)
+            local cands = {}
+            for _, skillId in ipairs(pool) do
+                local def = _SkillCatalogLogic:GetSkill(skillId)
+                if def.tier == tier then
+                    local slotIdx = loadout:FindSlotIndex(skillId)
+                    local owned = slotIdx > 0
+                    local maxed = owned and loadout.attackSlots[slotIdx].level >= 3
+                    if not maxed and (owned or not isFull) then
+                        table.insert(cands, def)
+                    end
+                end
+            end
+            if #cands > 0 then
+                local picked = cands[_UtilLogic:RandomIntegerRange(1, #cands)]
+                local owned = loadout:FindSlotIndex(picked.skillId) > 0
+                return { kind = "skill", skillId = picked.skillId,
+                    name = owned and (picked.name .. " 강화") or picked.name,
+                    rarity = picked.rarity, iconRuid = picked.iconRuid,
+                    desc = owned and (picked.name .. "의 레벨이 1 오른다 (최대 Lv.3)") or picked.desc }
+            end
+            tier = tier - 1
+        end
+        return nil
+    end
+
+    @ExecSpace("ServerOnly")
+    method any RollStatChoice(any loadout, any usedIds)
+        -- 능력치 후보 1개: StatChoiceDef(공격력/크리 등) + 동적 "사거리 증가"(방향 종속 스킬 보유 시).
+        -- usedIds로 같은 선택지 세트 내 중복 방지.
+        local cands = {}
+        for _, def in ipairs(_SkillCatalogLogic:GetStatChoices()) do
+            if not usedIds[def.choiceId] then
+                table.insert(cands, { kind = "stat", choiceId = def.choiceId, name = def.name,
+                    rarity = "능력치", iconRuid = def.iconRuid, desc = def.desc,
+                    stat = def.stat, modType = def.modType, value = def.value })
+            end
+        end
+        for slotIdx, inst in ipairs(loadout.attackSlots) do
+            local skillDef = _SkillCatalogLogic:GetSkill(inst.skillId)
+            local pattern = skillDef ~= nil and _SkillCatalogLogic:GetRangePattern(skillDef.rangeId) or nil
+            if pattern ~= nil and pattern.dirDependent then
+                local choiceId = "rangeUp:" .. tostring(slotIdx)
+                if not usedIds[choiceId] then
+                    table.insert(cands, { kind = "skillTag", choiceId = choiceId,
+                        name = skillDef.name .. " 사거리 증가", rarity = "능력치",
+                        iconRuid = skillDef.iconRuid,
+                        desc = skillDef.name .. "의 사거리가 1칸 늘어난다",
+                        slotIndex = slotIdx, tagId = "rangeUp" })
+                end
+            end
+        end
+        if #cands == 0 then return nil end
+        local picked = cands[_UtilLogic:RandomIntegerRange(1, #cands)]
+        usedIds[picked.choiceId] = true
+        return picked
+    end
+
+    @ExecSpace("ServerOnly")
+    method any RollSynthesisChoice(any loadout)
+        -- 보유 공격 스킬 중 "재료에 이식 가능 태그가 있는" (타겟, 재료) 쌍을 랜덤 1개 골라 합성 선택지로.
+        local slots = loadout.attackSlots
+        if #slots < 2 then return nil end
+        local pairs_ = {}
+        for t = 1, #slots do
+            for s = 1, #slots do
+                if t ~= s and #_SkillInstanceLogic:GetTransferablePool(slots[s]) > 0 then
+                    table.insert(pairs_, { t = t, s = s })
+                end
+            end
+        end
+        if #pairs_ == 0 then return nil end
+        local pick = pairs_[_UtilLogic:RandomIntegerRange(1, #pairs_)]
+        local targetDef = _SkillCatalogLogic:GetSkill(slots[pick.t].skillId)
+        local sourceDef = _SkillCatalogLogic:GetSkill(slots[pick.s].skillId)
+        -- 이식될 태그를 카드에 확정 표기 (전부 승계 규칙이라 목록이 확정적 — 가독성 개선)
+        local tagNames = ""
+        for _, tagId in ipairs(_SkillInstanceLogic:GetTransferablePool(slots[pick.s])) do
+            local tagDef = _SkillCatalogLogic:GetTagDef(tagId)
+            if tagNames ~= "" then tagNames = tagNames .. ", " end
+            tagNames = tagNames .. (tagDef ~= nil and tagDef.name or tagId)
+        end
+        return {
+            kind = "synthesis",
+            targetIndex = pick.t,
+            sourceIndex = pick.s,
+            name = targetDef.name .. " + " .. sourceDef.name,
+            rarity = "합성",
+            iconRuid = targetDef.iconRuid,
+            desc = "[" .. tagNames .. "] 태그를 " .. targetDef.name .. "에 이식\n(같은 태그는 ×2로 중첩)\n재료 " .. sourceDef.name .. " 소멸",
+        }
+    end
+
+    @ExecSpace("ServerOnly")
+    method void AddExp(integer amount)
+        -- EXP 누적 -> 레벨업 처리(복수 레벨 가능). 레벨업마다 LevelUpEvent + 선택지 노출.
+        -- 선택지가 노출 중이면 사이클 일시정지 상태이므로 EXP만 누적 — 커밋 후 재판정.
+        self.Exp = self.Exp + amount
+        self:CheckLevelUp()
+    end
+
+    @ExecSpace("ServerOnly")
+    method void SetLevelUpHold(boolean hold)
+        -- 젠 플로우가 공격 체인 동안 호출: 레벨업 선택지가 공격 연출 중간에 뜨지 않도록 보류.
+        -- 해제 시 누적 EXP를 즉시 재판정한다.
+        self.levelUpHold = hold
+        if not hold then
+            self:CheckLevelUp()
+        end
+    end
+
+    @ExecSpace("ServerOnly")
+    method void CheckLevelUp()
+        -- 필요 EXP 충족 시 레벨업. 선택지 노출 중/공격 해소 중에는 보류(커밋·체인 종료 시 재호출).
+        if self.pendingChoices ~= nil then return end
+        if self.levelUpHold then return end
+        local required = _SkillCatalogLogic:GetRequiredExp(self.Level)
+        if required == nil then return end
+        if self.Exp < required then return end
+        self.Exp = self.Exp - required
+        self.Level = self.Level + 1
+        self.NextExp = _SkillCatalogLogic:GetRequiredExp(self.Level) or 0
+        local ev = LevelUpEvent()
+        ev.newLevel = self.Level
+        self.Entity:SendEvent(ev)
+        log("[PlayerGrowth] 레벨업 -> Lv." .. tostring(self.Level))
+        self:PresentChoices(self:RollChoices(self.ChoiceCount), false)
+    end
+
+    @ExecSpace("ServerOnly")
+    method string CommitChoice(integer index)
+        -- 선택지 확정: 스킬 장착/강화 적용. 반환 상태 문자열 (full이면 pending 유지 — 교체 플로우는 후속 UI).
+        if self.pendingChoices == nil then return "none" end
+        local choice = self.pendingChoices[index]
+        if choice == nil then return "invalid" end
+        ---@type SkillLoadoutComponent
+        local loadout = self.Entity:GetComponent("script.SkillLoadoutComponent")
+        local resultStatus
+        if choice.kind == "synthesis" then
+            local transferred = loadout:Synthesize(choice.targetIndex, choice.sourceIndex)
+            resultStatus = transferred ~= nil and "synthesized" or "synthesisFailed"
+            choice.skillId = choice.name   -- 커밋 로그/이벤트 표기용
+        elseif choice.kind == "stat" then
+            ---@type PlayerStatComponent
+            local statComp = self.Entity:GetComponent("script.PlayerStatComponent")
+            statComp:ApplyModifiers({ { stat = choice.stat, type = choice.modType, value = choice.value,
+                source = "choice:" .. choice.choiceId .. ":lv" .. tostring(self.Level) } })
+            resultStatus = "statApplied"
+            choice.skillId = choice.name
+        elseif choice.kind == "skillTag" then
+            resultStatus = loadout:AddTagToSlot(choice.slotIndex, choice.tagId) and "tagApplied" or "tagFailed"
+            choice.skillId = choice.name
+        else
+            resultStatus = loadout:AcquireSkill(choice.skillId)
+            if resultStatus == "full" then
+                -- 만석 시 신규 스킬은 후보에서 제외되므로 정상 경로에선 도달 불가 (방어적 유지)
+                log_warning("[PlayerGrowth] 공격 슬롯 만석 — 선택지 유지")
+                return resultStatus
+            end
+        end
+        self.pendingChoices = nil
+        local ev = ChoiceCommittedEvent()
+        ev.skillId = choice.skillId
+        ev.resultStatus = resultStatus
+        self.Entity:SendEvent(ev)
+        self:NotifyCommittedOnClient(choice.skillId, resultStatus, self.Entity.PlayerComponent.UserId)
+        log("[PlayerGrowth] 선택 확정: " .. choice.skillId .. " (" .. resultStatus .. ")")
+        self:CheckLevelUp()   -- 노출 중 누적된 EXP 재판정
+        return resultStatus
+    end
+
+    @ExecSpace("Client")
+    method void NotifyCommittedOnClient(string skillId, string resultStatus)
+        -- 소유 클라에서 실행: 커밋 확정을 로컬 이벤트로 전달 — 선택지 오버레이가 서버 확정 시점에 닫힌다.
+        local ev = ChoiceCommittedEvent()
+        ev.skillId = skillId
+        ev.resultStatus = resultStatus
+        self.Entity:SendEvent(ev)
+    end
+end

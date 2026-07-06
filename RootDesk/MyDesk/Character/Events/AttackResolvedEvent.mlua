@@ -1,0 +1,8 @@
+@Event
+script AttackResolvedEvent extends EventType
+    -- 공격 해석 완료 — HitPlan 전달 (설계서 §5, 경계 I-6). 소비자: 몬스터(HP 차감)/연출/UI.
+    -- hits = HitPlan 항목 배열, fired = [{skillId, cooldownTurns}], skipped = [skillId]
+    property table hits = {}
+    property table fired = {}
+    property table skipped = {}
+end

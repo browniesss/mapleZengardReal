@@ -1,0 +1,23 @@
+{
+  "Id": "",
+  "GameId": "",
+  "EntryKey": "directory://15aabaa97b6b419c91338a73fa6b2538",
+  "ContentType": "x-mod/directory",
+  "Content": "",
+  "Usage": 0,
+  "UsePublish": 1,
+  "UseService": 0,
+  "CoreVersion": "26.5.0.0",
+  "StudioVersion": "0.1.0.0",
+  "DynamicLoading": 0,
+  "ContentProto": {
+    "Use": "Json",
+    "Json": {
+      "entry_id": "directory://15aabaa97b6b419c91338a73fa6b2538",
+      "name": "Character",
+      "lock": false,
+      "folding": false,
+      "nameEditable": true
+    }
+  }
+}

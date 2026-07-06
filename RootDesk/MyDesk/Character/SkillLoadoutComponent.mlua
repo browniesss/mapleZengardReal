@@ -1,0 +1,255 @@
+@Component
+script SkillLoadoutComponent extends Component
+    -- per-player 스킬 로드아웃 (설계서 §4.2, 사양서 §3-1): 공격 3슬롯 + 버프·패시브 슬롯(별도).
+    -- 슬롯 항목 = SkillInstance (SkillInstanceLogic이 조작). 발동 순서 = order(인스턴스 참조 배열).
+    -- 상태 변경 전부 ServerOnly, 변경 시 SkillLoadoutChangedEvent 발행.
+
+    property integer MaxAttackSlots = 3           -- 사양서 §4 정책: 상한 3 엄수
+    property any attackSlots = nil                -- [SkillInstance]
+    property any supportSlots = nil               -- [SkillInstance] (버프·패시브 — 상한 미정)
+    property any order = nil                      -- 발동 순서: attackSlots 인스턴스 참조 배열
+
+    @ExecSpace("ServerOnly")
+    method void OnBeginPlay()
+        -- 런 시작 전 빈 상태. 실제 초기화는 ResetForRun.
+        self.attackSlots = {}
+        self.supportSlots = {}
+        self.order = {}
+    end
+
+    @ExecSpace("ServerOnly")
+    method void ResetForRun()
+        -- 런 시작: 슬롯/순서 전체 초기화 (판마다 새 빌드 — 규칙서 §6). 클라 패널도 빈 상태로 동기화.
+        self.attackSlots = {}
+        self.supportSlots = {}
+        self.order = {}
+        self:NotifyChanged("reset")
+    end
+
+    @ExecSpace("ServerOnly")
+    method void NotifyChanged(string reason)
+        -- 로드아웃 변경 이벤트 발행(서버) + 소유 클라 UI 동기화.
+        local ev = SkillLoadoutChangedEvent()
+        ev.reason = reason
+        self.Entity:SendEvent(ev)
+        self:SyncLoadoutClient(self:BuildSlotsSummary(), self.Entity.PlayerComponent.UserId)
+    end
+
+    @ExecSpace("ServerOnly")
+    method string BuildTagsText(any inst)
+        -- 태그 표기: 같은 태그 중첩은 "×n" 집계 (예: "관통 · 사거리연장 ×2"). 첫 등장 순서 유지.
+        local orderKeys = {}
+        local counts = {}
+        for _, tagId in ipairs(inst.tags) do
+            if counts[tagId] == nil then
+                counts[tagId] = 0
+                table.insert(orderKeys, tagId)
+            end
+            counts[tagId] = counts[tagId] + 1
+        end
+        local text = ""
+        for _, tagId in ipairs(orderKeys) do
+            local tagDef = _SkillCatalogLogic:GetTagDef(tagId)
+            local tagName = tagDef ~= nil and tagDef.name or tagId
+            if counts[tagId] > 1 then
+                tagName = tagName .. " ×" .. tostring(counts[tagId])
+            end
+            if text ~= "" then text = text .. " · " end
+            text = text .. tagName
+        end
+        return text
+    end
+
+    @ExecSpace("ServerOnly")
+    method table BuildSlotsSummary()
+        -- 스킬 순서 리스트 UI용 요약 (UI설계 ⑥): **발동 순서(order) 기준** 정렬,
+        -- 순번/이름/레벨/아이콘/태그(중첩 집계)/쿨다운 남은 턴.
+        local summary = {}
+        for orderIndex, inst in ipairs(self.order) do
+            local def = _SkillCatalogLogic:GetSkill(inst.skillId)
+            local tagsText = self:BuildTagsText(inst)
+            table.insert(summary, {
+                skillId = inst.skillId,
+                name = def ~= nil and def.name or inst.skillId,
+                level = inst.level,
+                iconRuid = def ~= nil and def.iconRuid or "",
+                tagsText = tagsText,
+                orderIndex = orderIndex,
+                cooldownLeft = inst.cooldownLeft or 0,
+            })
+        end
+        return summary
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean SwapOrder(integer posA, integer posB)
+        -- 발동 순서 큐에서 두 위치 교환 (UI설계 ⑥ 순서 변경 — 시뮬은 탭 스왑).
+        local a = self.order[posA]
+        local b = self.order[posB]
+        if a == nil or b == nil or posA == posB then return false end
+        self.order[posA], self.order[posB] = b, a
+        self:NotifyChanged("order")
+        return true
+    end
+
+    @ExecSpace("Server")
+    method void RequestSwapOrder(integer posA, integer posB)
+        -- 클라(순서 리스트) -> 서버 순서 교환 요청. 소유자 검증.
+        if senderUserId ~= self.Entity.PlayerComponent.UserId then
+            log_warning("[SkillLoadout] 비소유자 순서 변경 요청 무시: " .. senderUserId)
+            return
+        end
+        self:SwapOrder(posA, posB)
+    end
+
+    @ExecSpace("Client")
+    method void SyncLoadoutClient(table slots)
+        -- 소유 클라에서 실행: 스킬 패널 UI에 로컬 이벤트로 전달 (UI는 LocalPlayer 구독).
+        -- (합성 요청 경로는 레벨업 선택지(PlayerGrowthComponent)로 일원화 — 별도 합성 RPC 없음)
+        local ev = LoadoutSyncedEvent()
+        ev.slots = slots
+        self.Entity:SendEvent(ev)
+    end
+
+    @ExecSpace("ServerOnly")
+    method integer FindSlotIndex(string skillId)
+        -- 공격 슬롯에서 skillId 위치 (없으면 0).
+        for i, inst in ipairs(self.attackSlots) do
+            if inst.skillId == skillId then return i end
+        end
+        return 0
+    end
+
+    @ExecSpace("ServerOnly")
+    method string AcquireSkill(string skillId)
+        -- 선택지 확정 진입점. 보유 중이면 레벨업(최대 Lv.3), 빈 슬롯이면 장착, 만석이면 "full".
+        -- 반환: acquired | leveled | maxed | full | error
+        local def = _SkillCatalogLogic:GetSkill(skillId)
+        if def == nil then return "error" end
+        local idx = self:FindSlotIndex(skillId)
+        if idx > 0 then
+            if _SkillInstanceLogic:LevelUpInstance(self.attackSlots[idx]) then
+                self:NotifyChanged("levelup")
+                return "leveled"
+            end
+            return "maxed"
+        end
+        if #self.attackSlots >= self.MaxAttackSlots then
+            -- 만석 처리(교체 UI 자동 진입 여부)는 기획 미확정 — 호출자가 ReplaceSkill로 분기 (사양서 §3-1)
+            return "full"
+        end
+        local inst = _SkillInstanceLogic:NewInstance(skillId)
+        if inst == nil then return "error" end
+        table.insert(self.attackSlots, inst)
+        table.insert(self.order, inst)
+        self:NotifyChanged("acquire")
+        return "acquired"
+    end
+
+    @ExecSpace("ServerOnly")
+    method any ReplaceSkill(integer slotIndex, string newSkillId)
+        -- 교체(사양서 §3-4): 기존 태그 중 랜덤 1종 계승. 반환 { inst, inheritedTag } 또는 nil.
+        local old = self.attackSlots[slotIndex]
+        if old == nil then
+            log_error("[SkillLoadout] 교체 대상 슬롯 없음: " .. tostring(slotIndex))
+            return nil
+        end
+        local rep = _SkillInstanceLogic:ReplaceWith(old, newSkillId)
+        if rep == nil then return nil end
+        self.attackSlots[slotIndex] = rep.inst
+        for i, inst in ipairs(self.order) do
+            if inst == old then self.order[i] = rep.inst end
+        end
+        self:NotifyChanged("replace")
+        return rep
+    end
+
+    @ExecSpace("ServerOnly")
+    method any Synthesize(integer targetIndex, integer sourceIndex)
+        -- 합성: 소스의 이식 가능 태그 전부 승계 후 소스 삭제. 이식 tagId 배열 반환(불가 시 nil, 소스 유지).
+        local target = self.attackSlots[targetIndex]
+        local source = self.attackSlots[sourceIndex]
+        if target == nil or source == nil or targetIndex == sourceIndex then
+            log_error("[SkillLoadout] 합성 슬롯 무효: " .. tostring(targetIndex) .. "," .. tostring(sourceIndex))
+            return nil
+        end
+        local transferred = _SkillInstanceLogic:SynthesizeInto(target, source)
+        if transferred == nil or #transferred == 0 then return nil end
+        table.remove(self.attackSlots, sourceIndex)
+        for i = #self.order, 1, -1 do
+            if self.order[i] == source then table.remove(self.order, i) end
+        end
+        self:NotifyChanged("synthesize")
+        return transferred
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean AddTagToSlot(integer slotIndex, string tagId)
+        -- 태그 직접 부여(능력치 선택지 "사거리 증가" 등). 존재하는 태그만 허용.
+        local inst = self.attackSlots[slotIndex]
+        if inst == nil or _SkillCatalogLogic:GetTagDef(tagId) == nil then
+            log_error("[SkillLoadout] 태그 부여 실패: slot=" .. tostring(slotIndex) .. " tag=" .. tostring(tagId))
+            return false
+        end
+        table.insert(inst.tags, tagId)
+        self:NotifyChanged("tag")
+        return true
+    end
+
+    @ExecSpace("ServerOnly")
+    method any RerollTag(integer slotIndex, boolean excludePrev)
+        -- 재추첨(사양서 §3-5). 횟수 제한/전리품 소모는 호출자(성장/전리품 시스템) 책임.
+        local inst = self.attackSlots[slotIndex]
+        if inst == nil then return nil end
+        local picked = _SkillInstanceLogic:RerollInheritedTag(inst, excludePrev)
+        if picked ~= nil then self:NotifyChanged("reroll") end
+        return picked
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean SetOrder(table slotIndices)
+        -- 발동 순서 재설정 — attackSlots 인덱스 순열 (UI 드래그 반영).
+        if #slotIndices ~= #self.attackSlots then return false end
+        local newOrder = {}
+        local seen = {}
+        for _, idx in ipairs(slotIndices) do
+            local inst = self.attackSlots[idx]
+            if inst == nil or seen[idx] then return false end
+            seen[idx] = true
+            table.insert(newOrder, inst)
+        end
+        self.order = newOrder
+        self:NotifyChanged("order")
+        return true
+    end
+
+    @ExecSpace("ServerOnly")
+    method table GetOrderedInstances()
+        -- 공격 해석 ctx.order용 — 순서 배열 그대로 (인스턴스 참조 공유: 쿨다운 반영 위해 복사 안 함).
+        return self.order
+    end
+
+    @ExecSpace("ServerOnly")
+    method void ApplyFired(table fired)
+        -- 발동 스킬 쿨다운 개시 — CombatResolveLogic 반환 fired 목록 소비.
+        for _, f in ipairs(fired) do
+            if f.cooldownTurns ~= nil and f.cooldownTurns > 0 then
+                local idx = self:FindSlotIndex(f.skillId)
+                if idx > 0 then
+                    self.attackSlots[idx].cooldownLeft = f.cooldownTurns
+                end
+            end
+        end
+    end
+
+    @ExecSpace("ServerOnly")
+    method void TickCooldowns()
+        -- 턴 종료 훅: 쿨다운 1턴 차감 (통합 지점 I-1). 순서 리스트의 쿨다운 표시 동기화 포함.
+        for _, inst in ipairs(self.attackSlots) do
+            if inst.cooldownLeft ~= nil and inst.cooldownLeft > 0 then
+                inst.cooldownLeft = inst.cooldownLeft - 1
+            end
+        end
+        self:NotifyChanged("cooldown")
+    end
+end

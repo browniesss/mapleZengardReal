@@ -1,0 +1,314 @@
+@Component
+script InGameUIController extends Component
+    -- 인게임 HUD 컨트롤러 (ClientOnly): 젠↔공격 메인 버튼(⑫), 방향 패드(⑩), 레벨업 선택지 오버레이(⑬,
+    -- 아이콘+설명), 스킬 패널(⑥ 보유 스킬 + 태그) + 합성 모드. 페이즈는 TurnFlowStubLogic 클라 이벤트,
+    -- 선택지/로드아웃은 LocalPlayer 이벤트로 수신 (정식 젠 플로우 도입 시 발신자만 교체).
+
+    property Entity rootPanel = "04b1395f-0de4-49ed-8ae8-8a926dfac120"
+    property ButtonComponent btnMain = "4f475f59-a098-4f22-ae5a-4d7db75f25e9"
+    property Entity dirPanel = "d0d3ed54-e6c3-4401-a7d0-234d355df731"
+    property ButtonComponent btnUp = "72014a3b-f982-434f-885d-72291aa50088"
+    property ButtonComponent btnDown = "7c551818-cc2e-443b-8efa-285d0e0c9b11"
+    property ButtonComponent btnLeft = "b37c62a8-b3c4-47dd-860e-9cb6e0a4fdc3"
+    property ButtonComponent btnRight = "d01f52b8-ec13-4fb1-a914-759e0170db96"
+    property TextComponent waveText = "6d6413a2-69e2-411f-bc8a-5f40b30c9ca5"
+    property Entity choicePanel = "fe8835d2-00c8-4ac1-a468-ce8d41ef7df3"
+    property TextComponent choiceTitle = "92d7ae9e-7691-46f1-aeea-982169ab7f25"
+    property ButtonComponent btnChoice1 = "4e346e25-899e-45fc-8991-c2099d22b1ac"
+    property ButtonComponent btnChoice2 = "295592d3-ae37-4bbd-8032-f42c7875f780"
+    property ButtonComponent btnChoice3 = "70a1c2d6-2b1e-47dc-8091-9e897780a103"
+    property SpriteGUIRendererComponent iconChoice1 = "48c65d4b-ec30-4369-be57-92b70f6c7d62"
+    property SpriteGUIRendererComponent iconChoice2 = "893dc2a6-69fd-4763-a59b-b3d3b3128b4a"
+    property SpriteGUIRendererComponent iconChoice3 = "83fe9acc-f322-40e0-bd67-be67ce6335de"
+    property TextComponent descChoice1 = "a0fd6283-66aa-4bec-b0bd-e1de9c1b3681"
+    property TextComponent descChoice2 = "64b1cee3-0899-48e5-ba0e-f210636c7cc0"
+    property TextComponent descChoice3 = "949dd69a-5fb0-4440-9b63-13070f15bf87"
+    property ButtonComponent btnSlot1 = "0f0ad92f-512c-4b18-aed7-791fc6d89cf4"
+    property ButtonComponent btnSlot2 = "4961a8e1-b056-44d5-a4ee-3817b03a789d"
+    property ButtonComponent btnSlot3 = "36586d38-5990-4434-8430-ed31ab1b1cf0"
+    property SpriteGUIRendererComponent iconSlot1 = "fab3b71d-51ee-4a0e-9799-b9017b5cfb95"
+    property SpriteGUIRendererComponent iconSlot2 = "b2aabdd6-7fbe-49fc-a0f2-11f4e928c764"
+    property SpriteGUIRendererComponent iconSlot3 = "4b533667-50c0-439f-84c6-2453bf60b833"
+    property TextComponent profileText = "fab702df-78f2-468a-bf55-be0bd2621d5d"
+    property Entity dangerText = "64dd5bfe-5f66-4b52-aed5-9b830c17fa36"
+    property ButtonComponent btnMode = "f76490bf-e94d-4a4e-a378-32787878513c"
+    property SpriteGUIRendererComponent expBarFill = "24828e11-1a92-4a13-b0f2-fdf2386cc3f0"
+
+    property string curPhase = "none"
+    property string facingDir = "UP"
+    property integer choiceCount = 0
+    property boolean autoMode = false      -- 전투 방식 (규칙서 §5.2) — 서버 flow와 동기 유지
+    property integer orderSwapFirst = 0    -- 순서 변경 1차 선택 슬롯 (0=없음)
+    property integer slotCount = 0
+    property number profileTick = 0
+    property any handlers = nil
+
+    @ExecSpace("ClientOnly")
+    method void OnBeginPlay()
+        -- 초기 숨김 + 버튼 구독 (클로저는 handlers에 보관, OnEndPlay 해제).
+        self.rootPanel.Enable = false
+        self.dirPanel.Enable = false
+        self.choicePanel.Enable = false
+        self.handlers = {}
+        self:Wire(self.btnMain, self.OnMainClicked)
+        self:Wire(self.btnUp, function() self:SetFacing("UP") end)
+        self:Wire(self.btnDown, function() self:SetFacing("DOWN") end)
+        self:Wire(self.btnLeft, function() self:SetFacing("LEFT") end)
+        self:Wire(self.btnRight, function() self:SetFacing("RIGHT") end)
+        self:Wire(self.btnChoice1, function() self:CommitChoice(1) end)
+        self:Wire(self.btnChoice2, function() self:CommitChoice(2) end)
+        self:Wire(self.btnChoice3, function() self:CommitChoice(3) end)
+        -- 슬롯 버튼 = 발동 순서 변경 (UI설계 ⑥): 두 슬롯을 차례로 탭하면 순서 교환
+        self:Wire(self.btnSlot1, function() self:OnSlotClicked(1) end)
+        self:Wire(self.btnSlot2, function() self:OnSlotClicked(2) end)
+        self:Wire(self.btnSlot3, function() self:OnSlotClicked(3) end)
+        self:Wire(self.btnMode, self.OnModeToggle)
+        if isvalid(self.dangerText) then self.dangerText.Enable = false end
+        if isvalid(self.expBarFill) then
+            self.expBarFill.Type = ImageType.Filled   -- FillAmount 기반 가로 게이지 (FillMethod 기본 Horizontal)
+            self.expBarFill.FillAmount = 0
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnUpdate(number delta)
+        -- HUD 프로필(Lv/EXP) 폴링 갱신 — @Sync 값 표시라 0.3s 간격이면 충분.
+        self.profileTick = self.profileTick + delta
+        if self.profileTick < 0.3 then return end
+        self.profileTick = 0
+        if not isvalid(self.profileText) or not self.rootPanel.Enable then return end
+        local player = _UserService.LocalPlayer
+        if not isvalid(player) then return end
+        ---@type PlayerGrowthComponent
+        local growth = player:GetComponent("script.PlayerGrowthComponent")
+        if growth == nil then return end
+        self.profileText.Text = "Lv." .. tostring(growth.Level)
+            .. " · EXP " .. tostring(growth.Exp) .. "/" .. tostring(growth.NextExp)
+        if isvalid(self.expBarFill) and growth.NextExp > 0 then
+            self.expBarFill.FillAmount = math.min(1, growth.Exp / growth.NextExp)
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnModeToggle()
+        -- 전투 방식 토글 (UI설계 ⑨): 수동 ↔ 자동. 자동은 젠 터치 즉시 자동 공격(방향 패드 숨김).
+        self.autoMode = not self.autoMode
+        _TurnFlowStubLogic:RequestSetBattleMode(self.autoMode)
+        self.btnMode.Entity.TextComponent.Text = self.autoMode and "전투: 자동" or "전투: 수동"
+        if self.autoMode then self.dirPanel.Enable = false end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnSlotClicked(integer index)
+        -- 발동 순서 변경: 1차 탭 = 선택, 2차 탭 = 두 위치 교환 요청. 같은 슬롯 재탭 = 해제.
+        if index > self.slotCount then return end
+        if self.orderSwapFirst == 0 then
+            self.orderSwapFirst = index
+            self:RefreshSwapMark()
+            return
+        end
+        if self.orderSwapFirst ~= index then
+            local player = _UserService.LocalPlayer
+            if isvalid(player) then
+                ---@type SkillLoadoutComponent
+                local loadout = player:GetComponent("script.SkillLoadoutComponent")
+                if loadout ~= nil then
+                    loadout:RequestSwapOrder(self.orderSwapFirst, index)
+                end
+            end
+        end
+        self.orderSwapFirst = 0
+        -- 표시 갱신은 LoadoutSyncedEvent가 수행 (같은 슬롯 재탭 해제 시엔 즉시)
+        self:RefreshSwapMark()
+    end
+
+    @ExecSpace("ClientOnly")
+    method void RefreshSwapMark()
+        -- 순서 변경 1차 선택 슬롯을 색으로 강조.
+        local buttons = { self.btnSlot1, self.btnSlot2, self.btnSlot3 }
+        for i, btn in ipairs(buttons) do
+            local sr = btn.Entity.SpriteGUIRendererComponent
+            if isvalid(sr) then
+                if i == self.orderSwapFirst then
+                    sr.Color = Color(0.45, 0.35, 0.12, 0.95)
+                else
+                    sr.Color = Color(0.15, 0.2, 0.3, 0.95)
+                end
+            end
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method string TruncateName(string name, integer maxChars)
+        -- 스킬명 말줄임 (UI설계 ⑥: 한글 10자 초과 시 …). UTF-8 문자 단위.
+        local len = utf8.len(name)
+        if len == nil or len <= maxChars then return name end
+        return string.sub(name, 1, utf8.offset(name, maxChars + 1) - 1) .. "…"
+    end
+
+    @ExecSpace("ClientOnly")
+    method void Wire(ButtonComponent btn, any callback)
+        -- 버튼 클릭 구독 + 핸들러 보관.
+        local h = btn.Entity:ConnectEvent(ButtonClickEvent, callback)
+        table.insert(self.handlers, { entity = btn.Entity, eventHandler = h })
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnEndPlay()
+        -- 구독 해제(필수).
+        if self.handlers ~= nil then
+            for _, rec in ipairs(self.handlers) do
+                if isvalid(rec.entity) then
+                    rec.entity:DisconnectEvent(ButtonClickEvent, rec.eventHandler)
+                end
+            end
+            self.handlers = nil
+        end
+    end
+
+    @EventSender("Logic", "TurnFlowStubLogic")
+    handler OnPhaseChanged(PhaseChangedEvent event)
+        -- 페이즈 전환: 버튼 텍스트 젠↔공격, 방향 패드 노출/숨김, 진행도, 위험 아이콘 (UI설계 ③④⑨⑫).
+        self.curPhase = event.phase
+        if event.phase ~= "run_end" then
+            self.waveText.Text = "보스까지 " .. tostring(event.wave) .. " / 30 젠"
+        end
+        if isvalid(self.dangerText) then
+            self.dangerText.Enable = event.danger   -- 빈 칸 < 가용 10%일 때만 (규칙서 §7.1)
+        end
+        if event.phase == "run_start" then
+            self.rootPanel.Enable = true
+            self.dirPanel.Enable = false
+            self.btnMain.Entity.TextComponent.Text = "젠 (WAVE)"
+        elseif event.phase == "aim" then
+            self.dirPanel.Enable = true
+            self.btnMain.Entity.TextComponent.Text = "공격"
+        elseif event.phase == "resolving" then
+            -- 자동 공격 진행 중: 입력 없음 (버튼 전환 없이 젠 -> 즉시 발동, 규칙서 §2.2)
+            self.dirPanel.Enable = false
+            self.btnMain.Entity.TextComponent.Text = "공격 중…"
+        elseif event.phase == "idle" then
+            self.dirPanel.Enable = false
+            self.btnMain.Entity.TextComponent.Text = "젠 (WAVE)"
+        elseif event.phase == "run_end" then
+            self.rootPanel.Enable = false
+            self.choicePanel.Enable = false
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnMainClicked()
+        -- 메인 버튼: idle=젠 / aim=지정 방향으로 공격 (수동 2단 입력 — UI설계 ⑫).
+        if self.choicePanel.Enable then return end   -- 선택지 노출 중 사이클 정지
+        if self.curPhase == "idle" or self.curPhase == "run_start" then
+            _TurnFlowStubLogic:RequestZen()
+        elseif self.curPhase == "aim" then
+            _TurnFlowStubLogic:RequestAttack(self.facingDir)
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void SetFacing(string dir)
+        -- 공격 방향 지정 (방향 패드 ⑩) + 해당 방향의 전 스킬 공격 범위 프리뷰 요청.
+        self.facingDir = dir
+        _TurnFlowStubLogic:RequestRangePreview(dir)
+        log("[InGameUI] 공격 방향: " .. dir)
+    end
+
+    -- ===== 레벨업 선택지 (⑬) =====
+
+    @ExecSpace("ClientOnly")
+    method Color RarityColor(string rarity)
+        -- 선택지 카드 배경색 — 종류/레어도가 한눈에 구분되도록 (가독성).
+        if rarity == "합성" then return Color(0.42, 0.24, 0.08, 0.97) end
+        if rarity == "능력치" then return Color(0.10, 0.30, 0.18, 0.97) end
+        if rarity == "R" then return Color(0.10, 0.22, 0.42, 0.97) end
+        if rarity == "E" then return Color(0.28, 0.14, 0.40, 0.97) end
+        if rarity == "U" then return Color(0.42, 0.32, 0.06, 0.97) end
+        return Color(0.16, 0.20, 0.28, 0.97)   -- N/기본
+    end
+
+    @EventSender("LocalPlayer")
+    handler OnChoicePresented(ChoicePresentedEvent event)
+        -- 선택지 오버레이: 종류별 카드 색 + 아이콘 + 이름/레어도 + 설명. 진입 2중1 / 이후 3중1.
+        self.choiceCount = #event.choices
+        if event.isFirstEntry then
+            self.choiceTitle.Text = "시작 스킬 선택"
+        else
+            self.choiceTitle.Text = "레벨 업 — 선택"
+        end
+        local buttons = { self.btnChoice1, self.btnChoice2, self.btnChoice3 }
+        local icons = { self.iconChoice1, self.iconChoice2, self.iconChoice3 }
+        local descs = { self.descChoice1, self.descChoice2, self.descChoice3 }
+        for i, btn in ipairs(buttons) do
+            local choice = event.choices[i]
+            if choice ~= nil then
+                btn.Entity.Enable = true
+                btn.Entity.TextComponent.Text = choice.name .. " [" .. choice.rarity .. "]"
+                descs[i].Text = choice.desc or ""
+                local sr = btn.Entity.SpriteGUIRendererComponent
+                if isvalid(sr) then sr.Color = self:RarityColor(choice.rarity) end
+                if choice.iconRuid ~= nil and choice.iconRuid ~= "" then
+                    icons[i].ImageRUID = choice.iconRuid
+                    icons[i].Entity.Enable = true
+                else
+                    icons[i].Entity.Enable = false
+                end
+            else
+                btn.Entity.Enable = false
+            end
+        end
+        self.choicePanel.Enable = true
+    end
+
+    @ExecSpace("ClientOnly")
+    method void CommitChoice(integer index)
+        -- 선택 확정 -> 서버 커밋 요청. 오버레이 닫기는 서버 확정 통지(OnChoiceCommitted)가 수행.
+        if index > self.choiceCount then return end
+        local player = _UserService.LocalPlayer
+        if not isvalid(player) then return end
+        ---@type PlayerGrowthComponent
+        local growth = player:GetComponent("script.PlayerGrowthComponent")
+        if growth == nil then return end
+        growth:RequestCommitChoice(index)
+    end
+
+    @EventSender("LocalPlayer")
+    handler OnChoiceCommitted(ChoiceCommittedEvent event)
+        -- 서버 커밋 확정 -> 오버레이 닫기 (full 등 실패 시엔 열려 있음 — 교체 플로우 후속).
+        self.choicePanel.Enable = false
+    end
+
+    -- ===== 스킬 발동 순서 리스트 (⑥ / 규칙서 §5.3) =====
+
+    @EventSender("LocalPlayer")
+    handler OnLoadoutSynced(LoadoutSyncedEvent event)
+        -- 발동 순서 큐 갱신: 순번(①②③) + 아이콘 + 이름(10자 말줄임) + Lv + 쿨다운 + 태그.
+        self.slotCount = #event.slots
+        self.orderSwapFirst = 0
+        self:RefreshSwapMark()
+        local marks = { "①", "②", "③" }
+        local buttons = { self.btnSlot1, self.btnSlot2, self.btnSlot3 }
+        local icons = { self.iconSlot1, self.iconSlot2, self.iconSlot3 }
+        for i, btn in ipairs(buttons) do
+            local slot = event.slots[i]
+            if slot ~= nil then
+                local line = marks[i] .. " " .. self:TruncateName(slot.name, 10) .. " Lv." .. tostring(slot.level)
+                if slot.cooldownLeft ~= nil and slot.cooldownLeft > 0 then
+                    line = line .. " (쿨 " .. tostring(slot.cooldownLeft) .. "턴)"
+                end
+                btn.Entity.TextComponent.Text = line .. "\n" .. slot.tagsText
+                if slot.iconRuid ~= nil and slot.iconRuid ~= "" then
+                    icons[i].ImageRUID = slot.iconRuid
+                    icons[i].Entity.Enable = true
+                else
+                    icons[i].Entity.Enable = false
+                end
+            else
+                btn.Entity.TextComponent.Text = "빈 슬롯"
+                icons[i].Entity.Enable = false
+            end
+        end
+    end
+
+end

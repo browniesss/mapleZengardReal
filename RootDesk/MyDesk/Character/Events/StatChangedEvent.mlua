@@ -1,0 +1,9 @@
+@Event
+script StatChangedEvent extends EventType
+    -- 최종 스탯 재계산 완료 알림 (설계서 §4.3). PlayerStatComponent가 소유 엔티티에 발행.
+    -- 소비자: HUD/전투 — 표시값은 @Sync 프로퍼티로도 제공되므로 이 이벤트는 갱신 트리거 용도.
+    property number atk = 0
+    property number critRate = 0
+    property number critDmg = 0
+    property number defPen = 0
+end
