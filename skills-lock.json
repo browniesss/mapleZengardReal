@@ -29,7 +29,7 @@
       "source": "MSW-Git/msw-ai-coding-plugins-official",
       "sourceType": "github",
       "skillPath": "plugins/msw-maker-base-skill/skills/msw-general/SKILL.md",
-      "computedHash": "7c443b56f6c4d877a95a0ce23761cef0ba4ec1e750816462a4fac368c038e442"
+      "computedHash": "c8533bfe13fe1d5bacb58275efeed8726b385292f6e060c21988681299214bb9"
     },
     "msw-packages": {
       "source": "MSW-Git/msw-ai-coding-plugins-official",
@@ -65,7 +65,7 @@
       "source": "MSW-Git/msw-ai-coding-plugins-official",
       "sourceType": "github",
       "skillPath": "plugins/msw-maker-base-skill/skills/msw-ui-system/SKILL.md",
-      "computedHash": "37247fddd05d8d3ed65ec6afa27b08aad509aa11f39e8679d5f8170b4ffe60a9"
+      "computedHash": "92b5dd32765579eb53d16fe43cc6163d0a35a569d7b41dc7b976e6b0e55db4c2"
     }
   }
 }
