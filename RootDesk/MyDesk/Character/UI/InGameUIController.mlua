@@ -33,11 +33,14 @@ script InGameUIController extends Component
     property Entity dangerText = "64dd5bfe-5f66-4b52-aed5-9b830c17fa36"
     property ButtonComponent btnMode = "f76490bf-e94d-4a4e-a378-32787878513c"
     property SpriteGUIRendererComponent expBarFill = "24828e11-1a92-4a13-b0f2-fdf2386cc3f0"
+    property ButtonComponent btnAdvance = "81d4672b-66e1-4afb-b9b5-d96add5f4ff4"
+    property ButtonComponent btnReplaceCancel = "f891aa09-2b84-4ecc-8c0f-8fae449cea26"
 
     property string curPhase = "none"
     property string facingDir = "UP"
     property integer choiceCount = 0
     property boolean autoMode = false      -- 전투 방식 (규칙서 §5.2) — 서버 flow와 동기 유지
+    property boolean replaceMode = false   -- 선택지 패널이 교체 대상 선택 모드인지 (사양서 §3-4)
     property integer orderSwapFirst = 0    -- 순서 변경 1차 선택 슬롯 (0=없음)
     property integer slotCount = 0
     property number profileTick = 0
@@ -63,6 +66,9 @@ script InGameUIController extends Component
         self:Wire(self.btnSlot2, function() self:OnSlotClicked(2) end)
         self:Wire(self.btnSlot3, function() self:OnSlotClicked(3) end)
         self:Wire(self.btnMode, self.OnModeToggle)
+        self:Wire(self.btnAdvance, self.OnAdvanceClicked)
+        self:Wire(self.btnReplaceCancel, self.OnReplaceCancelClicked)
+        if isvalid(self.btnReplaceCancel) then self.btnReplaceCancel.Entity.Enable = false end
         if isvalid(self.dangerText) then self.dangerText.Enable = false end
         if isvalid(self.expBarFill) then
             self.expBarFill.Type = ImageType.Filled   -- FillAmount 기반 가로 게이지 (FillMethod 기본 Horizontal)
@@ -82,10 +88,55 @@ script InGameUIController extends Component
         ---@type PlayerGrowthComponent
         local growth = player:GetComponent("script.PlayerGrowthComponent")
         if growth == nil then return end
-        self.profileText.Text = "Lv." .. tostring(growth.Level)
+        ---@type PlayerJobComponent
+        local jobComp = player:GetComponent("script.PlayerJobComponent")
+        local jobLabel = ""
+        if jobComp ~= nil then
+            jobLabel = jobComp.JobName .. " " .. tostring(jobComp.Tier) .. "차 · "
+        end
+        self.profileText.Text = jobLabel .. "Lv." .. tostring(growth.Level)
             .. " · EXP " .. tostring(growth.Exp) .. "/" .. tostring(growth.NextExp)
         if isvalid(self.expBarFill) and growth.NextExp > 0 then
             self.expBarFill.FillAmount = math.min(1, growth.Exp / growth.NextExp)
+        end
+        self:RefreshAdvanceButton(jobComp)
+    end
+
+    @ExecSpace("ClientOnly")
+    method void RefreshAdvanceButton(any jobComp)
+        -- 전직 버튼 상태 (초안 §9: 선택지 3회 노출 + 전리품 소모). 4차면 숨김.
+        -- ExposureThreshold/AdvanceLootCost는 non-sync 상수 — 클라 기본값이 서버와 동일.
+        if not isvalid(self.btnAdvance) or jobComp == nil then return end
+        local btnEntity = self.btnAdvance.Entity
+        if jobComp.Tier >= 4 then
+            btnEntity.Enable = false
+            return
+        end
+        btnEntity.Enable = true
+        local ready = jobComp.ChoiceExposure >= jobComp.ExposureThreshold
+            and jobComp.LootCount >= jobComp.AdvanceLootCost
+        local sr = btnEntity.SpriteGUIRendererComponent
+        if ready then
+            btnEntity.TextComponent.Text = "전직! (전리품 " .. tostring(jobComp.AdvanceLootCost) .. " 소모)"
+            if isvalid(sr) then sr.Color = Color(0.72, 0.54, 0.08, 1) end
+        else
+            btnEntity.TextComponent.Text = "전직  선택지 " .. tostring(math.min(jobComp.ChoiceExposure, jobComp.ExposureThreshold))
+                .. "/" .. tostring(jobComp.ExposureThreshold)
+                .. " · 전리품 " .. tostring(math.min(jobComp.LootCount, jobComp.AdvanceLootCost))
+                .. "/" .. tostring(jobComp.AdvanceLootCost)
+            if isvalid(sr) then sr.Color = Color(0.2, 0.23, 0.3, 0.9) end
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnAdvanceClicked()
+        -- 전직 요청 — 조건 검증은 서버(Advance)가 최종 수행.
+        local player = _UserService.LocalPlayer
+        if not isvalid(player) then return end
+        ---@type PlayerJobComponent
+        local jobComp = player:GetComponent("script.PlayerJobComponent")
+        if jobComp ~= nil then
+            jobComp:RequestAdvance()
         end
     end
 
@@ -231,6 +282,7 @@ script InGameUIController extends Component
     @EventSender("LocalPlayer")
     handler OnChoicePresented(ChoicePresentedEvent event)
         -- 선택지 오버레이: 종류별 카드 색 + 아이콘 + 이름/레어도 + 설명. 진입 2중1 / 이후 3중1.
+        self:SetReplaceMode(false)
         self.choiceCount = #event.choices
         if event.isFirstEntry then
             self.choiceTitle.Text = "시작 스킬 선택"
@@ -263,20 +315,78 @@ script InGameUIController extends Component
 
     @ExecSpace("ClientOnly")
     method void CommitChoice(integer index)
-        -- 선택 확정 -> 서버 커밋 요청. 오버레이 닫기는 서버 확정 통지(OnChoiceCommitted)가 수행.
+        -- 선택 확정 -> 서버 커밋 요청. 교체 모드면 카드 = 교체 대상 슬롯. 닫기는 서버 확정 통지가 수행.
         if index > self.choiceCount then return end
         local player = _UserService.LocalPlayer
         if not isvalid(player) then return end
         ---@type PlayerGrowthComponent
         local growth = player:GetComponent("script.PlayerGrowthComponent")
         if growth == nil then return end
-        growth:RequestCommitChoice(index)
+        if self.replaceMode then
+            growth:RequestReplaceCommit(index)
+        else
+            growth:RequestCommitChoice(index)
+        end
     end
 
     @EventSender("LocalPlayer")
     handler OnChoiceCommitted(ChoiceCommittedEvent event)
-        -- 서버 커밋 확정 -> 오버레이 닫기 (full 등 실패 시엔 열려 있음 — 교체 플로우 후속).
+        -- 서버 커밋 확정 -> 오버레이 닫기 (교체 대기(replacePending) 시엔 교체 오버레이가 대신 뜬다).
+        self:SetReplaceMode(false)
         self.choicePanel.Enable = false
+    end
+
+    -- ===== 만석 교체 (사양서 §3-4) =====
+
+    @ExecSpace("ClientOnly")
+    method void SetReplaceMode(boolean on)
+        -- 선택지 패널의 교체 모드 전환 + 취소 버튼 노출 동기화.
+        self.replaceMode = on
+        if isvalid(self.btnReplaceCancel) then
+            self.btnReplaceCancel.Entity.Enable = on
+        end
+    end
+
+    @EventSender("LocalPlayer")
+    handler OnReplacePresented(ReplacePresentedEvent event)
+        -- 교체 대상 선택: 선택지 패널 재사용 — 카드 = 보유 슬롯(이름/Lv/태그), 취소 가능.
+        self:SetReplaceMode(true)
+        self.choiceCount = #event.slots
+        self.choiceTitle.Text = "교체할 스킬 선택 — " .. event.newSkillName .. " 장착"
+        local buttons = { self.btnChoice1, self.btnChoice2, self.btnChoice3 }
+        local icons = { self.iconChoice1, self.iconChoice2, self.iconChoice3 }
+        local descs = { self.descChoice1, self.descChoice2, self.descChoice3 }
+        for i, btn in ipairs(buttons) do
+            local slot = event.slots[i]
+            if slot ~= nil then
+                btn.Entity.Enable = true
+                btn.Entity.TextComponent.Text = slot.name .. " Lv." .. tostring(slot.level)
+                descs[i].Text = slot.tagsText .. "\n(태그 1종을 " .. event.newSkillName .. "이(가) 계승)"
+                local sr = btn.Entity.SpriteGUIRendererComponent
+                if isvalid(sr) then sr.Color = Color(0.30, 0.12, 0.12, 0.97) end
+                if slot.iconRuid ~= nil and slot.iconRuid ~= "" then
+                    icons[i].ImageRUID = slot.iconRuid
+                    icons[i].Entity.Enable = true
+                else
+                    icons[i].Entity.Enable = false
+                end
+            else
+                btn.Entity.Enable = false
+            end
+        end
+        self.choicePanel.Enable = true
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnReplaceCancelClicked()
+        -- 교체 취소 -> 서버가 유지 중인 선택지를 재노출 (OnChoicePresented가 일반 모드로 재렌더).
+        if not self.replaceMode then return end
+        local player = _UserService.LocalPlayer
+        if not isvalid(player) then return end
+        ---@type PlayerGrowthComponent
+        local growth = player:GetComponent("script.PlayerGrowthComponent")
+        if growth == nil then return end
+        growth:RequestReplaceCancel()
     end
 
     -- ===== 스킬 발동 순서 리스트 (⑥ / 규칙서 §5.3) =====

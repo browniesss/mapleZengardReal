@@ -1,5 +1,5 @@
-﻿job,baseAtk,critRate,critDmg,defPen,firstSkillPair
-WAR,10,0.05,0.5,0,"[""WAR_POWERSTRIKE"",""WAR_SLASHBLAST""]"
-MAG,10,0.05,0.5,0,"[""MAG_FIREARROW"",""MAG_COLDBEAM""]"
-ARC,10,0.05,0.5,0,"[""ARC_DOUBLESHOT"",""ARC_ARROWBLOW""]"
-THF,10,0.05,0.5,0,"[""THF_LUCKYSEVEN""]"
+job,jobName,baseAtk,critRate,critDmg,defPen,firstSkillPair
+WAR,전사,10,0.05,0.5,0,"[""WAR_POWERSTRIKE"",""WAR_SLASHBLAST""]"
+MAG,마법사,10,0.05,0.5,0,"[""MAG_FIREARROW"",""MAG_COLDBEAM""]"
+ARC,궁수,10,0.05,0.5,0,"[""ARC_DOUBLESHOT"",""ARC_ARROWBLOW""]"
+THF,도적,10,0.05,0.5,0,"[""THF_LUCKYSEVEN""]"

@@ -1,0 +1,8 @@
+@Event
+script ReplacePresentedEvent extends EventType
+    -- 슬롯 만석 상태에서 신규 스킬 선택 -> 교체 대상 선택 요청 (사양서 §3-4). 소비자: 교체 오버레이 UI.
+    -- slots = [{ slotIndex, name, level, tagsText, iconRuid }, ...] (attackSlots 순서)
+    property string newSkillId = ""
+    property string newSkillName = ""
+    property table slots = {}
+end

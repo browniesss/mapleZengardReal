@@ -9,6 +9,7 @@ script PlayerGrowthComponent extends Component
     @Sync property integer NextExp = 0   -- 다음 레벨 필요 EXP (HUD 프로필 표시용 — 곡선은 서버 데이터셋)
 
     property any pendingChoices = nil   -- 노출 중 선택지 [{kind,skillId,name,rarity,...}] (nil=없음)
+    property any pendingReplace = nil   -- 만석 교체 대기 중인 신규 스킬 선택지 (nil=없음, 사양서 §3-4)
     property boolean levelUpHold = false -- 공격 해소 중 레벨업 보류 — 체인 종료 후 일괄 판정 (2026-07-05 사용자 확정)
     property number EquipChance = 0     -- 장비 등장 확률 (기획 10% — 장비 시스템 도입 시 활성)
     property integer ChoiceCount = 3    -- 기본 선택지 수 (전리품 확장 시 5)
@@ -21,6 +22,7 @@ script PlayerGrowthComponent extends Component
         self.Exp = 0
         self.NextExp = _SkillCatalogLogic:GetRequiredExp(1) or 0
         self.pendingChoices = nil
+        self.pendingReplace = nil
         self.levelUpHold = false
     end
 
@@ -109,7 +111,7 @@ script PlayerGrowthComponent extends Component
     method table RollChoices(integer count)
         -- 레벨업 선택지 조립 (규칙서 §6.1 / 초안 §8 / 사양서 §3):
         --   ① 합성 후보(있으면 확률 등장, 1슬롯) ② 능력치 후보(최소 1슬롯 보장 — 데드락 방지)
-        --   ③ 나머지는 스킬 후보(슬롯 만석이면 신규 제외, 보유 스킬 레벨업만)
+        --   ③ 나머지는 스킬 후보(만석이어도 신규 포함 — 선택 시 교체 플로우 진입, 사양서 §3-4)
         -- 스킬 후보가 고갈돼도 능력치로 채우므로 선택지가 항상 count개 구성된다. 마지막에 셔플.
         local jobComp = self:GetJobComponent()
         ---@type SkillLoadoutComponent
@@ -149,7 +151,7 @@ script PlayerGrowthComponent extends Component
     @ExecSpace("ServerOnly")
     method any RollSkillChoice(any jobComp, any loadout)
         -- 스킬 후보 1개: 레어도 추첨 -> 직업·차수 풀. 후보 부족 시 차수 하향 폴백.
-        -- 공격 슬롯 만석이면 신규 스킬은 제외하고 보유 스킬(Lv<3) 레벨업만 후보 (논리 일관성).
+        -- 슬롯 만석이어도 신규 스킬은 후보에 포함 — 선택 시 교체 플로우 진입 (사양서 §3-4).
         -- Lv.3 만렙 보유 스킬은 항상 제외. 후보 전무 시 nil.
         local isFull = #loadout.attackSlots >= loadout.MaxAttackSlots
         local rarity = self:RollRarity()
@@ -164,7 +166,7 @@ script PlayerGrowthComponent extends Component
                     local slotIdx = loadout:FindSlotIndex(skillId)
                     local owned = slotIdx > 0
                     local maxed = owned and loadout.attackSlots[slotIdx].level >= 3
-                    if not maxed and (owned or not isFull) then
+                    if not maxed then
                         table.insert(cands, def)
                     end
                 end
@@ -172,10 +174,17 @@ script PlayerGrowthComponent extends Component
             if #cands > 0 then
                 local picked = cands[_UtilLogic:RandomIntegerRange(1, #cands)]
                 local owned = loadout:FindSlotIndex(picked.skillId) > 0
+                local desc
+                if owned then
+                    desc = picked.name .. "의 레벨이 1 오른다 (최대 Lv.3)"
+                elseif isFull then
+                    desc = picked.desc .. "\n(슬롯 만석 — 기존 스킬과 교체)"
+                else
+                    desc = picked.desc
+                end
                 return { kind = "skill", skillId = picked.skillId,
                     name = owned and (picked.name .. " 강화") or picked.name,
-                    rarity = picked.rarity, iconRuid = picked.iconRuid,
-                    desc = owned and (picked.name .. "의 레벨이 1 오른다 (최대 Lv.3)") or picked.desc }
+                    rarity = picked.rarity, iconRuid = picked.iconRuid, desc = desc }
             end
             tier = tier - 1
         end
@@ -269,8 +278,9 @@ script PlayerGrowthComponent extends Component
 
     @ExecSpace("ServerOnly")
     method void CheckLevelUp()
-        -- 필요 EXP 충족 시 레벨업. 선택지 노출 중/공격 해소 중에는 보류(커밋·체인 종료 시 재호출).
+        -- 필요 EXP 충족 시 레벨업. 선택지 노출/교체 대기/공격 해소 중에는 보류(커밋·체인 종료 시 재호출).
         if self.pendingChoices ~= nil then return end
+        if self.pendingReplace ~= nil then return end
         if self.levelUpHold then return end
         local required = _SkillCatalogLogic:GetRequiredExp(self.Level)
         if required == nil then return end
@@ -287,7 +297,9 @@ script PlayerGrowthComponent extends Component
 
     @ExecSpace("ServerOnly")
     method string CommitChoice(integer index)
-        -- 선택지 확정: 스킬 장착/강화 적용. 반환 상태 문자열 (full이면 pending 유지 — 교체 플로우는 후속 UI).
+        -- 선택지 확정: 스킬 장착/강화 적용. 교체 대기 중엔 차단 — pendingChoices가 취소 복귀용으로
+        -- 유지돼 있어 가드 없이는 이중 커밋으로 상태가 오염된다.
+        if self.pendingReplace ~= nil then return "replacePending" end
         if self.pendingChoices == nil then return "none" end
         local choice = self.pendingChoices[index]
         if choice == nil then return "invalid" end
@@ -311,9 +323,12 @@ script PlayerGrowthComponent extends Component
         else
             resultStatus = loadout:AcquireSkill(choice.skillId)
             if resultStatus == "full" then
-                -- 만석 시 신규 스킬은 후보에서 제외되므로 정상 경로에선 도달 불가 (방어적 유지)
-                log_warning("[PlayerGrowth] 공격 슬롯 만석 — 선택지 유지")
-                return resultStatus
+                -- 만석 + 신규 스킬: 교체 대기로 전환. pendingChoices 유지 — 취소하면 선택지로 복귀 (사양서 §3-4).
+                self.pendingReplace = choice
+                self:ShowReplaceOnClient(choice.skillId, choice.name,
+                    loadout:BuildAttackSlotsSummary(), self.Entity.PlayerComponent.UserId)
+                log("[PlayerGrowth] 슬롯 만석 — 교체 대상 선택 대기: " .. choice.skillId)
+                return "replacePending"
             end
         end
         self.pendingChoices = nil
@@ -325,6 +340,55 @@ script PlayerGrowthComponent extends Component
         log("[PlayerGrowth] 선택 확정: " .. choice.skillId .. " (" .. resultStatus .. ")")
         self:CheckLevelUp()   -- 노출 중 누적된 EXP 재판정
         return resultStatus
+    end
+
+    @ExecSpace("Client")
+    method void ShowReplaceOnClient(string skillId, string skillName, table slots)
+        -- 소유 클라에서 실행: 교체 대상 선택 오버레이를 로컬 이벤트로 요청.
+        local ev = ReplacePresentedEvent()
+        ev.newSkillId = skillId
+        ev.newSkillName = skillName
+        ev.slots = slots
+        self.Entity:SendEvent(ev)
+    end
+
+    @ExecSpace("Server")
+    method void RequestReplaceCommit(integer slotIndex)
+        -- 클라(교체 오버레이) -> 교체 확정: 대상 슬롯 스킬 소멸, 태그 1종 랜덤 계승 (사양서 §3-4).
+        if senderUserId ~= self.Entity.PlayerComponent.UserId then
+            log_warning("[PlayerGrowth] 비소유자 교체 요청 무시: " .. senderUserId)
+            return
+        end
+        if self.pendingReplace == nil then return end
+        ---@type SkillLoadoutComponent
+        local loadout = self.Entity:GetComponent("script.SkillLoadoutComponent")
+        local rep = loadout:ReplaceSkill(slotIndex, self.pendingReplace.skillId)
+        if rep == nil then return end   -- 무효 슬롯 등 — 오버레이 유지, 재시도 가능
+        local skillId = self.pendingReplace.skillId
+        self.pendingReplace = nil
+        self.pendingChoices = nil
+        local ev = ChoiceCommittedEvent()
+        ev.skillId = skillId
+        ev.resultStatus = "replaced"
+        self.Entity:SendEvent(ev)
+        self:NotifyCommittedOnClient(skillId, "replaced", self.Entity.PlayerComponent.UserId)
+        log("[PlayerGrowth] 교체 확정: slot" .. tostring(slotIndex) .. " -> " .. skillId
+            .. " (계승 태그: " .. tostring(rep.inheritedTag) .. ")")
+        self:CheckLevelUp()
+    end
+
+    @ExecSpace("Server")
+    method void RequestReplaceCancel()
+        -- 교체 취소: 대기 해제 후 유지 중인 선택지를 다시 노출 (선택 기회 소모 없음).
+        if senderUserId ~= self.Entity.PlayerComponent.UserId then
+            log_warning("[PlayerGrowth] 비소유자 교체 취소 무시: " .. senderUserId)
+            return
+        end
+        if self.pendingReplace == nil then return end
+        self.pendingReplace = nil
+        if self.pendingChoices ~= nil then
+            self:ShowChoicesOnClient(self.pendingChoices, false, self.Entity.PlayerComponent.UserId)
+        end
     end
 
     @ExecSpace("Client")
