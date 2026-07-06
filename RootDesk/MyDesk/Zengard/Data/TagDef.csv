@@ -2,7 +2,7 @@
 target,대상지정,method,false,{}
 area,범위형,method,false,{}
 pierce,관통,method,false,"{""pierce"":true}"
-hit2,2회공격,count,true,"{""hitAdd"":1}"
+hit2,연타,count,true,"{""castAdd"":1}"
 rangeUp,사거리연장,range,true,"{""rangeAdd"":1}"
 fire,화염,element,true,"{""element"":""fire""}"
 ice,얼음,element,true,"{""element"":""ice""}"

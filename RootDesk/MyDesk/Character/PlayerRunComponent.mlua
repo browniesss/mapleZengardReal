@@ -129,14 +129,16 @@ script PlayerRunComponent extends Component
     end
 
     @ExecSpace("ServerOnly")
-    method any ResolveSingleSkill(any inst, string facing, any playerCell)
-        -- 단일 스킬 발동 해석 (통합 지점 I-1 — 순차 발동): 젠 플로우가 발동 순서대로 하나씩 호출.
-        -- 앞 스킬의 처치가 보드에 반영된 뒤 호출되므로 죽은 적은 다음 스킬 타겟에서 자연 제외된다.
-        -- HitPlan 산출 + 쿨다운 개시 + 스킬별 AttackResolvedEvent 발행. HP 적용은 소비자(몬스터) 몫.
+    method any ResolveSingleSkill(any inst, string facing, any playerCell, boolean applyCooldown)
+        -- 단일 스킬 1회 발동 해석 (통합 지점 I-1 — 순차 발동): 젠 플로우가 cast 단위로 호출.
+        -- 앞 발동의 처치가 보드에 반영된 뒤 호출되므로 죽은 적은 다음 발동 타겟에서 자연 제외된다.
+        -- 연타(castAdd) 스킬은 마지막 cast에만 applyCooldown=true — 중간 cast에서 쿨다운이 걸리면
+        -- 해석기의 쿨 체크가 남은 발동을 스킵해 버린다. HP 적용은 소비자(몬스터) 몫.
         if not self.RunActive then
             log_warning("[PlayerRun] 런 비활성 상태에서 공격 해석 호출")
             return nil
         end
+        if applyCooldown == nil then applyCooldown = true end   -- 인자 생략 = 단발 발동(쿨 정상 개시)
         local ctx = {
             stats = self:Stat():GetStatsSnapshot(),
             order = { inst },
@@ -144,7 +146,9 @@ script PlayerRunComponent extends Component
             facing = facing,
         }
         local result = _CombatResolveLogic:ResolveAttack(ctx, self.run, self.boardDef)
-        self:Loadout():ApplyFired(result.fired)
+        if applyCooldown then
+            self:Loadout():ApplyFired(result.fired)
+        end
         local ev = AttackResolvedEvent()
         ev.hits = result.hits
         ev.fired = result.fired

@@ -74,9 +74,9 @@
 
 | 데이터셋 | 주요 컬럼 | 비고 |
 |---|---|---|
-| `SkillMaster` (테스트 8행) | skillId, name, job(WAR/MAG/ARC/THF), tier(1~4), attackType(projectile/target/area), hitCount(**태그 제외 기본 타격수**), targetCount, rangeId, element(none/fire/ice/thunder/poison/holy), baseTags(JSON 배열), coefLv3, onHitStatus, cooldownTurns, iconRuid | 레어도는 tier에서 자동 유도(N/R/E/U). coefLv3=**기본 태그 포함 총계수** → 타격당 계수는 로드 시 산출(coefLv3 ÷ 기본 최종 타격수), Lv1=×0.75/Lv2=×0.88. hitCount를 태그 제외 기본값으로 두어 `hit2` 태그 이식 시 이중 계산 없이 타격수 가산 |
+| `SkillMaster` (테스트 8행) | skillId, name, job(WAR/MAG/ARC/THF), tier(1~4), attackType(projectile/target/area), hitCount(**태그 제외 기본 타격수**), targetCount, rangeId, element(none/fire/ice/thunder/poison/holy), baseTags(JSON 배열), coefLv3, onHitStatus, cooldownTurns, iconRuid | 레어도는 tier에서 자동 유도(N/R/E/U). coefLv3=**기본 태그 포함 총계수** → 타격당 계수는 로드 시 산출(coefLv3 ÷ (hitCount × 기본 발동수)), Lv1=×0.75/Lv2=×0.88. hitCount는 발동 1회의 고유 타수 — 연타(castAdd) 태그는 발동 반복이므로 이중 계산 없음 |
 | `RangePattern` (6종+) | rangeId, facingBase(UP), dirDependent, grid(JSON `["010","1P1","010"]`) | 기획 마스크 그대로, 파서가 (dcol,drow) 변환·캐시 |
-| `TagDef` | tagId, name, category(method/count/range/element), inSynthesisPool(method=false), effect(JSON: hitAdd/rangeAdd/pierce/element) | 중첩 규칙은 effect 키별 코드 규칙(count·range=가산, element=중첩 카운트). 태그별 커스텀 stackRule이 필요해지면 컬럼 추가 |
+| `TagDef` | tagId, name, category(method/count/range/element), inSynthesisPool(method=false), effect(JSON: castAdd/rangeAdd/pierce/element) | 중첩 규칙은 effect 키별 코드 규칙(count·range=가산, element=중첩 카운트). castAdd(연타)는 타수 증가가 아니라 **스킬 발동 반복** — 공격 체인이 cast 단위 큐로 발동마다 독립 판정/이펙트/재조준, 쿨다운은 마지막 cast에만 개시 (2026-07-06 확정). 태그별 커스텀 stackRule이 필요해지면 컬럼 추가 |
 | `StatusEffectDef` | statusId(stun/freeze/poison/taunt/defIgnore), 파라미터 JSON | 효과 정의는 몬스터 측과 협의, 우리는 부여까지 |
 | `GrowthCurve` | level, requiredExp | 판당 레벨업 6~10회 목표, 수치 플레이스홀더 |
 | `JobBase` | job, baseAtk, critRate, critDmg, defPen, firstSkillPair(JSON) | **stat 키는 보드 Modifier와 동일: `atk`, `critRate`, `critDmg`, `defPen`** |

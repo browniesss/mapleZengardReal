@@ -8,6 +8,7 @@ script TurnFlowStubLogic extends Logic
 
     property integer SpawnPerWave = 4        -- 젠당 신규 스폰 수 (규칙서 §4.1 확정값)
     property number SkillFireInterval = 0.55 -- 순차 발동 간격(초) — 스킬 하나씩 시간차 발동
+    property number CastFireInterval = 0.28  -- 같은 스킬 연타(cast) 간 간격 — 연속 발사 리듬
 
     @ExecSpace("ServerOnly")
     method void OnBeginPlay()
@@ -194,7 +195,9 @@ script TurnFlowStubLogic extends Logic
     @ExecSpace("ServerOnly")
     method void StartAttackChain(any ctx, string userId, string facing)
         -- 발동 큐 구성 후 순차 체인 시작 (수동 공격/자동 공격 공용).
-        -- 큐: 쿨다운 중이 아닌 인스턴스만, 발동 순서 유지 (인스턴스 참조 보관).
+        -- 큐는 **cast 단위**: 연타(castAdd) 스킬은 같은 인스턴스가 발동 횟수만큼 연속 등재 —
+        -- "타수 증가"가 아니라 스킬이 실제로 n번 발동된다 (2026-07-06 사용자 확정).
+        -- 매 cast가 독립 판정(재조준/크리)이므로 앞 발동의 처치가 다음 발동에 반영된다.
         -- 체인 동안 레벨업 선택지는 보류 — 모든 공격 연출이 끝난 뒤 노출 (사용자 확정).
         ---@type PlayerGrowthComponent
         local growth = ctx.playerEntity:GetComponent("script.PlayerGrowthComponent")
@@ -205,7 +208,10 @@ script TurnFlowStubLogic extends Logic
         local loadout = ctx.playerEntity:GetComponent("script.SkillLoadoutComponent")
         for _, inst in ipairs(loadout:GetOrderedInstances()) do
             if inst.cooldownLeft == nil or inst.cooldownLeft <= 0 then
-                table.insert(queue, inst)
+                local casts = 1 + _CombatResolveLogic:BuildTagEffects(inst).castAdd
+                for c = 1, casts do
+                    table.insert(queue, { inst = inst, cast = c, casts = casts })
+                end
             end
         end
         ctx.flow.totalKills = 0
@@ -214,9 +220,9 @@ script TurnFlowStubLogic extends Logic
 
     @ExecSpace("ServerOnly")
     method void FireNextSkill(string userId, table queue, integer index, string facing)
-        -- 순차 발동 스텝: 스킬 1개 해석·연출·처치 후 SkillFireInterval 뒤 다음 스킬.
+        -- 순차 발동 스텝: cast 1개(스킬 1회 발동) 해석·연출·처치 후 다음 cast.
         -- 매 스텝 컨텍스트를 재검증(런 종료/패배 시 안전 중단). 발동 중 합성으로 사라진
-        -- 인스턴스는 참조 비교로 건너뛴다.
+        -- 인스턴스는 참조 비교로 건너뛴다 (남은 cast 포함 전부 스킵).
         local ctx = self:FindRunContext(userId)
         if ctx == nil then
             -- 런/엔티티 무효: 남은 run 핸들이 있으면 phase를 복구해 재입장 시 잠김 방지
@@ -244,7 +250,8 @@ script TurnFlowStubLogic extends Logic
             if growth ~= nil then growth:SetLevelUpHold(false) end
             return
         end
-        local inst = queue[index]
+        local entry = queue[index]
+        local inst = entry.inst
         ---@type SkillLoadoutComponent
         local loadout = ctx.playerEntity:GetComponent("script.SkillLoadoutComponent")
         local stillOwned = false
@@ -252,16 +259,21 @@ script TurnFlowStubLogic extends Logic
             if s == inst then stillOwned = true break end
         end
         if stillOwned then
-            local result = ctx.runComp:ResolveSingleSkill(inst, facing, ctx.flow.playerCell)
+            -- 쿨다운은 마지막 cast에서만 개시 — 중간에 걸면 해석기가 남은 발동을 스킵한다
+            local result = ctx.runComp:ResolveSingleSkill(inst, facing, ctx.flow.playerCell, entry.cast == entry.casts)
             if result ~= nil then
                 self:SpawnHitEffects(ctx.run, result.hits)
                 local kills = _MonsterStubLogic:ApplyHitPlan(ctx.run, ctx.def, result.hits, ctx.playerEntity)
                 ctx.flow.totalKills = (ctx.flow.totalKills or 0) + kills
                 log("[TurnFlowStub] 발동 " .. tostring(index) .. "/" .. tostring(#queue) .. ": " .. inst.skillId
+                    .. " (cast " .. tostring(entry.cast) .. "/" .. tostring(entry.casts) .. ")"
                     .. " hits=" .. tostring(#result.hits) .. " 처치=" .. tostring(kills))
             end
         end
-        _TimerService:SetTimerOnce(function() self:FireNextSkill(userId, queue, index + 1, facing) end, self.SkillFireInterval)
+        -- 같은 스킬의 다음 cast는 짧은 간격(연속 발사 리듬), 스킬 전환은 기본 간격
+        local nextEntry = queue[index + 1]
+        local interval = (nextEntry ~= nil and nextEntry.inst == inst) and self.CastFireInterval or self.SkillFireInterval
+        _TimerService:SetTimerOnce(function() self:FireNextSkill(userId, queue, index + 1, facing) end, interval)
     end
 
     @ExecSpace("ServerOnly")

@@ -50,16 +50,17 @@ script CombatResolveLogic extends Logic
 
     @ExecSpace("ServerOnly")
     method any BuildTagEffects(any inst)
-        -- 인스턴스 보유 태그 -> 집계 효과 { hitAdd, rangeAdd, pierce, element, elementStacks }.
+        -- 인스턴스 보유 태그 -> 집계 효과 { castAdd, rangeAdd, pierce, element, elementStacks }.
+        -- castAdd = 추가 발동 횟수(연타 = 타수 증가가 아니라 스킬이 실제로 n번 발동 — 2026-07-06 사용자 확정).
         -- count/range는 중첩 가산(사양서 §3-3). 유효 element는 최다 중첩 우선, 동률이면 나중 태그
         -- (잠정 규칙 — 태그 다중 속성 우선순위는 기획 확정 대기, 설계서 §9). elementStacks는
         -- "같은 속성 중복 시 효과 강화" 소비자(몬스터 측)용 중첩 수.
-        local eff = { hitAdd = 0, rangeAdd = 0, pierce = false, element = nil, elementStacks = {} }
+        local eff = { castAdd = 0, rangeAdd = 0, pierce = false, element = nil, elementStacks = {} }
         for _, tagId in ipairs(inst.tags) do
             local def = _SkillCatalogLogic:GetTagDef(tagId)
             if def ~= nil then
-                if def.effect.hitAdd ~= nil then
-                    eff.hitAdd = eff.hitAdd + math.floor(def.effect.hitAdd)
+                if def.effect.castAdd ~= nil then
+                    eff.castAdd = eff.castAdd + math.floor(def.effect.castAdd)
                 end
                 if def.effect.rangeAdd ~= nil then
                     eff.rangeAdd = eff.rangeAdd + math.floor(def.effect.rangeAdd)
@@ -212,7 +213,9 @@ script CombatResolveLogic extends Logic
                         local cells = self:ComputeRangeCells(pattern, eff, ctx.facing, ctx.playerCell, boardDef)
                         local targets = self:SelectTargets(skillDef.attackType, eff, skillDef.targetCount, cells, run, boardDef, ctx.playerCell)
 
-                        local totalHits = skillDef.hitCount + eff.hitAdd
+                        -- 연타(castAdd)는 여기서 타수에 더하지 않는다 — 발동 반복은 공격 체인이
+                        -- cast 단위 큐로 수행(TurnFlowStub.StartAttackChain). 타수는 스킬 고유 다단만.
+                        local totalHits = skillDef.hitCount
                         if totalHits < 1 then totalHits = 1 end
                         local perHit = ctx.stats.atk * skillDef.perHitCoefLv3 * _SkillCatalogLogic:LevelFactor(inst.level)
                         local isCrit = _UtilLogic:RandomDouble() < ctx.stats.critRate
@@ -300,7 +303,7 @@ script CombatResolveLogic extends Logic
             facing = "UP",
         }
 
-        -- 기대: dbl(target,LINE_4) -> 최근접 monA 1체, x2타(hit2), perHit=10×0.7×0.75=5.25
+        -- 기대: dbl(target,LINE_4) -> 최근접 monA 1체, x1타(연타는 체인이 발동 반복 — 여기선 1발동 1타)
         --       fire(projectile,LINE_5,관통) -> monA, monB 관통 후 (3,4) 바위에서 차단(monC 미도달)
         --       bolt(area,AROUND_8,방향무관) -> 인접 monA 1체, elem=thunder
         local r1 = self:ResolveAttack(ctx, run, boardDef)
@@ -324,7 +327,7 @@ script CombatResolveLogic extends Logic
         log("[CombatResolve][SelfTest] rangeUp -> LINE_4 셀#=" .. tostring(#cells) .. " (기대 5)")
 
         -- 회전 검증: LEFT면 LINE_4가 (2,1),(1,1),(0,1)... 방향으로.
-        local cellsLeft = self:ComputeRangeCells(pattern, { hitAdd = 0, rangeAdd = 0, pierce = false }, "LEFT", ctx.playerCell, boardDef)
+        local cellsLeft = self:ComputeRangeCells(pattern, { castAdd = 0, rangeAdd = 0, pierce = false }, "LEFT", ctx.playerCell, boardDef)
         local desc = ""
         for _, c in ipairs(cellsLeft) do desc = desc .. "(" .. c.col .. "," .. c.row .. ")" end
         log("[CombatResolve][SelfTest] LINE_4 LEFT cells=" .. desc .. " (기대 (2,1)(1,1)(0,1) — 맵밖 버림)")
