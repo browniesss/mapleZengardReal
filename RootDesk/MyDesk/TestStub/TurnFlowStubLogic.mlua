@@ -1,0 +1,344 @@
+@Logic
+script TurnFlowStubLogic extends Logic
+    -- [임시 스텁] 젠(WAVE) 사이클 오케스트레이터 (규칙서 §2 수동 턴 절차의 최소 구현).
+    -- 정식 젠 플로우는 보드 담당자의 BoardFlowLogic 소관 — 도입 시 TestStub/ 폴더째 제거.
+    -- 사이클: 젠 터치 -> ①몬스터 신규 스폰(위치 고정 누적) ②캐릭터만 랜덤 재배치(+칸 효과 배선 I-5)
+    --        -> 버튼 '공격' 전환(aim) -> 방향 설정 -> 공격 터치 -> 스킬 순서 발동 -> 턴 종료 -> idle.
+    -- 상태는 run.flow에만 보관(무상태 Logic). 선택지 노출 중에는 사이클 일시정지(규칙서 §8.1).
+
+    property integer SpawnPerWave = 4        -- 젠당 신규 스폰 수 (규칙서 §4.1 확정값)
+    property number SkillFireInterval = 0.55 -- 순차 발동 간격(초) — 스킬 하나씩 시간차 발동
+
+    @ExecSpace("ServerOnly")
+    method void OnBeginPlay()
+        -- 무상태. 준비 로그만.
+        log("[TurnFlowStub] ready (임시 젠 플로우 — BoardFlowLogic 도입 시 제거)")
+    end
+
+    @ExecSpace("ServerOnly")
+    method any FindRunContext(string userId)
+        -- 요청 유저의 런 컨텍스트 해석: { playerEntity, runComp, run, def, flow }. 무효 시 nil.
+        local playerEntity = _BoardRenderProbe:FindUserEntity(userId)
+        if not isvalid(playerEntity) then
+            log_warning("[TurnFlowStub] 플레이어 엔티티 없음: " .. userId)
+            return nil
+        end
+        ---@type PlayerRunComponent
+        local runComp = playerEntity:GetComponent("script.PlayerRunComponent")
+        if runComp == nil or not runComp.RunActive then
+            log_warning("[TurnFlowStub] 런 비활성: " .. userId)
+            return nil
+        end
+        local runMapName = playerEntity.CurrentMap.Name
+        local run = _BoardRenderProbe.runs[runMapName]
+        if run == nil then
+            log_error("[TurnFlowStub] run 핸들 없음: " .. tostring(runMapName))
+            return nil
+        end
+        if run.flow == nil then run.flow = {} end
+        return { playerEntity = playerEntity, runComp = runComp, run = run, def = runComp.boardDef, flow = run.flow }
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean IsChoicePending(Entity playerEntity)
+        -- 선택지 노출 중이면 사이클 일시정지 (규칙서 §8.1).
+        ---@type PlayerGrowthComponent
+        local growth = playerEntity:GetComponent("script.PlayerGrowthComponent")
+        return growth ~= nil and growth.pendingChoices ~= nil
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean IsDangerZone(any ctx)
+        -- 규칙서 §7.1: 남은 빈 칸(unit 배치 가능)이 가용 칸(총 칸 - 캐릭터 1)의 10% 미만.
+        local empty = 0
+        local usable = 0
+        for col = 0, ctx.def.cols - 1 do
+            for row = 0, ctx.def.rows - 1 do
+                if _BoardService:IsInside(ctx.def, col, row) then
+                    usable = usable + 1
+                    if _BoardService:CanPlaceUnit(ctx.def, ctx.run.board, col, row) then
+                        empty = empty + 1
+                    end
+                end
+            end
+        end
+        usable = usable - 1   -- 캐릭터 자리 제외 (규칙서 §3.1 가용 칸)
+        return usable > 0 and empty < usable * 0.1
+    end
+
+    @ExecSpace("Server")
+    method void RequestSetBattleMode(boolean auto)
+        -- 전투 방식 토글 (규칙서 §5.2, UI설계 ⑨): 수동/자동. 대기 상태에서만 의미가 있으나
+        -- 값 자체는 언제든 바꿔도 무해(다음 젠부터 적용).
+        local ctx = self:FindRunContext(senderUserId)
+        if ctx == nil then return end
+        ctx.flow.autoMode = auto
+        log("[TurnFlowStub] 전투 방식: " .. (auto and "자동" or "수동"))
+    end
+
+    @ExecSpace("ServerOnly")
+    method string PickAutoFacing(any ctx)
+        -- 자동 모드 방향 결정 (규칙서 §2.2): 가장 가까운 적(맨해튼) 중 하나를 랜덤으로 골라
+        -- 그 적 쪽 지배 축 방향. 적이 없거나 축이 동률이면 랜덤.
+        local pc = ctx.flow.playerCell
+        local nearest = {}
+        local best = nil
+        for _, rec in pairs(ctx.run.board.cells) do
+            local unit = rec.layers ~= nil and rec.layers.unit or nil
+            if unit ~= nil and unit.payload ~= nil and unit.payload.occupantKind == "monster" then
+                local d = math.abs(rec.col - pc.col) + math.abs(rec.row - pc.row)
+                if best == nil or d < best then
+                    best = d
+                    nearest = { rec }
+                elseif d == best then
+                    table.insert(nearest, rec)
+                end
+            end
+        end
+        local dirs = { "UP", "DOWN", "LEFT", "RIGHT" }
+        if #nearest == 0 then return dirs[_UtilLogic:RandomIntegerRange(1, 4)] end
+        local pick = nearest[_UtilLogic:RandomIntegerRange(1, #nearest)]
+        local dc = pick.col - pc.col
+        local dr = pick.row - pc.row
+        if math.abs(dc) > math.abs(dr) then
+            return dc > 0 and "RIGHT" or "LEFT"
+        elseif math.abs(dr) > math.abs(dc) then
+            return dr > 0 and "UP" or "DOWN"
+        end
+        local horizontal = _UtilLogic:RandomDouble() < 0.5
+        if horizontal then return dc > 0 and "RIGHT" or "LEFT" end
+        return dr > 0 and "UP" or "DOWN"
+    end
+
+    @ExecSpace("Server")
+    method void RequestZen()
+        -- 젠 터치 (턴 스텝 ①②③): 몬스터 신규 스폰 + 캐릭터만 재배치.
+        -- 수동: aim 페이즈 전환(버튼 '공격'). 자동(규칙서 §2.2): 최근접 적 향해 랜덤 방향 결정 후 즉시 발동.
+        local ctx = self:FindRunContext(senderUserId)
+        if ctx == nil then return end
+        if self:IsChoicePending(ctx.playerEntity) then
+            log_warning("[TurnFlowStub] 선택지 노출 중 — 젠 무시")
+            return
+        end
+        if ctx.flow.phase == "aim" or ctx.flow.phase == "resolving" then
+            log_warning("[TurnFlowStub] 이미 젠 진행 중 (" .. tostring(ctx.flow.phase) .. ") — 무시")
+            return
+        end
+        self:ClearRangePreview(ctx.run)   -- 잔여 프리뷰 정리(안전)
+        _MonsterStubLogic:SpawnWave(ctx.run, ctx.def, self.SpawnPerWave)
+        if not self:RepositionPlayer(ctx) then
+            -- 빈 칸 없음 = 공간 압박 패배 (규칙서 §7 즉사형 A)
+            log("[TurnFlowStub] 빈 칸 없음 — 스테이지 실패")
+            ctx.runComp:EndRun("fail")
+            self:NotifyPhaseClient("run_end", ctx.flow.wave or 0, false, senderUserId)
+            return
+        end
+        ctx.flow.wave = (ctx.flow.wave or 0) + 1
+        ctx.flow.danger = self:IsDangerZone(ctx)
+        if ctx.flow.autoMode == true then
+            local facing = self:PickAutoFacing(ctx)
+            ctx.flow.phase = "resolving"
+            log("[TurnFlowStub] 젠 " .. tostring(ctx.flow.wave) .. " — 자동 공격 (방향 " .. facing .. ")")
+            self:NotifyPhaseClient("resolving", ctx.flow.wave, ctx.flow.danger, senderUserId)
+            self:StartAttackChain(ctx, senderUserId, facing)
+            return
+        end
+        ctx.flow.phase = "aim"
+        log("[TurnFlowStub] 젠 " .. tostring(ctx.flow.wave) .. " — 방향 설정 대기(aim)")
+        self:NotifyPhaseClient("aim", ctx.flow.wave, ctx.flow.danger, senderUserId)
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean RepositionPlayer(any ctx)
+        -- 캐릭터만 랜덤 재배치 (몬스터 고정 — 규칙서 §3.2). 칸 이탈/진입 효과를 스탯에 배선(I-5).
+        local board = ctx.run.board
+        local flow = ctx.flow
+        if flow.playerCell ~= nil then
+            local exits = _BoardService:OnUnitExit(ctx.def, board, flow.playerCell.col, flow.playerCell.row)
+            ctx.runComp:ApplyCellExit(exits)
+            _BoardService:Release(board, flow.playerCell.col, flow.playerCell.row, "unit", flow.playerInstanceId)
+        end
+        local cells = _BoardService:ResolvePlacement(ctx.run, ctx.def, { place = "random" }, "unit")
+        if #cells == 0 then return false end
+        local col = cells[1][1]
+        local row = cells[1][2]
+        local instanceId = _BoardService:TryOccupy(ctx.def, board, col, row, "unit", { occupantId = "player", occupantKind = "player" })
+        if instanceId == nil then return false end
+        flow.playerCell = { col = col, row = row }
+        flow.playerInstanceId = instanceId
+        local mods = _BoardService:OnUnitEnter(ctx.def, board, col, row)
+        ctx.runComp:ApplyCellEnter(mods)
+        ctx.runComp:TeleportToCell(ctx.run, ctx.def, col, row)
+        log("[TurnFlowStub] 캐릭터 재배치 -> (" .. col .. "," .. row .. ") 칸효과 " .. tostring(#mods) .. "건")
+        return true
+    end
+
+    @ExecSpace("Server")
+    method void RequestAttack(string facing)
+        -- 공격 터치 (턴 스텝 ④⑤⑥): 지정 방향으로 스킬을 **순서대로 하나씩** 시간차 발동.
+        -- 앞 스킬의 처치가 보드에 반영된 뒤 다음 스킬이 해석되므로 죽은 적을 낭비 타격하지 않는다.
+        local ctx = self:FindRunContext(senderUserId)
+        if ctx == nil then return end
+        if ctx.flow.phase ~= "aim" then
+            log_warning("[TurnFlowStub] aim 페이즈 아님 (" .. tostring(ctx.flow.phase) .. ") — 공격 무시")
+            return
+        end
+        if facing ~= "UP" and facing ~= "DOWN" and facing ~= "LEFT" and facing ~= "RIGHT" then
+            log_warning("[TurnFlowStub] 잘못된 방향: " .. tostring(facing))
+            return
+        end
+        ctx.flow.phase = "resolving"
+        self:StartAttackChain(ctx, senderUserId, facing)
+    end
+
+    @ExecSpace("ServerOnly")
+    method void StartAttackChain(any ctx, string userId, string facing)
+        -- 발동 큐 구성 후 순차 체인 시작 (수동 공격/자동 공격 공용).
+        -- 큐: 쿨다운 중이 아닌 인스턴스만, 발동 순서 유지 (인스턴스 참조 보관).
+        -- 체인 동안 레벨업 선택지는 보류 — 모든 공격 연출이 끝난 뒤 노출 (사용자 확정).
+        ---@type PlayerGrowthComponent
+        local growth = ctx.playerEntity:GetComponent("script.PlayerGrowthComponent")
+        if growth ~= nil then growth:SetLevelUpHold(true) end
+        self:ClearRangePreview(ctx.run)
+        local queue = {}
+        ---@type SkillLoadoutComponent
+        local loadout = ctx.playerEntity:GetComponent("script.SkillLoadoutComponent")
+        for _, inst in ipairs(loadout:GetOrderedInstances()) do
+            if inst.cooldownLeft == nil or inst.cooldownLeft <= 0 then
+                table.insert(queue, inst)
+            end
+        end
+        ctx.flow.totalKills = 0
+        self:FireNextSkill(userId, queue, 1, facing)
+    end
+
+    @ExecSpace("ServerOnly")
+    method void FireNextSkill(string userId, table queue, integer index, string facing)
+        -- 순차 발동 스텝: 스킬 1개 해석·연출·처치 후 SkillFireInterval 뒤 다음 스킬.
+        -- 매 스텝 컨텍스트를 재검증(런 종료/패배 시 안전 중단). 발동 중 합성으로 사라진
+        -- 인스턴스는 참조 비교로 건너뛴다.
+        local ctx = self:FindRunContext(userId)
+        if ctx == nil then
+            -- 런/엔티티 무효: 남은 run 핸들이 있으면 phase를 복구해 재입장 시 잠김 방지
+            for _, run in pairs(_BoardRenderProbe.runs) do
+                if run.flow ~= nil and run.flow.phase == "resolving" then
+                    run.flow.phase = "idle"
+                end
+            end
+            return
+        end
+        if self:IsChoicePending(ctx.playerEntity) then
+            -- 발동 중 레벨업 선택지 노출 = 사이클 일시정지(규칙서 §8.1) — 커밋될 때까지 체인 대기
+            _TimerService:SetTimerOnce(function() self:FireNextSkill(userId, queue, index, facing) end, 0.25)
+            return
+        end
+        if index > #queue then
+            ctx.runComp:OnTurnEnd()
+            ctx.flow.phase = "idle"
+            ctx.flow.danger = self:IsDangerZone(ctx)   -- 처치 반영 후 재판정
+            log("[TurnFlowStub] 공격 해소 완료: 처치 " .. tostring(ctx.flow.totalKills or 0) .. "마리")
+            self:NotifyPhaseClient("idle", ctx.flow.wave, ctx.flow.danger, userId)
+            -- 체인 종료 후 보류했던 레벨업 일괄 판정 -> 선택지 노출 (사용자 확정 타이밍)
+            ---@type PlayerGrowthComponent
+            local growth = ctx.playerEntity:GetComponent("script.PlayerGrowthComponent")
+            if growth ~= nil then growth:SetLevelUpHold(false) end
+            return
+        end
+        local inst = queue[index]
+        ---@type SkillLoadoutComponent
+        local loadout = ctx.playerEntity:GetComponent("script.SkillLoadoutComponent")
+        local stillOwned = false
+        for _, s in ipairs(loadout.attackSlots) do
+            if s == inst then stillOwned = true break end
+        end
+        if stillOwned then
+            local result = ctx.runComp:ResolveSingleSkill(inst, facing, ctx.flow.playerCell)
+            if result ~= nil then
+                self:SpawnHitEffects(ctx.run, result.hits)
+                local kills = _MonsterStubLogic:ApplyHitPlan(ctx.run, ctx.def, result.hits, ctx.playerEntity)
+                ctx.flow.totalKills = (ctx.flow.totalKills or 0) + kills
+                log("[TurnFlowStub] 발동 " .. tostring(index) .. "/" .. tostring(#queue) .. ": " .. inst.skillId
+                    .. " hits=" .. tostring(#result.hits) .. " 처치=" .. tostring(kills))
+            end
+        end
+        _TimerService:SetTimerOnce(function() self:FireNextSkill(userId, queue, index + 1, facing) end, self.SkillFireInterval)
+    end
+
+    @ExecSpace("ServerOnly")
+    method void ClearRangePreview(any run)
+        -- 범위 프리뷰 하이라이트 제거.
+        if run.flow.previewEntities == nil then return end
+        for _, e in ipairs(run.flow.previewEntities) do
+            if isvalid(e) then e:Destroy() end
+        end
+        run.flow.previewEntities = nil
+    end
+
+    @ExecSpace("Server")
+    method void RequestRangePreview(string facing)
+        -- 방향 패드 클릭 시: 보유 스킬 전체(쿨다운 제외)의 공격 범위를 보드에 하이라이트.
+        -- 범위 계산은 CombatResolveLogic의 동일 함수 재사용 — 실제 발동 범위와 항상 일치.
+        local ctx = self:FindRunContext(senderUserId)
+        if ctx == nil or ctx.flow.phase ~= "aim" then return end
+        if facing ~= "UP" and facing ~= "DOWN" and facing ~= "LEFT" and facing ~= "RIGHT" then return end
+        self:ClearRangePreview(ctx.run)
+        ctx.flow.previewEntities = {}
+        ---@type SkillLoadoutComponent
+        local loadout = ctx.playerEntity:GetComponent("script.SkillLoadoutComponent")
+        for _, inst in ipairs(loadout:GetOrderedInstances()) do
+            if inst.cooldownLeft == nil or inst.cooldownLeft <= 0 then
+                local skillDef = _SkillCatalogLogic:GetSkill(inst.skillId)
+                local pattern = skillDef ~= nil and _SkillCatalogLogic:GetRangePattern(skillDef.rangeId) or nil
+                if pattern ~= nil then
+                    local eff = _CombatResolveLogic:BuildTagEffects(inst)
+                    local cells = _CombatResolveLogic:ComputeRangeCells(pattern, eff, facing, ctx.flow.playerCell, ctx.def)
+                    for _, cell in ipairs(cells) do
+                        local slot = ctx.run.board.slots[cell.col .. "_" .. cell.row]
+                        if slot ~= nil and isvalid(slot) then
+                            local hl = _SpawnService:SpawnByModelId("BoardCell", "preview_" .. cell.col .. "_" .. cell.row, Vector3(0, 0, -0.08), slot)
+                            if isvalid(hl) then
+                                local sr = hl.SpriteRendererComponent
+                                if isvalid(sr) then
+                                    -- 셀 크기와 일치하는 타일 스프라이트에 강한 주황 틴트 — 칸 전체 하이라이트
+                                    sr.Color = Color(1, 0.35, 0.05, 0.85)
+                                end
+                                table.insert(ctx.flow.previewEntities, hl)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        log("[TurnFlowStub] 범위 프리뷰: facing=" .. facing .. " 셀 " .. tostring(#ctx.flow.previewEntities) .. "칸")
+    end
+
+    @ExecSpace("ServerOnly")
+    method void SpawnHitEffects(any run, table hits)
+        -- 스킬 발동 연출: 타격 칸의 slot 자식으로 스킬별 이펙트(animationclip)를 잠깐 띄운다.
+        -- BoardCell 모델을 껍데기로 스폰해 SpriteRUID만 교체 — 정식 연출 시스템 전까지의 스텁.
+        for _, h in ipairs(hits) do
+            local slot = run.board.slots[h.cell.col .. "_" .. h.cell.row]
+            if slot ~= nil and isvalid(slot) then
+                local skillDef = _SkillCatalogLogic:GetSkill(h.skillId)
+                if skillDef ~= nil and skillDef.hitFxRuid ~= nil and skillDef.hitFxRuid ~= "" then
+                    local fx = _SpawnService:SpawnByModelId("BoardCell", "fx_" .. h.cell.col .. "_" .. h.cell.row, Vector3(0, 0, -0.1), slot)
+                    if isvalid(fx) then
+                        local sr = fx.SpriteRendererComponent
+                        if isvalid(sr) then sr.SpriteRUID = skillDef.hitFxRuid end
+                        fx:Destroy(0.8)
+                    end
+                end
+            end
+        end
+    end
+
+    @ExecSpace("Client")
+    method void NotifyPhaseClient(string phase, integer wave, boolean danger)
+        -- 소유 클라에서 실행: 인게임 UI에 페이즈 전환 + 위험 신호를 로컬 이벤트로 전달.
+        local ev = PhaseChangedEvent()
+        ev.phase = phase
+        ev.wave = wave
+        ev.danger = danger
+        self:SendEvent(ev)
+    end
+end

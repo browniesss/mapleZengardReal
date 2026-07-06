@@ -1,0 +1,8 @@
+@Event
+script PhaseChangedEvent extends EventType
+    -- [임시 스텁] 젠 사이클 페이즈 전환 통지 — TurnFlowStubLogic(클라 측)이 발행, 인게임 UI가 소비.
+    -- 보드 담당자의 정식 젠 플로우(BoardFlowLogic) 도입 시 TestStub/ 폴더째 제거하고 대체.
+    property string phase = ""    -- run_start | idle | aim | resolving | run_end
+    property integer wave = 0
+    property boolean danger = false   -- 남은 빈 칸 < 가용의 10% (규칙서 §7.1 위험 아이콘)
+end

@@ -1,0 +1,23 @@
+{
+  "Id": "",
+  "GameId": "",
+  "EntryKey": "directory://f1a8075fc8394929b9591f40e83e0b6f",
+  "ContentType": "x-mod/directory",
+  "Content": "",
+  "Usage": 0,
+  "UsePublish": 1,
+  "UseService": 0,
+  "CoreVersion": "26.5.0.0",
+  "StudioVersion": "0.1.0.0",
+  "DynamicLoading": 0,
+  "ContentProto": {
+    "Use": "Json",
+    "Json": {
+      "entry_id": "directory://f1a8075fc8394929b9591f40e83e0b6f",
+      "name": "TestStub",
+      "lock": false,
+      "folding": false,
+      "nameEditable": true
+    }
+  }
+}

@@ -7,30 +7,20 @@ script BoardRenderProbe extends Logic
     property string SourceMapName = "BoardMap"     -- Maker static RectTile 소스맵
     property string LayoutId = "classic_7x7"        -- BoardLayouts 데이터셋 레이아웃 id
 
-    property any userEnterHandler = nil
     property integer runCounter = 0
     property any runs = nil                          -- runMapName -> run 핸들
 
     @ExecSpace("ServerOnly")
     method void OnBeginPlay()
-        -- 입장 트리거 연결: 입장하는 플레이어마다 새 동적 보드를 만든다.
+        -- 유저는 로비에 머물고, 로비 '게임 시작'(GameStartLogic)이 StartRunForUser를 호출한다.
+        -- (기존 UserEnter 자동 입장은 2026-07-05 플로우 결정으로 제거)
         self.runs = {}
-        self.userEnterHandler = _UserService:ConnectEvent(UserEnterEvent, self.OnUserEnter)
         log("[BoardProbe] ready — source=" .. self.SourceMapName .. " layout=" .. self.LayoutId)
     end
 
     @ExecSpace("ServerOnly")
-    method void OnEndPlay()
-        -- OnBeginPlay에서 연결한 구독 해제(필수).
-        if self.userEnterHandler then
-            _UserService:DisconnectEvent(UserEnterEvent, self.userEnterHandler)
-            self.userEnterHandler = nil
-        end
-    end
-
-    @ExecSpace("ServerOnly")
-    method void OnUserEnter(UserEnterEvent event)
-        -- 플레이어 입장 -> BoardMap을 런별 동적맵으로 복제하고 그 안으로 이동시킨다.
+    method void StartRunForUser(string userId)
+        -- 시작 요청 -> BoardMap을 런별 동적맵으로 복제하고 해당 유저를 그 안으로 이동시킨다.
         self.runCounter = self.runCounter + 1
         local runMapName = self.SourceMapName .. "_run" .. tostring(self.runCounter)
 
@@ -41,9 +31,9 @@ script BoardRenderProbe extends Logic
         end
         log("[BoardProbe] 동적맵 생성됨: " .. runMapName)
 
-        local playerEntity = self:FindUserEntity(event.UserId)
+        local playerEntity = self:FindUserEntity(userId)
         if not isvalid(playerEntity) then
-            log_error("[BoardProbe] 플레이어 엔티티 못 찾음 userId=" .. tostring(event.UserId))
+            log_error("[BoardProbe] 플레이어 엔티티 못 찾음 userId=" .. tostring(userId))
             return
         end
 
@@ -105,5 +95,16 @@ script BoardRenderProbe extends Logic
             .. " layout=" .. self.LayoutId
             .. " cells=" .. tostring(summary.cellsSpawned) .. "/" .. tostring(summary.cellsTotal)
             .. " placements=" .. tostring(summary.placementsApplied))
+
+        -- 보드 준비 완료 -> 캐릭터 런 시작 (통합 지점 I-1/I-2, GameStartLogic 소유)
+        local users = _UserService:GetUsersByMapName(runMapName)
+        if users ~= nil and #users > 0 and isvalid(users[1]) then
+            if #users > 1 then
+                log_warning("[BoardProbe] 동적맵에 유저 " .. tostring(#users) .. "명 (개인 보드 1명 전제): " .. runMapName)
+            end
+            _GameStartLogic:OnBoardReady(users[1], run, def)
+        else
+            log_error("[BoardProbe] 보드 준비됐으나 맵에 유저 없음: " .. runMapName)
+        end
     end
 end

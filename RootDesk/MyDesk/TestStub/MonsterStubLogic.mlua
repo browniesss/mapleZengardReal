@@ -1,0 +1,91 @@
+@Logic
+script MonsterStubLogic extends Logic
+    -- [임시 스텁] 테스트용 몬스터: 스폰(보드 unit 점유+비주얼), HP 관리, HitPlan 소비(사망/EXP/전리품).
+    -- 몬스터 시스템은 별도 담당자 예정 — 이 파일과 TestStub/ 폴더째 삭제하면 제거 완료되도록
+    -- 캐릭터/보드 코드에 몬스터 지식을 두지 않고 여기에 격리한다. 상태는 run.flow에만 보관(무상태 Logic).
+
+    property number StubHp = 10          -- 주황버섯 예시 HP (초안 기획서 §14)
+    property integer ExpPerKill = 3      -- 데모용: 4마리 처치 = 12 EXP (Lv1 필요 10)
+    property integer LootPerKill = 1
+
+    -- 주황버섯 리소스 팩 mob/1210102.img (msw-search로 확보)
+    property string StandRuid = "a95cfed2c8fe4d2cb64cbb62db051f92"   -- stand animationclip (루프 재생)
+    property string DieRuid = "dddbe2f162184ec89add7440da56eb75"     -- die1 animationclip (사망 연출)
+
+    @ExecSpace("ServerOnly")
+    method void EnsureFlow(any run)
+        -- run.flow(스텁 상태) 보장: monsterHp[instanceId->hp].
+        if run.flow == nil then run.flow = {} end
+        if run.flow.monsterHp == nil then run.flow.monsterHp = {} end
+    end
+
+    @ExecSpace("ServerOnly")
+    method integer SpawnWave(any run, any def, integer count)
+        -- 빈 칸에 몬스터 count마리 스폰 (빈 칸 부족 시 있는 만큼 — 규칙서 §4.1). 스폰 수 반환.
+        self:EnsureFlow(run)
+        local board = run.board
+        local cells = _BoardService:ResolvePlacement(run, def, { place = "random", count = count }, "unit")
+        local spawned = 0
+        for _, cell in ipairs(cells) do
+            local payload = { occupantId = "stubmon", occupantKind = "monster" }
+            local instanceId = _BoardService:TryOccupy(def, board, cell[1], cell[2], "unit", payload)
+            if instanceId ~= nil then
+                _BoardService:SpawnLayerVisual(run, def, cell[1], cell[2], "unit", payload)
+                local rec = _BoardService:GetCellLayer(board, cell[1], cell[2], "unit")
+                if rec ~= nil and isvalid(rec.entity) then
+                    -- 주황버섯 stand 애니메이션 적용 (animationclip RUID는 SpriteRUID에서 루프 재생)
+                    local sr = rec.entity.SpriteRendererComponent
+                    if isvalid(sr) then sr.SpriteRUID = self.StandRuid end
+                end
+                run.flow.monsterHp[instanceId] = self.StubHp
+                spawned = spawned + 1
+            end
+        end
+        log("[MonsterStub] 웨이브 스폰: " .. tostring(spawned) .. "/" .. tostring(count)
+            .. " (누적 " .. tostring(_BoardService:GetOccupantCount(board, "unit", "monster")) .. "마리)")
+        return spawned
+    end
+
+    @ExecSpace("ServerOnly")
+    method integer ApplyHitPlan(any run, any def, table hits, Entity playerEntity)
+        -- HitPlan 소비: HP 차감 -> 사망 시 점유 해제/비주얼 제거/EXP·전리품 지급. 처치 수 반환.
+        -- (속성 내성/상태이상 적용은 정식 몬스터 시스템 소관 — 스텁은 데미지만)
+        self:EnsureFlow(run)
+        local board = run.board
+        local kills = 0
+        for _, h in ipairs(hits) do
+            local hp = run.flow.monsterHp[h.instanceId]
+            if hp ~= nil then
+                local dmg = h.damagePerHit * h.hitCount
+                hp = hp - dmg
+                _CombatFxLogic:SpawnDamageNumbers(run, h)   -- 메이플 데미지 스킨 재생 (타격 수만큼)
+                if hp <= 0 then
+                    local rec = _BoardService:GetCellLayer(board, h.cell.col, h.cell.row, "unit")
+                    if rec ~= nil and rec.instanceId == h.instanceId and isvalid(rec.entity) then
+                        -- 사망 연출: die 애니메이션으로 교체 후 지연 제거 (칸 점유는 즉시 해제)
+                        local sr = rec.entity.SpriteRendererComponent
+                        if isvalid(sr) then sr.SpriteRUID = self.DieRuid end
+                        rec.entity:Destroy(0.6)
+                    end
+                    _BoardService:Release(board, h.cell.col, h.cell.row, "unit", h.instanceId)
+                    run.flow.monsterHp[h.instanceId] = nil
+                    kills = kills + 1
+                else
+                    run.flow.monsterHp[h.instanceId] = hp
+                end
+                log("[MonsterStub] 피격: " .. h.skillId .. " " .. tostring(h.damagePerHit)
+                    .. "x" .. tostring(h.hitCount) .. (h.isCrit and " CRIT" or "")
+                    .. " -> hp=" .. tostring(hp > 0 and hp or 0) .. (hp <= 0 and " (처치)" or ""))
+            end
+        end
+        if kills > 0 and isvalid(playerEntity) then
+            ---@type PlayerGrowthComponent
+            local growth = playerEntity:GetComponent("script.PlayerGrowthComponent")
+            ---@type PlayerJobComponent
+            local jobComp = playerEntity:GetComponent("script.PlayerJobComponent")
+            if jobComp ~= nil then jobComp:AddLoot(kills * self.LootPerKill) end
+            if growth ~= nil then growth:AddExp(kills * self.ExpPerKill) end
+        end
+        return kills
+    end
+end
