@@ -1,0 +1,211 @@
+@Logic
+script RewardUserItemStorageLogic extends Logic
+    -- 계층 ②: UserDataStorage 기반 유저 보상 수량 조작 레이어.
+    -- 저장 키는 reward_balance:<rewardType>. userId + rewardType 조합으로 보유량을 관리한다.
+
+    property any userAmountCache = nil
+    property any loadedTypeCache = nil
+
+    @ExecSpace("ServerOnly")
+    method void OnBeginPlay()
+        -- 사용자별 수량 캐시와 로드 상태 캐시를 초기화한다.
+        self.userAmountCache = {}
+        self.loadedTypeCache = {}
+        log("[RewardStorage] ready")
+    end
+
+    method void EnsureUserState(string userId)
+        -- userId별 캐시 컨테이너를 보장한다.
+        if self.userAmountCache[userId] == nil then
+            self.userAmountCache[userId] = {}
+        end
+        if self.loadedTypeCache[userId] == nil then
+            self.loadedTypeCache[userId] = {}
+        end
+    end
+
+    method string StorageKeyForType(string rewardType)
+        -- rewardType을 UserDataStorage 키 규칙으로 변환한다.
+        return "reward_balance:" .. rewardType
+    end
+
+    method integer ParseStoredAmount(string rawAmount)
+        -- 저장 문자열을 0 이상의 정수 수량으로 정규화한다.
+        local amount = math.floor(tonumber(rawAmount) or 0)
+        if amount < 0 then
+            return 0
+        end
+        return amount
+    end
+
+    method any ReadPageValues(DataStorageItemPages pages)
+        -- 페이지 결과를 key -> value 맵으로 펼친다. 여러 페이지면 끝까지 순회한다.
+        local result = {}
+        if pages == nil then
+            return result
+        end
+
+        while true do
+            for _, item in ipairs(pages:GetCurrentPageDatas()) do
+                if item ~= nil and item.KeyInfo ~= nil then
+                    result[item.KeyInfo.Key] = item.Value
+                end
+            end
+
+            if pages.IsLastPage then
+                break
+            end
+
+            local errorCode = pages:LoadNextPageAndWait()
+            if errorCode ~= 0 then
+                log_error("[RewardStorage] 페이지 추가 로드 실패 errorCode=" .. tostring(errorCode))
+                break
+            end
+            pages:MoveToNextPageAndWait()
+        end
+
+        return result
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean LoadMissingRewardTypes(string userId, table rewardTypes)
+        -- 아직 캐시되지 않은 rewardType만 UserDataStorage에서 일괄 로드한다.
+        self:EnsureUserState(userId)
+
+        local missingTypes = {}
+        for _, rewardType in ipairs(rewardTypes) do
+            if self.loadedTypeCache[userId][rewardType] ~= true then
+                table.insert(missingTypes, rewardType)
+            end
+        end
+
+        if #missingTypes == 0 then
+            return true
+        end
+
+        local storage = _DataStorageService:GetUserDataStorage(userId)
+        if storage == nil then
+            log_error("[RewardStorage] UserDataStorage 획득 실패 userId=" .. tostring(userId))
+            return false
+        end
+
+        local keys = {}
+        for _, rewardType in ipairs(missingTypes) do
+            table.insert(keys, self:StorageKeyForType(rewardType))
+        end
+
+        local errorCode, pages = storage:BatchGetAndWait(keys)
+        if errorCode ~= 0 then
+            log_error("[RewardStorage] BatchGet 실패 userId=" .. tostring(userId)
+                .. " types=" .. tostring(#missingTypes)
+                .. " errorCode=" .. tostring(errorCode))
+            return false
+        end
+
+        local storedValues = self:ReadPageValues(pages)
+        for _, rewardType in ipairs(missingTypes) do
+            local key = self:StorageKeyForType(rewardType)
+            self.userAmountCache[userId][rewardType] = self:ParseStoredAmount(storedValues[key])
+            self.loadedTypeCache[userId][rewardType] = true
+        end
+
+        log("[RewardStorage] load userId=" .. tostring(userId) .. " types=" .. tostring(#missingTypes))
+        return true
+    end
+
+    @ExecSpace("ServerOnly")
+    method any GetUserAmounts(string userId, table rewardTypes)
+        -- 요청한 rewardType들의 현재 수량 맵을 반환한다. 조회 실패 시 nil.
+        local result = {}
+        if rewardTypes == nil or #rewardTypes == 0 then
+            return result
+        end
+
+        if not self:LoadMissingRewardTypes(userId, rewardTypes) then
+            return nil
+        end
+
+        for _, rewardType in ipairs(rewardTypes) do
+            local amount = self.userAmountCache[userId][rewardType]
+            if amount == nil then
+                amount = 0
+            end
+            result[rewardType] = amount
+        end
+        return result
+    end
+
+    @ExecSpace("ServerOnly")
+    method any ApplyRewardDeltas(string userId, table rewardTypes, table deltaByType)
+        -- rewardType별 증분을 반영하고 영속화한다. 다건 변경은 트랜잭션으로 저장한다.
+        if rewardTypes == nil or #rewardTypes == 0 then
+            return {}
+        end
+
+        if not self:LoadMissingRewardTypes(userId, rewardTypes) then
+            return nil
+        end
+
+        local storage = _DataStorageService:GetUserDataStorage(userId)
+        if storage == nil then
+            log_error("[RewardStorage] UserDataStorage 획득 실패 userId=" .. tostring(userId))
+            return nil
+        end
+
+        local nextKeyValues = {}
+        local previousAmounts = {}
+        local changedCount = 0
+
+        for _, rewardType in ipairs(rewardTypes) do
+            local delta = math.floor(tonumber(deltaByType[rewardType]) or 0)
+            if delta > 0 then
+                local beforeAmount = self.userAmountCache[userId][rewardType] or 0
+                local afterAmount = beforeAmount + delta
+                previousAmounts[rewardType] = beforeAmount
+                if afterAmount ~= beforeAmount then
+                    self.userAmountCache[userId][rewardType] = afterAmount
+                    nextKeyValues[self:StorageKeyForType(rewardType)] = tostring(afterAmount)
+                    changedCount = changedCount + 1
+                end
+            end
+        end
+
+        if changedCount == 0 then
+            return self:GetUserAmounts(userId, rewardTypes)
+        end
+
+        local errorCode = 0
+        if changedCount == 1 then
+            local onlyKey = nil
+            local onlyValue = nil
+            for key, value in pairs(nextKeyValues) do
+                onlyKey = key
+                onlyValue = value
+                break
+            end
+            errorCode = storage:SetAndWait(onlyKey, onlyValue)
+        else
+            errorCode, _ = storage:TransactSetAndWait(nextKeyValues)
+        end
+
+        if errorCode ~= 0 then
+            for _, rewardType in ipairs(rewardTypes) do
+                if previousAmounts[rewardType] ~= nil then
+                    self.userAmountCache[userId][rewardType] = previousAmounts[rewardType]
+                end
+            end
+            log_error("[RewardStorage] save 실패 userId=" .. tostring(userId)
+                .. " changed=" .. tostring(changedCount)
+                .. " errorCode=" .. tostring(errorCode))
+            return nil
+        end
+
+        local result = {}
+        for _, rewardType in ipairs(rewardTypes) do
+            result[rewardType] = self.userAmountCache[userId][rewardType] or 0
+        end
+
+        log("[RewardStorage] save userId=" .. tostring(userId) .. " changed=" .. tostring(changedCount))
+        return result
+    end
+end

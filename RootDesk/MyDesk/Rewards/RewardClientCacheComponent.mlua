@@ -1,0 +1,352 @@
+@Component
+script RewardClientCacheComponent extends Component
+    -- 로컬 플레이어 전용 보상 캐시 컴포넌트.
+    -- 클라이언트 메모리 캐시를 유지하고, 서버 RewardServiceLogic에서 스냅샷을 받아 동기화한다.
+
+    property boolean AutoSyncOnBeginPlay = true
+    property boolean AutoSyncOnMapEnter = true
+
+    property any itemByType = nil
+    property any rewardTypeOrder = nil
+    property boolean hasInitialSync = false
+    property boolean isSyncInFlight = false
+    property integer syncVersion = 0
+
+    @ExecSpace("ClientOnly")
+    method void OnBeginPlay()
+        -- 로컬 캐시를 초기화하고 로컬 플레이어 엔티티라면 첫 동기화를 요청한다.
+        self:EnsureLocalCache()
+
+        if not self:IsLocalPlayerEntity() then
+            return
+        end
+
+        log("[RewardClientCache] ready userId=" .. tostring(self:ResolveBoundUserId()))
+
+        if self.AutoSyncOnBeginPlay then
+            self:RequestFullSync()
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnMapEnter(Entity enteredMap)
+        -- 맵 재진입 시 로컬 플레이어의 보상 캐시를 다시 서버 기준으로 동기화한다.
+        if enteredMap == nil then
+            return
+        end
+        if not self.AutoSyncOnMapEnter then
+            return
+        end
+        if not self:IsLocalPlayerEntity() then
+            return
+        end
+
+        log("[RewardClientCache] map enter sync map=" .. tostring(enteredMap.Name))
+        self:RequestFullSync()
+    end
+
+    method void EnsureLocalCache()
+        -- 로컬 캐시 컨테이너를 보장한다.
+        if self.itemByType == nil then
+            self.itemByType = {}
+        end
+        if self.rewardTypeOrder == nil then
+            self.rewardTypeOrder = {}
+        end
+    end
+
+    method void ResetLocalCache()
+        -- 로컬 캐시와 동기화 상태를 초기화한다.
+        self.itemByType = {}
+        self.rewardTypeOrder = {}
+        self.hasInitialSync = false
+        self.isSyncInFlight = false
+        self.syncVersion = 0
+    end
+
+    method any DeepCopy(any value)
+        -- 테이블은 재귀 복사하고, 원시값은 그대로 반환한다.
+        if type(value) ~= "table" then
+            return value
+        end
+
+        local out = {}
+        for key, child in pairs(value) do
+            out[key] = self:DeepCopy(child)
+        end
+        return out
+    end
+
+    method string ResolveBoundUserId()
+        -- 현재 엔티티가 플레이어 엔티티라면 바인딩된 userId를 반환한다.
+        if self.Entity == nil then
+            return nil
+        end
+
+        local player = self.Entity.PlayerComponent
+        if player == nil then
+            return nil
+        end
+
+        local userId = player.UserId
+        if userId == nil or userId == "" then
+            return nil
+        end
+        return userId
+    end
+
+    method boolean IsLocalPlayerEntity()
+        -- 이 컴포넌트가 현재 클라이언트의 로컬 플레이어 엔티티에 붙어 있는지 확인한다.
+        if self.Entity == nil then
+            return false
+        end
+
+        local localPlayer = _UserService.LocalPlayer
+        if localPlayer == nil then
+            return false
+        end
+
+        return self.Entity == localPlayer
+    end
+
+    method table NormalizeRewardTypeFilter(any rewardTypeFilter)
+        -- string/table 입력을 중복 없는 rewardType 배열로 정규화한다.
+        local result = {}
+        local seen = {}
+
+        if rewardTypeFilter == nil then
+            return result
+        end
+
+        if type(rewardTypeFilter) == "string" then
+            if rewardTypeFilter ~= "" then
+                seen[rewardTypeFilter] = true
+                table.insert(result, rewardTypeFilter)
+            end
+            return result
+        end
+
+        if type(rewardTypeFilter) ~= "table" then
+            return result
+        end
+
+        for _, rewardType in ipairs(rewardTypeFilter) do
+            if type(rewardType) == "string" and rewardType ~= "" and not seen[rewardType] then
+                seen[rewardType] = true
+                table.insert(result, rewardType)
+            end
+        end
+
+        return result
+    end
+
+    method void UpsertLocalItem(string rewardType, string label, integer amount)
+        -- 단일 보상 타입의 로컬 캐시를 갱신한다.
+        self:EnsureLocalCache()
+
+        if self.itemByType[rewardType] == nil then
+            table.insert(self.rewardTypeOrder, rewardType)
+        end
+
+        self.itemByType[rewardType] = {
+            rewardType = rewardType,
+            label = (label ~= nil and label ~= "") and label or rewardType,
+            amount = amount,
+        }
+    end
+
+    method void ApplySnapshot(table items, boolean replaceAll)
+        -- 서버 스냅샷을 로컬 캐시에 반영한다. replaceAll이면 전체 교체다.
+        if replaceAll then
+            self.itemByType = {}
+            self.rewardTypeOrder = {}
+        else
+            self:EnsureLocalCache()
+        end
+
+        for _, item in ipairs(items) do
+            if type(item) == "table" and type(item.rewardType) == "string" and item.rewardType ~= "" then
+                local amount = math.floor(tonumber(item.amount) or 0)
+                if amount < 0 then
+                    amount = 0
+                end
+                self:UpsertLocalItem(item.rewardType, tostring(item.label or item.rewardType), amount)
+            end
+        end
+
+        self.hasInitialSync = true
+        self.isSyncInFlight = false
+        self.syncVersion = self.syncVersion + 1
+
+        log("[RewardClientCache] sync applied count=" .. tostring(#items)
+            .. " replaceAll=" .. tostring(replaceAll)
+            .. " version=" .. tostring(self.syncVersion))
+    end
+
+    method any GetCachedItem(string rewardType)
+        -- 단일 rewardType의 로컬 캐시 스냅샷을 반환한다.
+        if not self:IsClient() then
+            return nil
+        end
+
+        self:EnsureLocalCache()
+
+        local item = self.itemByType[rewardType]
+        if item == nil then
+            return nil
+        end
+        return self:DeepCopy(item)
+    end
+
+    method integer GetCachedAmount(string rewardType)
+        -- 단일 rewardType의 캐시 수량을 반환한다. 없으면 0.
+        local item = self:GetCachedItem(rewardType)
+        if item == nil then
+            return 0
+        end
+        return math.floor(tonumber(item.amount) or 0)
+    end
+
+    method table GetCachedItems(any rewardTypeFilter)
+        -- 로컬 캐시에서 전체 또는 부분 rewardType 목록을 반환한다.
+        local result = {}
+        if not self:IsClient() then
+            return result
+        end
+
+        self:EnsureLocalCache()
+
+        local filter = self:NormalizeRewardTypeFilter(rewardTypeFilter)
+        if #filter == 0 and rewardTypeFilter ~= nil then
+            return result
+        end
+
+        if rewardTypeFilter == nil then
+            for _, rewardType in ipairs(self.rewardTypeOrder) do
+                local item = self.itemByType[rewardType]
+                if item ~= nil then
+                    table.insert(result, self:DeepCopy(item))
+                end
+            end
+            return result
+        end
+
+        for _, rewardType in ipairs(filter) do
+            local item = self.itemByType[rewardType]
+            if item ~= nil then
+                table.insert(result, self:DeepCopy(item))
+            end
+        end
+        return result
+    end
+
+    @ExecSpace("ClientOnly")
+    method void RequestFullSync()
+        -- 서버에 전체 보상 스냅샷 동기화를 요청한다.
+        if not self:IsLocalPlayerEntity() then
+            return
+        end
+        if self.isSyncInFlight then
+            return
+        end
+
+        self.isSyncInFlight = true
+        log("[RewardClientCache] request full sync")
+        self:RequestServerSyncAll()
+    end
+
+    @ExecSpace("ClientOnly")
+    method void RequestPartialSync(table rewardTypes)
+        -- 서버에 지정 rewardType 목록만 부분 동기화를 요청한다.
+        if not self:IsLocalPlayerEntity() then
+            return
+        end
+        if self.isSyncInFlight then
+            return
+        end
+
+        local filter = self:NormalizeRewardTypeFilter(rewardTypes)
+        if #filter == 0 then
+            self:RequestFullSync()
+            return
+        end
+
+        self.isSyncInFlight = true
+        log("[RewardClientCache] request partial sync count=" .. tostring(#filter))
+        self:RequestServerSyncByTypes(filter)
+    end
+
+    method string ValidateSenderUserId(string requestUserId)
+        -- 서버 RPC 호출자가 이 플레이어 엔티티의 소유자와 일치하는지 검증한다.
+        local boundUserId = self:ResolveBoundUserId()
+        if boundUserId == nil then
+            log_warning("[RewardClientCache] PlayerComponent 없는 엔티티에 부착됨")
+            return nil
+        end
+
+        if requestUserId == nil or requestUserId == "" then
+            log_warning("[RewardClientCache] senderUserId 없음")
+            return nil
+        end
+
+        if boundUserId ~= requestUserId then
+            log_warning("[RewardClientCache] sender mismatch bound=" .. tostring(boundUserId)
+                .. " sender=" .. tostring(requestUserId))
+            return nil
+        end
+
+        return boundUserId
+    end
+
+    @ExecSpace("Server")
+    method void RequestServerSyncAll()
+        -- 요청자 기준 전체 보상 스냅샷을 조회해 해당 클라이언트로 전달한다.
+        local userId = self:ValidateSenderUserId(senderUserId)
+        if userId == nil then
+            self:ReceiveSyncFailure("invalid_sender", senderUserId)
+            return
+        end
+
+        local items = _RewardServiceLogic:GetUserItems(userId, nil)
+        self:ReceiveServerSnapshot(items, true, senderUserId)
+    end
+
+    @ExecSpace("Server")
+    method void RequestServerSyncByTypes(table rewardTypes)
+        -- 요청자 기준 부분 보상 스냅샷을 조회해 해당 클라이언트로 전달한다.
+        local userId = self:ValidateSenderUserId(senderUserId)
+        if userId == nil then
+            self:ReceiveSyncFailure("invalid_sender", senderUserId)
+            return
+        end
+
+        local filter = self:NormalizeRewardTypeFilter(rewardTypes)
+        if #filter == 0 then
+            local items = _RewardServiceLogic:GetUserItems(userId, nil)
+            self:ReceiveServerSnapshot(items, true, senderUserId)
+            return
+        end
+
+        local items = _RewardServiceLogic:GetUserItems(userId, filter)
+        self:ReceiveServerSnapshot(items, false, senderUserId)
+    end
+
+    @ExecSpace("Client")
+    method void ReceiveServerSnapshot(table items, boolean replaceAll)
+        -- 서버 스냅샷을 받아 로컬 캐시에 반영한다.
+        if items == nil then
+            self.isSyncInFlight = false
+            log_warning("[RewardClientCache] nil snapshot received")
+            return
+        end
+
+        self:ApplySnapshot(items, replaceAll)
+    end
+
+    @ExecSpace("Client")
+    method void ReceiveSyncFailure(string reason)
+        -- 서버 동기화 실패를 로컬 상태에 반영한다.
+        self.isSyncInFlight = false
+        log_warning("[RewardClientCache] sync failed reason=" .. tostring(reason))
+    end
+end

@@ -1,0 +1,184 @@
+@Logic
+script RewardServiceLogic extends Logic
+    -- 계층 ③: 보상 지급 비즈니스 로직 레이어.
+    -- 타입 검증, 다건 지급 집계, 필터 조회를 조합해 외부 소비자가 바로 쓸 수 있는 API를 제공한다.
+
+    @ExecSpace("ServerOnly")
+    method void OnBeginPlay()
+        -- 서비스 준비 완료 로그를 남긴다.
+        log("[RewardService] ready")
+    end
+
+    method any NormalizeUserId(any rawUserId)
+        -- 입력 userId를 비어있지 않은 문자열로 정규화한다. 불가하면 nil.
+        if rawUserId == nil then
+            log_error("[RewardService] userId nil")
+            return nil
+        end
+
+        local userId = tostring(rawUserId)
+        if userId == "" then
+            log_error("[RewardService] 빈 userId")
+            return nil
+        end
+        return userId
+    end
+
+    method integer NormalizeGrantAmount(any rawAmount)
+        -- 지급 수량을 양의 정수로 정규화한다. 0 이하/비수치는 0.
+        local amount = math.floor(tonumber(rawAmount) or 0)
+        if amount < 0 then
+            return 0
+        end
+        return amount
+    end
+
+    method boolean AppendGrantEntry(any normalized, any rawRewardType, any rawAmount)
+        -- 보상 1건을 rewardType별 합산 구조에 누적한다. 유효하지 않으면 false.
+        if type(rawRewardType) ~= "string" or rawRewardType == "" then
+            log_error("[RewardService] 잘못된 rewardType 입력")
+            return false
+        end
+
+        local amount = self:NormalizeGrantAmount(rawAmount)
+        if amount <= 0 then
+            log_error("[RewardService] 잘못된 지급 수량 rewardType=" .. tostring(rawRewardType)
+                .. " amount=" .. tostring(rawAmount))
+            return false
+        end
+
+        if normalized.deltaByType[rawRewardType] == nil then
+            normalized.deltaByType[rawRewardType] = 0
+            table.insert(normalized.orderedTypes, rawRewardType)
+        end
+        normalized.deltaByType[rawRewardType] = normalized.deltaByType[rawRewardType] + amount
+        return true
+    end
+
+    method any NormalizeGrantRewards(any rewards)
+        -- 배열([{rewardType,amount}]) 또는 맵({rewardType=amount}) 입력을 정규화한다.
+        if type(rewards) ~= "table" then
+            log_error("[RewardService] rewards는 table 이어야 함")
+            return nil
+        end
+
+        local normalized = {
+            orderedTypes = {},
+            deltaByType = {},
+        }
+
+        local hasArrayEntries = false
+        for _, entry in ipairs(rewards) do
+            hasArrayEntries = true
+            if type(entry) ~= "table" then
+                log_error("[RewardService] 배열형 rewards 항목은 table 이어야 함")
+                return nil
+            end
+            if not self:AppendGrantEntry(normalized, entry.rewardType, entry.amount) then
+                return nil
+            end
+        end
+
+        if hasArrayEntries then
+            if #normalized.orderedTypes == 0 then
+                log_error("[RewardService] 지급할 reward 항목이 없음")
+                return nil
+            end
+            return normalized
+        end
+
+        for rewardType, amount in pairs(rewards) do
+            if not self:AppendGrantEntry(normalized, rewardType, amount) then
+                return nil
+            end
+        end
+
+        if #normalized.orderedTypes == 0 then
+            log_error("[RewardService] 지급할 reward 항목이 없음")
+            return nil
+        end
+        return normalized
+    end
+
+    @ExecSpace("ServerOnly")
+    method table GetUserItems(string userId, any rewardTypeFilter)
+        -- 사용자 보유 보상을 조회한다. 필터가 nil이면 전체, 있으면 해당 타입만 반환한다.
+        local normalizedUserId = self:NormalizeUserId(userId)
+        if normalizedUserId == nil then
+            return {}
+        end
+
+        local defs = _RewardTypeCatalogLogic:GetRewardTypes(rewardTypeFilter)
+        local rewardTypeIds = {}
+        for _, def in ipairs(defs) do
+            table.insert(rewardTypeIds, def.rewardType)
+        end
+
+        local amounts = _RewardUserItemStorageLogic:GetUserAmounts(normalizedUserId, rewardTypeIds)
+        if amounts == nil then
+            return {}
+        end
+
+        local result = {}
+        for _, def in ipairs(defs) do
+            table.insert(result, {
+                rewardType = def.rewardType,
+                label = def.label,
+                amount = amounts[def.rewardType] or 0,
+            })
+        end
+
+        log("[RewardService] query userId=" .. normalizedUserId .. " count=" .. tostring(#result))
+        return result
+    end
+
+    @ExecSpace("ServerOnly")
+    method table GrantRewards(string userId, table rewards)
+        -- 여러 rewardType 지급을 검증·집계한 뒤 저장소에 반영하고 변경 결과를 반환한다.
+        local normalizedUserId = self:NormalizeUserId(userId)
+        if normalizedUserId == nil then
+            return {}
+        end
+
+        local normalized = self:NormalizeGrantRewards(rewards)
+        if normalized == nil then
+            return {}
+        end
+
+        for _, rewardType in ipairs(normalized.orderedTypes) do
+            if not _RewardTypeCatalogLogic:HasRewardType(rewardType) then
+                log_error("[RewardService] 알 수 없는 rewardType 지급 시도: " .. rewardType)
+                return {}
+            end
+        end
+
+        local beforeAmounts = _RewardUserItemStorageLogic:GetUserAmounts(normalizedUserId, normalized.orderedTypes)
+        if beforeAmounts == nil then
+            return {}
+        end
+
+        local afterAmounts = _RewardUserItemStorageLogic:ApplyRewardDeltas(
+            normalizedUserId,
+            normalized.orderedTypes,
+            normalized.deltaByType
+        )
+        if afterAmounts == nil then
+            return {}
+        end
+
+        local result = {}
+        for _, rewardType in ipairs(normalized.orderedTypes) do
+            local def = _RewardTypeCatalogLogic:GetRewardType(rewardType)
+            table.insert(result, {
+                rewardType = rewardType,
+                label = def ~= nil and def.label or rewardType,
+                grantedAmount = normalized.deltaByType[rewardType],
+                beforeAmount = beforeAmounts[rewardType] or 0,
+                afterAmount = afterAmounts[rewardType] or 0,
+            })
+        end
+
+        log("[RewardService] grant userId=" .. normalizedUserId .. " types=" .. tostring(#result))
+        return result
+    end
+end
