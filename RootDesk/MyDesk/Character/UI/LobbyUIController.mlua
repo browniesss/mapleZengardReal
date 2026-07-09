@@ -1,17 +1,29 @@
 @Component
 script LobbyUIController extends Component
-    -- 로비 '게임 시작' 버튼 컨트롤러 (UI 엔티티 부착, ClientOnly).
-    -- UI 엔티티는 서버 RPC 호스팅 불가 — 시작 요청은 GameStartLogic(@Logic)의 Server 메서드로 위임.
-    -- 직업 선택 시트(MODE 화면) 도입 전이라 기본 직업 ARC로 요청한다.
+    -- 로비 UI 컨트롤러 (UI 엔티티 부착, ClientOnly).
+    -- 게임 시작 버튼 + 우편함 버튼 처리.
 
     property ButtonComponent btnStart = "c509612e-ab2a-4792-bc4d-4ac228c1f328"
     property Entity lobbyPanel = "fc6f9124-6d50-4357-9b34-47dd46f40c87"
+    property ButtonComponent btnMail = "dcf075f1-c680-4bb2-bd78-9607cf517733"
     property any clickHandler = nil
+    property any mailClickHandler = nil
 
     @ExecSpace("ClientOnly")
     method void OnBeginPlay()
-        -- 버튼 클릭 구독.
-        self.clickHandler = self.btnStart.Entity:ConnectEvent(ButtonClickEvent, self.OnStartClicked)
+        -- 시작/우편함 버튼 클릭 구독.
+        if self.btnStart ~= nil then
+            self.clickHandler = self.btnStart.Entity:ConnectEvent(ButtonClickEvent, self.OnStartClicked)
+        else
+            log_error("[LobbyUI] btnStart 바인딩 없음")
+        end
+
+        if self.btnMail ~= nil then
+            self.mailClickHandler = self.btnMail.Entity:ConnectEvent(ButtonClickEvent, self.OnMailClicked)
+        else
+            log_warning("[LobbyUI] btnMail 바인딩 없음 — 우편함 버튼 미연결")
+        end
+        log("[LobbyUI] ready")
     end
 
     @ExecSpace("ClientOnly")
@@ -19,15 +31,28 @@ script LobbyUIController extends Component
         -- 시작 요청 후 로비 패널 숨김 (컨트롤러 자신은 그룹 루트 소속이라 계속 살아있음).
         log("[LobbyUI] 게임 시작 요청")
         _GameStartLogic:RequestStartGame("ARC")
-        self.lobbyPanel.Enable = false
+        if self.lobbyPanel ~= nil then
+            self.lobbyPanel.Enable = false
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnMailClicked()
+        -- 우편함 UI 오픈.
+        log("[LobbyUI] 우편함 열기")
+        _MailBoxUILogic:OpenMailBox()
     end
 
     @ExecSpace("ClientOnly")
     method void OnEndPlay()
         -- 구독 해제(필수).
-        if self.clickHandler then
+        if self.clickHandler and self.btnStart ~= nil then
             self.btnStart.Entity:DisconnectEvent(ButtonClickEvent, self.clickHandler)
             self.clickHandler = nil
+        end
+        if self.mailClickHandler and self.btnMail ~= nil then
+            self.btnMail.Entity:DisconnectEvent(ButtonClickEvent, self.mailClickHandler)
+            self.mailClickHandler = nil
         end
     end
 end

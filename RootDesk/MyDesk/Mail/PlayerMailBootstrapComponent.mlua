@@ -1,0 +1,241 @@
+@Component
+script PlayerMailBootstrapComponent extends Component
+    -- PlayerMail 영속화(로드/주기 저장/퇴장 저장) + 첨부 보상 수령을 RewardService에 연결한다.
+    -- DefaultPlayer에 PlayerMail 과 함께 부착한다.
+
+    property integer TimerId = 0
+    property boolean IsLoadSuccess = false
+    property integer SavePeriodSeconds = 60
+
+    @ExecSpace("ServerOnly")
+    method void OnBeginPlay()
+        -- 보상 수령 콜백을 연결하고 메일 DB를 로드한 뒤 주기 저장 타이머를 건다.
+        self:WireRewardHandler()
+        self:LoadFromDB()
+
+        local period = self.SavePeriodSeconds
+        if period < 10 then
+            period = 10
+        end
+        self.TimerId = _TimerService:SetTimerRepeat(function()
+            self:SaveToDB(false)
+        end, period, period)
+
+        log("[MailBootstrap] ready userId=" .. tostring(self:ResolveUserId()))
+    end
+
+    @ExecSpace("ServerOnly")
+    method void OnEndPlay()
+        -- 타이머를 정리하고 퇴장 저장을 시도한다.
+        if self.TimerId ~= 0 then
+            _TimerService:ClearTimer(self.TimerId)
+            self.TimerId = 0
+        end
+        self:SaveToDB(true)
+    end
+
+    method any ResolveUserId()
+        -- 플레이어 UserId를 반환한다.
+        if self.Entity == nil or self.Entity.PlayerComponent == nil then
+            return nil
+        end
+        local userId = self.Entity.PlayerComponent.UserId
+        if userId == nil or userId == "" then
+            return nil
+        end
+        return userId
+    end
+
+    method any GetPlayerMail()
+        -- 동일 엔티티의 PlayerMail 컴포넌트를 조회하고, 없으면 런타임 부착한다.
+        if self.Entity == nil then
+            return nil
+        end
+
+        local playerMail = self.Entity:GetComponent("script.PlayerMail")
+        if playerMail == nil then
+            playerMail = self.Entity.PlayerMail
+        end
+        if playerMail == nil then
+            self.Entity:AddComponent("script.PlayerMail")
+            playerMail = self.Entity:GetComponent("script.PlayerMail")
+            if playerMail == nil then
+                playerMail = self.Entity.PlayerMail
+            end
+            if playerMail ~= nil then
+                log("[MailBootstrap] PlayerMail runtime attach ok")
+            end
+        end
+        return playerMail
+    end
+
+    @ExecSpace("ServerOnly")
+    method void WireRewardHandler()
+        -- PlayerMail.handleReceiveMailItems 를 RewardService 지급으로 연결한다.
+        local playerMail = self:GetPlayerMail()
+        if playerMail == nil then
+            log_error("[MailBootstrap] PlayerMail 컴포넌트 없음 — 보상 콜백 연결 실패")
+            return
+        end
+
+        playerMail.handleReceiveMailItems = function(items)
+            return self:ReceiveMailItems(items)
+        end
+        log("[MailBootstrap] reward handler wired")
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean ReceiveMailItems(table items)
+        -- 메일 첨부 ItemBase 목록을 RewardServiceLogic:GrantRewards 로 지급한다.
+        local userId = self:ResolveUserId()
+        if userId == nil then
+            log_error("[MailBootstrap] 지급 실패: userId 없음")
+            return false
+        end
+        if type(items) ~= "table" then
+            log_error("[MailBootstrap] 지급 실패: items 가 table 아님")
+            return false
+        end
+
+        local rewards = {}
+        for _, i in pairs(items) do
+            ---@type ItemBase
+            local item = i
+            if item == nil then
+                continue
+            end
+            local rewardType = item.ItemID
+            local amount = math.floor(tonumber(item.ItemCount) or 0)
+            if rewardType == nil or rewardType == "" or amount <= 0 then
+                log_error("[MailBootstrap] 잘못된 첨부 항목 ItemID="
+                    .. tostring(rewardType) .. " Count=" .. tostring(item.ItemCount))
+                return false
+            end
+            table.insert(rewards, {
+                rewardType = rewardType,
+                amount = amount,
+            })
+        end
+
+        if #rewards == 0 then
+            -- 첨부 없는 메일 수령은 성공 처리.
+            return true
+        end
+
+        local result = _RewardServiceLogic:GrantRewards(userId, rewards)
+        if result == nil or #result == 0 then
+            log_error("[MailBootstrap] GrantRewards 실패 userId=" .. tostring(userId))
+            return false
+        end
+
+        log("[MailBootstrap] granted userId=" .. tostring(userId)
+            .. " types=" .. tostring(#result))
+        return true
+    end
+
+    @ExecSpace("ServerOnly")
+    method void SaveToDB(boolean isLeaving)
+        -- PlayerMail 변경분을 UserDataStorage 에 배치 저장한다.
+        if not self.IsLoadSuccess then
+            return
+        end
+
+        local playerMail = self:GetPlayerMail()
+        if playerMail == nil then
+            return
+        end
+
+        local saveData = {}
+        local dirty = playerMail:SaveToDB(saveData)
+        if dirty ~= true then
+            return
+        end
+
+        local userId = self:ResolveUserId()
+        if userId == nil then
+            return
+        end
+
+        local ds = _DataStorageService:GetUserDataStorage(userId)
+        if ds == nil then
+            log_error("[MailBootstrap] UserDataStorage 없음 userId=" .. tostring(userId))
+            return
+        end
+
+        if isLeaving == true then
+            ds:BatchSetAndWait(saveData)
+            log("[MailBootstrap] leave save userId=" .. tostring(userId))
+        else
+            ds:BatchSetAsync(saveData, function(errorCode, values)
+                if errorCode ~= 0 then
+                    log_error("[MailBootstrap] 주기 저장 실패 code=" .. tostring(errorCode))
+                end
+            end)
+        end
+    end
+
+    @ExecSpace("ServerOnly")
+    method void LoadFromDB()
+        -- PlayerMail 저장 키를 배치 조회해 로드 콜백을 호출한다.
+        local playerMail = self:GetPlayerMail()
+        if playerMail == nil then
+            log_error("[MailBootstrap] Load 실패: PlayerMail 없음")
+            return
+        end
+
+        local userId = self:ResolveUserId()
+        if userId == nil then
+            log_error("[MailBootstrap] Load 실패: userId 없음")
+            return
+        end
+
+        local ds = _DataStorageService:GetUserDataStorage(userId)
+        if ds == nil then
+            log_error("[MailBootstrap] Load 실패: storage 없음")
+            return
+        end
+
+        local loadKey = {}
+        playerMail:LoadFromDB(loadKey)
+
+        local loadedData = {}
+        local returnCode, itemPages = ds:BatchGetAndWait(loadKey)
+        if returnCode ~= 0 then
+            log_error("[MailBootstrap] BatchGet 실패 code=" .. tostring(returnCode))
+        else
+            while true do
+                local datas = itemPages:GetCurrentPageDatas()
+                if datas == nil then
+                    break
+                end
+                for i = 1, #datas do
+                    loadedData[datas[i].KeyInfo.Key] = datas[i]
+                end
+                if itemPages.IsLastPage == true then
+                    break
+                end
+                itemPages:MoveToNextPageAndWait()
+            end
+        end
+
+        playerMail:OnLoadedDataFromDB(loadedData)
+        self.IsLoadSuccess = true
+        log("[MailBootstrap] loaded userId=" .. tostring(userId))
+    end
+
+    @ExecSpace("ServerOnly")
+    @EventSender("Service", "UserService")
+    handler HandleUserLeaveEvent(UserLeaveEvent event)
+        -- 소유 유저 퇴장 시 타이머 정리 후 강제 저장한다.
+        local userId = event.UserId
+        if userId ~= self:ResolveUserId() then
+            return
+        end
+        if self.TimerId ~= 0 then
+            _TimerService:ClearTimer(self.TimerId)
+            self.TimerId = 0
+        end
+        self:SaveToDB(true)
+    end
+
+end

@@ -1,0 +1,22 @@
+@Logic
+script AdminLogic extends Logic
+    -- GM 권한 판별. 프로젝트 관리자 정책에 맞게 IsAdmin 조건을 채운다.
+    -- 기본값은 false (비관리자).
+
+    @ExecSpace("ServerOnly")
+    method boolean IsAdmin(string userId)
+        -- 관리자 여부를 판별한다. 기본 거부.
+        -- TODO: 운영 계정 화이트리스트 등으로 교체.
+        if userId == nil or userId == "" then
+            return false
+        end
+        return false
+    end
+
+    @ExecSpace("ClientOnly")
+    method boolean IsAdminLocalPlayer()
+        -- 로컬 플레이어가 관리자인지 판별한다. 기본 거부.
+        return false
+    end
+
+end

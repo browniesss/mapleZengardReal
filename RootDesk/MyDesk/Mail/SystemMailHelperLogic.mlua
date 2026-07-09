@@ -1,0 +1,180 @@
+@Logic
+script SystemMailHelperLogic extends Logic
+    -- 시스템/테스트용 메일 발송 헬퍼.
+    -- GM 권한 없이 서버에서 직접 SaveGlobalMail / SavePlayerMail 을 호출한다.
+    -- rewards: { {rewardType=string, amount=integer}, ... } 또는 { [rewardType]=amount }
+
+    @ExecSpace("ServerOnly")
+    method void OnBeginPlay()
+        -- 헬퍼 준비 로그.
+        log("[SystemMail] ready")
+    end
+
+    method any BuildItems(any rewards)
+        -- rewards 입력을 ItemBase 배열로 변환한다. 실패 시 nil.
+        if rewards == nil then
+            return {}
+        end
+        if type(rewards) ~= "table" then
+            log_error("[SystemMail] rewards 는 table 이어야 함")
+            return nil
+        end
+
+        local items = {}
+        local hasArray = false
+        for _, entry in ipairs(rewards) do
+            hasArray = true
+            if type(entry) ~= "table" then
+                log_error("[SystemMail] 배열 rewards 항목은 table 이어야 함")
+                return nil
+            end
+            local rewardType = entry.rewardType
+            local amount = math.floor(tonumber(entry.amount) or 0)
+            if rewardType == nil or rewardType == "" or amount <= 0 then
+                log_error("[SystemMail] 잘못된 reward 항목 type="
+                    .. tostring(rewardType) .. " amount=" .. tostring(entry.amount))
+                return nil
+            end
+            local item = ItemBase()
+            item:Set(rewardType, amount)
+            table.insert(items, item)
+        end
+        if hasArray then
+            return items
+        end
+
+        for rewardType, amountRaw in pairs(rewards) do
+            local amount = math.floor(tonumber(amountRaw) or 0)
+            if type(rewardType) ~= "string" or rewardType == "" or amount <= 0 then
+                log_error("[SystemMail] 잘못된 map reward 항목 type="
+                    .. tostring(rewardType) .. " amount=" .. tostring(amountRaw))
+                return nil
+            end
+            local item = ItemBase()
+            item:Set(rewardType, amount)
+            table.insert(items, item)
+        end
+        return items
+    end
+
+    method any ResolveWindow(integer retentionDays)
+        -- 즉시 수령 가능한 시작/종료 시각 윈도우를 계산한다.
+        local days = math.floor(tonumber(retentionDays) or 7)
+        if days < 1 then
+            days = 1
+        end
+        local now = _DateTimeLogic:GetTimeElapsed()
+        local startDate = now - 1000
+        local endDate = now + _DateTimeLogic:GetMillisecondsFromDays(days)
+        return {
+            retentionDays = days,
+            startDate = startDate,
+            endDate = endDate,
+        }
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean SendGlobal(string title, string message, string sender, integer retentionDays, any rewards)
+        -- 전체 유저에게 시스템 메일을 발송한다.
+        if title == nil or title == "" then
+            log_error("[SystemMail] title 비어 있음")
+            return false
+        end
+        if message == nil then
+            message = ""
+        end
+        if sender == nil or sender == "" then
+            sender = "System"
+        end
+
+        local items = self:BuildItems(rewards)
+        if items == nil then
+            return false
+        end
+        local window = self:ResolveWindow(retentionDays)
+        local ok = _GMMailLogic:SaveGlobalMail(
+            title,
+            message,
+            sender,
+            window.retentionDays,
+            window.startDate,
+            window.endDate,
+            items
+        )
+        if ok then
+            log("[SystemMail] global sent title=" .. title
+                .. " items=" .. tostring(#items)
+                .. " days=" .. tostring(window.retentionDays))
+        else
+            log_error("[SystemMail] global send failed title=" .. title)
+        end
+        return ok == true
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean SendToUser(string userId, string title, string message, string sender, integer retentionDays, any rewards)
+        -- 특정 유저에게 시스템 메일을 발송한다(스테이징 저장 → 접속 시 반영).
+        if userId == nil or userId == "" then
+            log_error("[SystemMail] userId 비어 있음")
+            return false
+        end
+        if title == nil or title == "" then
+            log_error("[SystemMail] title 비어 있음")
+            return false
+        end
+        if message == nil then
+            message = ""
+        end
+        if sender == nil or sender == "" then
+            sender = "System"
+        end
+
+        local items = self:BuildItems(rewards)
+        if items == nil then
+            return false
+        end
+        local window = self:ResolveWindow(retentionDays)
+
+        _GMMailLogic:SavePlayerMail(
+            userId,
+            title,
+            message,
+            sender,
+            window.retentionDays,
+            window.startDate,
+            window.endDate,
+            items
+        )
+        log("[SystemMail] player sent userId=" .. tostring(userId)
+            .. " title=" .. title
+            .. " items=" .. tostring(#items))
+        return true
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean SendTestRewardMailToUser(string userId)
+        -- 테스트용 보상 메일 1통을 특정 유저에게 보낸다.
+        return self:SendToUser(
+            userId,
+            "테스트 보상 우편",
+            "시스템 테스트 메일입니다. 첨부 보상을 수령해 주세요.",
+            "System",
+            7,
+            {
+                { rewardType = "play_free_coin", amount = 100 },
+            }
+        )
+    end
+
+    @ExecSpace("Server")
+    method void RequestSendTestMailToSelf()
+        -- 클라 테스트용: 호출한 유저 본인에게 테스트 메일을 보낸다.
+        local userId = senderUserId
+        if userId == nil or userId == "" then
+            log_error("[SystemMail] RequestSendTestMailToSelf: senderUserId 없음")
+            return
+        end
+        self:SendTestRewardMailToUser(userId)
+    end
+
+end

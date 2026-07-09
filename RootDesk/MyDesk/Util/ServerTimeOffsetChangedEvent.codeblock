@@ -1,0 +1,33 @@
+{
+  "Id": "",
+  "GameId": "",
+  "EntryKey": "codeblock://e41b3bf1-48b9-418b-89e3-e37986b97a5b",
+  "ContentType": "x-mod/codeblock",
+  "Content": "",
+  "Usage": 0,
+  "UsePublish": 1,
+  "UseService": 0,
+  "CoreVersion": "26.5.0.0",
+  "StudioVersion": "",
+  "DynamicLoading": 0,
+  "ContentProto": {
+    "Use": "Json",
+    "Json": {
+      "CoreVersion": {
+        "Major": 0,
+        "Minor": 2
+      },
+      "ScriptVersion": {
+        "Major": 1,
+        "Minor": 1
+      },
+      "Description": "",
+      "Id": "e41b3bf1-48b9-418b-89e3-e37986b97a5b",
+      "Language": 1,
+      "Name": "ServerTimeOffsetChangedEvent",
+      "Type": 3,
+      "Source": 0,
+      "Target": null
+    }
+  }
+}
