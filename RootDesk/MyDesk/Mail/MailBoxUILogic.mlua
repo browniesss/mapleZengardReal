@@ -115,6 +115,12 @@ script MailBoxUILogic extends Logic
             itemUi:AddComponent("script.UIGMMailTool_ItemInfo")
             log("[MailBoxUI] UIGMMailTool_ItemInfo attach")
         end
+
+        local detail = box:GetChildByName("Detail", true)
+        if detail ~= nil and detail:GetComponent("script.UIMailBoxDetail") == nil and detail.UIMailBoxDetail == nil then
+            detail:AddComponent("script.UIMailBoxDetail")
+            log("[MailBoxUI] UIMailBoxDetail attach")
+        end
     end
 
     @ExecSpace("ClientOnly")

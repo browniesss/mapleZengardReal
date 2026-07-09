@@ -1,96 +1,148 @@
 @Component
 script UIMailBoxItem extends Component
+    -- 우편 리스트 행(요약).
+    -- 본문/첨부 영역은 숨기고, 행 버튼으로 상세(UIMailBoxDetail)를 연다.
 
-	property Entity Text_Title = nil
+    property Entity Text_Title = nil
+    property Entity Text_Sender = nil
+    property Entity Text_DueDate = nil
+    property Entity Text_IsRead = nil
+    property Entity Text_Message = nil
+    property Entity BtnReceive = nil
+    property Entity GridViewEntity = nil
 
-	property Entity Text_Message = nil
+    property string UUID = ""
+    property any MailData = nil
+    property any selectHandler = nil
+    property any ownerMailBox = nil
 
-	property Entity Text_Sender = nil
+    @ExecSpace("ClientOnly")
+    method void OnBeginPlay()
+        -- 리스트 행 자식 참조 확보 + 상세 전용 UI 숨김 + 선택 버튼 연결.
+        local entity = self.Entity
 
-	property GridViewComponent GridView = nil
+        self.Text_Title = entity:GetChildByName("Text_Title")
+        self.Text_Sender = entity:GetChildByName("Text_Sender")
+        self.Text_DueDate = entity:GetChildByName("Text_DueDate")
+        self.Text_IsRead = entity:GetChildByName("Text_IsRead")
+        self.Text_Message = entity:GetChildByName("Text_Message")
+        self.BtnReceive = entity:GetChildByName("BtnReceive")
+        self.GridViewEntity = entity:GetChildByName("GridView")
 
-	property Entity Text_DueDate = nil
+        self:HideDetailOnlyNodes()
 
-	property Entity Text_IsRead = nil
+        if self.BtnReceive ~= nil then
+            self:SetButtonLabel(self.BtnReceive, "읽기")
+            self.BtnReceive:SetEnable(true)
+            self.selectHandler = self.BtnReceive:ConnectEvent(ButtonClickEvent, function(evt)
+                self:OnRowClicked()
+            end)
+        end
+    end
 
-	property table Items = {}
+    @ExecSpace("ClientOnly")
+    method void HideDetailOnlyNodes()
+        -- 리스트에서는 본문/첨부 UI를 숨긴다.
+        if self.Text_Message ~= nil then
+            self.Text_Message:SetEnable(false)
+        end
+        if self.GridViewEntity ~= nil then
+            self.GridViewEntity:SetEnable(false)
+        end
+    end
 
-	property string UUID = ""
+    @ExecSpace("ClientOnly")
+    method void SetButtonLabel(Entity btn, string label)
+        -- 버튼 텍스트 라벨을 설정한다.
+        if btn == nil then
+            return
+        end
+        if btn.TextComponent ~= nil then
+            btn.TextComponent.Text = label
+            return
+        end
+        local textChild = btn:GetChildByName("Text")
+        if textChild ~= nil and textChild.TextComponent ~= nil then
+            textChild.TextComponent.Text = label
+        end
+    end
 
-	@ExecSpace("ClientOnly")
-	method void OnBeginPlay()
-		local entity = self.Entity
-		
-		self.Text_Title = entity:GetChildByName("Text_Title")
-		self.Text_Message = entity:GetChildByName("Text_Message")
-		self.Text_Sender = entity:GetChildByName("Text_Sender")
-		self.Text_DueDate = entity:GetChildByName("Text_DueDate")
-		self.Text_IsRead = entity:GetChildByName("Text_IsRead")
-		
-		self.GridView = entity:GetChildByName("GridView").GridViewComponent
-		
-		local itemUI = entity:GetChildByName("ItemUI")
-		self.GridView.ItemEntity = itemUI
-		self.GridView.OnRefresh = self.OnRefresh
-		self.GridView.OnClear = self.OnClear
-		
-		local btnReceive = entity:GetChildByName("BtnReceive")
-		btnReceive:ConnectEvent(ButtonClickEvent, function(evt) self:OnReceive() end)
-	end
+    @ExecSpace("ClientOnly")
+    method void Apply(any mail, any owner)
+        -- 리스트 요약 필드를 채운다.
+        if mail == nil then
+            self:Clear()
+            return
+        end
 
-	@ExecSpace("ClientOnly")
-	method void Apply(Mail mail)
-		self.UUID = mail.UUID
-		
-		self.Text_Title.TextComponent.Text = mail.Title
-		self.Text_Message.TextComponent.Text = mail.Message
-		self.Text_Sender.TextComponent.Text = mail.Sender
-		self.Text_DueDate.TextComponent.Text = tostring(mail.RetentionDays)
-		self.Text_IsRead.TextComponent.Text = tostring(mail.RetentionDays)
-		
-		self.Text_DueDate.TextComponent.Text = DateTime(mail.DueDate):ToFormattedString("yyyy-MM-dd HH:mm:ss")
-		if mail.IsRead then
-			self.Text_IsRead.TextComponent.Text = "O"
-		else
-			self.Text_IsRead.TextComponent.Text = "X"		
-		end
-		
-		self.Items = mail.Items
-		self.GridView.TotalCount = #mail.Items
-		self.GridView:Refresh(true, true)
-	end
+        self.ownerMailBox = owner
+        self.MailData = mail
+        self.UUID = mail.UUID or ""
 
-	@ExecSpace("ClientOnly")
-	method void Clear()
-		self.Items = nil
-		self.UUID = ""
-	end
+        if self.Text_Title ~= nil and self.Text_Title.TextComponent ~= nil then
+            self.Text_Title.TextComponent.Text = tostring(mail.Title or "")
+        end
+        if self.Text_Sender ~= nil and self.Text_Sender.TextComponent ~= nil then
+            self.Text_Sender.TextComponent.Text = tostring(mail.Sender or "")
+        end
+        if self.Text_DueDate ~= nil and self.Text_DueDate.TextComponent ~= nil then
+            local due = mail.DueDate or 0
+            if due > 0 then
+                self.Text_DueDate.TextComponent.Text = DateTime(due):ToFormattedString("yyyy-MM-dd HH:mm")
+            else
+                self.Text_DueDate.TextComponent.Text = "-"
+            end
+        end
+        if self.Text_IsRead ~= nil and self.Text_IsRead.TextComponent ~= nil then
+            if mail.IsRead then
+                self.Text_IsRead.TextComponent.Text = "읽음"
+            else
+                self.Text_IsRead.TextComponent.Text = "안읽음"
+            end
+        end
 
-	@ExecSpace("ClientOnly")
-	method void OnRefresh(integer index, Entity entity)
-		index += 1
-		---@type ItemBase
-		local item = self.Items[index]
-		entity.UIGMMailTool_ItemInfo:Apply(item, index, nil)
-	end
+        self:HideDetailOnlyNodes()
+        if self.BtnReceive ~= nil then
+            self.BtnReceive:SetEnable(true)
+            self:SetButtonLabel(self.BtnReceive, "읽기")
+        end
+    end
 
-	@ExecSpace("ClientOnly")
-	method void OnClear(integer index, Entity entity)
-		entity.UIGMMailTool_ItemInfo:Clear()
-	end
+    @ExecSpace("ClientOnly")
+    method void Clear()
+        -- 행 데이터 초기화.
+        self.UUID = ""
+        self.MailData = nil
+        if self.Text_Title ~= nil and self.Text_Title.TextComponent ~= nil then
+            self.Text_Title.TextComponent.Text = ""
+        end
+        if self.Text_Sender ~= nil and self.Text_Sender.TextComponent ~= nil then
+            self.Text_Sender.TextComponent.Text = ""
+        end
+        if self.Text_DueDate ~= nil and self.Text_DueDate.TextComponent ~= nil then
+            self.Text_DueDate.TextComponent.Text = ""
+        end
+        if self.Text_IsRead ~= nil and self.Text_IsRead.TextComponent ~= nil then
+            self.Text_IsRead.TextComponent.Text = ""
+        end
+        if self.BtnReceive ~= nil then
+            self.BtnReceive:SetEnable(false)
+        end
+    end
 
-	@ExecSpace("ClientOnly")
-	method void OnReceive()
-		if _Util:IsNilorEmptyString(self.UUID) then
-			return
-		end
-		
-		local playerMail = _UserService.LocalPlayer.PlayerMail
-		if not playerMail then
-			return
-		end
-		
-		playerMail:RequestReceiveMail(self.UUID)	
-	end
+    @ExecSpace("ClientOnly")
+    method void OnRowClicked()
+        -- 선택된 우편을 상세 패널에 표시한다.
+        if self.MailData == nil then
+            return
+        end
+        local owner = self.ownerMailBox
+        if owner == nil then
+            log_warning("[MailList] owner UIMailBox 없음")
+            return
+        end
+        owner:ShowDetail(self.MailData)
+        log("[MailList] select uuid=" .. tostring(self.UUID))
+    end
 
 end

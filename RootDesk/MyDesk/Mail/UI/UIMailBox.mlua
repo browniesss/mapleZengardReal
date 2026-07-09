@@ -1,92 +1,293 @@
 @Component
 script UIMailBox extends Component
+    -- 우편함 루트: 좌/상단 리스트 + 상세 패널 분리.
+    -- 리스트 행 클릭 → 상세 표시, 상세의 '보상 획득' 으로 수령.
 
-	property GridViewComponent GridView = nil
+    property GridViewComponent GridView = nil
+    property table Mails = {}
+    property Entity DetailEntity = nil
+    property any DetailComp = nil
+    property any selectedUuid = nil
+    property any closeHandler = nil
 
-	property table Mails = {}
+    @ExecSpace("ClientOnly")
+    method void OnBeginPlay()
+        -- 리스트 GridView / 닫기 / 상세 패널을 초기화한다.
+        local entity = self.Entity
+        local panel = entity:GetChildByName("Panel")
+        if panel == nil then
+            log_error("[MailBox] Panel 없음")
+            return
+        end
 
-	@ExecSpace("ClientOnly")
-	method void OnBeginPlay()
-		local entity = self.Entity
-		
-		local panel = entity:GetChildByName("Panel")
-		local page = panel:GetChildByName("Page")
-		
-		self.GridView = page:GetChildByName("GridView").GridViewComponent
-		
-		local itemUI = page:GetChildByName("Item")
-		self.GridView.ItemEntity = itemUI
-		self.GridView.OnRefresh = self.OnRefresh
-		self.GridView.OnClear = self.OnClear
-		
-		local title = panel:GetChildByName("Title")
-		local btnClose = title:GetChildByName("Btn_Exit")
-		btnClose:ConnectEvent(ButtonClickEvent, function(evt) self.Entity:SetEnable(false) end)
-	end
+        local page = panel:GetChildByName("Page")
+        if page == nil then
+            log_error("[MailBox] Page 없음")
+            return
+        end
 
-	@ExecSpace("ClientOnly")
-	method void Open()
-		if self:IsExpired() then
-			local playerMail = _UserService.LocalPlayer.PlayerMail
-			playerMail:RequestDeleteExpiredMails()
-		end
-		
-		self:SetMailData()
-		
-		self.Entity:SetEnable(true)
-	end
+        local gridEntity = page:GetChildByName("GridView")
+        if gridEntity == nil then
+            log_error("[MailBox] GridView 없음")
+            return
+        end
+        self.GridView = gridEntity.GridViewComponent
 
-	@ExecSpace("ClientOnly")
-	method void SetMailData()
-		local mails = _UserService.LocalPlayer.PlayerMail.Mails
-		local tmpMails = {}
-		for uuid, m in pairs(mails) do
-			table.insert(tmpMails, m)
-		end
-		
-		self.Mails = tmpMails
-		
-		self.GridView.TotalCount = _Util:TableLen(self.Mails)
-		self.GridView:Refresh(true, true)
-	end
+        local itemUI = page:GetChildByName("Item")
+        if itemUI == nil then
+            log_error("[MailBox] Item 템플릿 없음")
+            return
+        end
+        -- 리스트 템플릿 스크립트 보장
+        if itemUI:GetComponent("script.UIMailBoxItem") == nil and itemUI.UIMailBoxItem == nil then
+            itemUI:AddComponent("script.UIMailBoxItem")
+        end
+        self.GridView.ItemEntity = itemUI
+        self.GridView.OnRefresh = self.OnRefresh
+        self.GridView.OnClear = self.OnClear
 
-	@ExecSpace("ClientOnly")
-	method void OnRefresh(integer index, Entity entity)
-		index += 1
-		---@type Mail
-		local mail = self.Mails[index]
-		entity.UIMailBoxItem:Apply(mail)
-	end
+        local title = panel:GetChildByName("Title")
+        if title ~= nil then
+            local btnClose = title:GetChildByName("Btn_Exit")
+            if btnClose ~= nil then
+                self.closeHandler = btnClose:ConnectEvent(ButtonClickEvent, function(evt)
+                    self:Close()
+                end)
+            end
+        end
 
-	@ExecSpace("ClientOnly")
-	method void OnClear(integer index, Entity entity)
-		entity.UIMailBoxItem:Clear()
-	end
+        self:EnsureDetailPanel(panel, itemUI)
+        if self.DetailComp ~= nil then
+            self.DetailComp:Clear()
+        end
+        log("[MailBox] ready")
+    end
 
-	@ExecSpace("ClientOnly")
-	method boolean IsExpired()
-		local playerMail = _UserService.LocalPlayer.PlayerMail
-		local mails = playerMail.Mails
-		local time = _DateTimeLogic:GetTimeElapsed()
-		for uuid, m in pairs(mails) do
-			---@type Mail
-			local mail = m
-			if mail.DueDate <= time then
-				return true
-			end
-		end
-		
-		return false
-	end
+    @ExecSpace("ClientOnly")
+    method void EnsureDetailPanel(Entity panel, Entity itemTemplate)
+        -- 상세 패널 엔티티를 확보하고 UIMailBoxDetail 만 부착한다.
+        local detail = panel:GetChildByName("Detail")
+        if detail == nil then
+            -- Item 템플릿을 복제해 상세 전용 패널로 사용.
+            detail = _SpawnService:SpawnByEntity(itemTemplate, "Detail", Vector3.zero, panel)
+            if detail == nil then
+                log_error("[MailBox] Detail 스폰 실패")
+                return
+            end
+            if detail.UITransformComponent ~= nil then
+                detail.UITransformComponent.anchoredPosition = Vector2(0, -220)
+            end
+            log("[MailBox] Detail spawned")
+        end
 
-	@ExecSpace("ClientOnly")
-	@EventSender("LocalPlayer")
-	handler HandleClientMailChangedEvent(ClientMailChangedEvent event)
-		if not self.Entity.Enable then
-			return
-		end
-		
-		self:SetMailData()
-	end
+        -- 복제 시 딸려온 리스트 스크립트는 제거
+        if detail:GetComponent("script.UIMailBoxItem") ~= nil or detail.UIMailBoxItem ~= nil then
+            detail:RemoveComponent("script.UIMailBoxItem")
+            log("[MailBox] removed UIMailBoxItem from Detail")
+        end
+
+        local detailComp = detail:GetComponent("script.UIMailBoxDetail")
+        if detailComp == nil then
+            detailComp = detail.UIMailBoxDetail
+        end
+        if detailComp == nil then
+            detail:AddComponent("script.UIMailBoxDetail")
+            detailComp = detail:GetComponent("script.UIMailBoxDetail")
+            if detailComp == nil then
+                detailComp = detail.UIMailBoxDetail
+            end
+        end
+
+        self.DetailEntity = detail
+        self.DetailComp = detailComp
+        if detailComp == nil then
+            log_error("[MailBox] UIMailBoxDetail 부착 실패")
+        else
+            detail:SetEnable(false)
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void Open()
+        -- 만료 정리 후 리스트를 갱신하고 창을 연다.
+        local player = _UserService.LocalPlayer
+        if player == nil then
+            log_error("[MailBox] LocalPlayer 없음")
+            return
+        end
+        local playerMail = player:GetComponent("script.PlayerMail")
+        if playerMail == nil then
+            playerMail = player.PlayerMail
+        end
+        if playerMail ~= nil and self:IsExpired() then
+            playerMail:RequestDeleteExpiredMails()
+        end
+
+        self.selectedUuid = nil
+        if self.DetailComp ~= nil then
+            self.DetailComp:Clear()
+        end
+        self:SetMailData()
+        self.Entity:SetEnable(true)
+        log("[MailBox] open count=" .. tostring(_Util:TableLen(self.Mails)))
+    end
+
+    @ExecSpace("ClientOnly")
+    method void Close()
+        -- 우편함을 닫는다.
+        if self.DetailComp ~= nil then
+            self.DetailComp:Clear()
+        end
+        self.selectedUuid = nil
+        self.Entity:SetEnable(false)
+        log("[MailBox] close")
+    end
+
+    @ExecSpace("ClientOnly")
+    method void SetMailData()
+        -- PlayerMail.Mails 중 미수령 + 미만료 우편만 리스트에 반영한다.
+        local player = _UserService.LocalPlayer
+        if player == nil then
+            self.Mails = {}
+            self.GridView.TotalCount = 0
+            self.GridView:Refresh(true, true)
+            if self.DetailComp ~= nil then
+                self.DetailComp:Clear()
+            end
+            self.selectedUuid = nil
+            return
+        end
+        local playerMail = player:GetComponent("script.PlayerMail")
+        if playerMail == nil then
+            playerMail = player.PlayerMail
+        end
+        local mails = {}
+        local now = _DateTimeLogic:GetTimeElapsed()
+        if playerMail ~= nil and playerMail.Mails ~= nil then
+            for uuid, m in pairs(playerMail.Mails) do
+                local isRead = (m.IsRead == true)
+                local isExpired = (m.DueDate ~= nil and m.DueDate > 0 and m.DueDate <= now)
+                if not isRead and not isExpired then
+                    table.insert(mails, m)
+                end
+            end
+        end
+        -- 남은 우편은 기한 임박 확인이 쉽도록 만료 시각 내림차순 정렬.
+        table.sort(mails, function(a, b)
+            return (a.DueDate or 0) > (b.DueDate or 0)
+        end)
+
+        self.Mails = mails
+        self.GridView.TotalCount = #mails
+        self.GridView:Refresh(true, true)
+
+        -- 필터 결과에서 사라진 선택 우편은 상세를 닫는다.
+        if self.selectedUuid ~= nil then
+            local found = nil
+            for _, m in ipairs(mails) do
+                if m.UUID == self.selectedUuid then
+                    found = m
+                    break
+                end
+            end
+            if found ~= nil then
+                self:ShowDetail(found)
+            elseif self.DetailComp ~= nil then
+                self.DetailComp:Clear()
+                self.selectedUuid = nil
+            end
+        elseif #mails == 0 and self.DetailComp ~= nil then
+            self.DetailComp:Clear()
+        end
+
+        log("[MailBox] visible mails=" .. tostring(#mails))
+    end
+
+    @ExecSpace("ClientOnly")
+    method void ShowDetail(any mail)
+        -- 리스트에서 선택한 우편을 상세 패널에 표시한다.
+        if mail == nil then
+            return
+        end
+        self.selectedUuid = mail.UUID
+        if self.DetailComp == nil and self.DetailEntity ~= nil then
+            self.DetailComp = self.DetailEntity:GetComponent("script.UIMailBoxDetail")
+            if self.DetailComp == nil then
+                self.DetailComp = self.DetailEntity.UIMailBoxDetail
+            end
+        end
+        if self.DetailComp == nil then
+            log_error("[MailBox] DetailComp 없음")
+            return
+        end
+        self.DetailComp:Apply(mail)
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnRefresh(integer index, Entity entity)
+        -- 리스트 행 갱신.
+        index = index + 1
+        local mail = self.Mails[index]
+        local row = entity:GetComponent("script.UIMailBoxItem")
+        if row == nil then
+            row = entity.UIMailBoxItem
+        end
+        if row == nil then
+            entity:AddComponent("script.UIMailBoxItem")
+            row = entity:GetComponent("script.UIMailBoxItem")
+            if row == nil then
+                row = entity.UIMailBoxItem
+            end
+        end
+        if row ~= nil then
+            row:Apply(mail, self)
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnClear(integer index, Entity entity)
+        -- 리스트 행 정리.
+        local row = entity:GetComponent("script.UIMailBoxItem")
+        if row == nil then
+            row = entity.UIMailBoxItem
+        end
+        if row ~= nil then
+            row:Clear()
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method boolean IsExpired()
+        -- 만료 메일 존재 여부.
+        local player = _UserService.LocalPlayer
+        if player == nil then
+            return false
+        end
+        local playerMail = player:GetComponent("script.PlayerMail")
+        if playerMail == nil then
+            playerMail = player.PlayerMail
+        end
+        if playerMail == nil or playerMail.Mails == nil then
+            return false
+        end
+        local time = _DateTimeLogic:GetTimeElapsed()
+        for uuid, m in pairs(playerMail.Mails) do
+            if m.DueDate ~= nil and m.DueDate <= time then
+                return true
+            end
+        end
+        return false
+    end
+
+    @ExecSpace("ClientOnly")
+    @EventSender("LocalPlayer")
+    handler HandleClientMailChangedEvent(ClientMailChangedEvent event)
+        -- 메일 변경 시 리스트/상세 갱신.
+        if not self.Entity.Enable then
+            return
+        end
+        self:SetMailData()
+        log("[MailBox] mail changed refresh")
+    end
 
 end
