@@ -1,0 +1,6 @@
+@Event
+script SkillFiringEvent extends EventType
+    -- 순차 발동 체인에서 "지금 발동 중인 스킬" 통지 — 스킬 순서 리스트 강조용 (개선 요청 2026-07-09).
+    -- orderIndex = 발동 순서 리스트(order) 위치, 0 = 발동 종료(강조 해제).
+    property integer orderIndex = 0
+end

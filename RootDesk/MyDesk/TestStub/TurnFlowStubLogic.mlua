@@ -203,14 +203,19 @@ script TurnFlowStubLogic extends Logic
         local growth = ctx.playerEntity:GetComponent("script.PlayerGrowthComponent")
         if growth ~= nil then growth:SetLevelUpHold(true) end
         self:ClearRangePreview(ctx.run)
-        local queue = {}
         ---@type SkillLoadoutComponent
         local loadout = ctx.playerEntity:GetComponent("script.SkillLoadoutComponent")
-        for _, inst in ipairs(loadout:GetOrderedInstances()) do
+        -- 버프 자동 시전 (규칙: 공격 시작 시 쿨 아닌 버프 전부) — 강화된 스탯으로 이번 체인을 해석
+        local buffs = loadout:CastBuffs()
+        for _, def in ipairs(buffs) do
+            self:SpawnCellFx(ctx.run, ctx.flow.playerCell, def.hitFxRuid)
+        end
+        local queue = {}
+        for orderIndex, inst in ipairs(loadout:GetOrderedInstances()) do
             if inst.cooldownLeft == nil or inst.cooldownLeft <= 0 then
                 local casts = 1 + _CombatResolveLogic:BuildTagEffects(inst).castAdd
                 for c = 1, casts do
-                    table.insert(queue, { inst = inst, cast = c, casts = casts })
+                    table.insert(queue, { inst = inst, cast = c, casts = casts, orderIndex = orderIndex })
                 end
             end
         end
@@ -243,6 +248,7 @@ script TurnFlowStubLogic extends Logic
             ctx.flow.phase = "idle"
             ctx.flow.danger = self:IsDangerZone(ctx)   -- 처치 반영 후 재판정
             log("[TurnFlowStub] 공격 해소 완료: 처치 " .. tostring(ctx.flow.totalKills or 0) .. "마리")
+            self:NotifyFiringClient(0, userId)   -- 발동 강조 해제
             self:NotifyPhaseClient("idle", ctx.flow.wave, ctx.flow.danger, userId)
             -- 체인 종료 후 보류했던 레벨업 일괄 판정 -> 선택지 노출 (사용자 확정 타이밍)
             ---@type PlayerGrowthComponent
@@ -259,6 +265,7 @@ script TurnFlowStubLogic extends Logic
             if s == inst then stillOwned = true break end
         end
         if stillOwned then
+            self:NotifyFiringClient(entry.orderIndex, userId)   -- 순서 리스트에 발동 중 강조
             -- 쿨다운은 마지막 cast에서만 개시 — 중간에 걸면 해석기가 남은 발동을 스킵한다
             local result = ctx.runComp:ResolveSingleSkill(inst, facing, ctx.flow.playerCell, entry.cast == entry.casts)
             if result ~= nil then
@@ -286,17 +293,34 @@ script TurnFlowStubLogic extends Logic
         run.flow.previewEntities = nil
     end
 
+    @ExecSpace("ServerOnly")
+    method void SpawnPreviewCell(any ctx, integer col, integer row, Color tint)
+        -- 프리뷰 하이라이트 1칸 스폰 (타일 스프라이트 + 틴트 — 약한 틴트/점 스프라이트는 안 보임).
+        local slot = ctx.run.board.slots[col .. "_" .. row]
+        if slot == nil or not isvalid(slot) then return end
+        local hl = _SpawnService:SpawnByModelId("BoardCell", "preview_" .. col .. "_" .. row, Vector3(0, 0, -0.08), slot)
+        if isvalid(hl) then
+            local sr = hl.SpriteRendererComponent
+            if isvalid(sr) then sr.Color = tint end
+            table.insert(ctx.flow.previewEntities, hl)
+        end
+    end
+
     @ExecSpace("Server")
     method void RequestRangePreview(string facing)
-        -- 방향 패드 클릭 시: 보유 스킬 전체(쿨다운 제외)의 공격 범위를 보드에 하이라이트.
-        -- 범위 계산은 CombatResolveLogic의 동일 함수 재사용 — 실제 발동 범위와 항상 일치.
+        -- 방향 패드 클릭 시 프리뷰 (2026-07-09 개선): 범위를 통째로 칠하지 않고 **실제 타격될 대상 칸을
+        -- 붉게** 표시 — SelectTargets를 그대로 돌려 발동 결과와 항상 일치. 관통 스킬만 경로 이해를 위해
+        -- 범위(주황)를 함께 깔고 그 위에 타격 대상을 붉게 겹친다.
         local ctx = self:FindRunContext(senderUserId)
         if ctx == nil or ctx.flow.phase ~= "aim" then return end
         if facing ~= "UP" and facing ~= "DOWN" and facing ~= "LEFT" and facing ~= "RIGHT" then return end
         self:ClearRangePreview(ctx.run)
         ctx.flow.previewEntities = {}
+        local rangeTint = Color(1, 0.35, 0.05, 0.55)
+        local targetTint = Color(1, 0.1, 0.08, 0.92)
         ---@type SkillLoadoutComponent
         local loadout = ctx.playerEntity:GetComponent("script.SkillLoadoutComponent")
+        local targetCount = 0
         for _, inst in ipairs(loadout:GetOrderedInstances()) do
             if inst.cooldownLeft == nil or inst.cooldownLeft <= 0 then
                 local skillDef = _SkillCatalogLogic:GetSkill(inst.skillId)
@@ -304,44 +328,55 @@ script TurnFlowStubLogic extends Logic
                 if pattern ~= nil then
                     local eff = _CombatResolveLogic:BuildTagEffects(inst)
                     local cells = _CombatResolveLogic:ComputeRangeCells(pattern, eff, facing, ctx.flow.playerCell, ctx.def)
-                    for _, cell in ipairs(cells) do
-                        local slot = ctx.run.board.slots[cell.col .. "_" .. cell.row]
-                        if slot ~= nil and isvalid(slot) then
-                            local hl = _SpawnService:SpawnByModelId("BoardCell", "preview_" .. cell.col .. "_" .. cell.row, Vector3(0, 0, -0.08), slot)
-                            if isvalid(hl) then
-                                local sr = hl.SpriteRendererComponent
-                                if isvalid(sr) then
-                                    -- 셀 크기와 일치하는 타일 스프라이트에 강한 주황 틴트 — 칸 전체 하이라이트
-                                    sr.Color = Color(1, 0.35, 0.05, 0.85)
-                                end
-                                table.insert(ctx.flow.previewEntities, hl)
-                            end
+                    if eff.pierce then
+                        for _, cell in ipairs(cells) do
+                            self:SpawnPreviewCell(ctx, cell.col, cell.row, rangeTint)
                         end
+                    end
+                    local targets = _CombatResolveLogic:SelectTargets(skillDef.attackType, eff, skillDef.targetCount,
+                        cells, ctx.run, ctx.def, ctx.flow.playerCell)
+                    for _, t in ipairs(targets) do
+                        self:SpawnPreviewCell(ctx, t.col, t.row, targetTint)
+                        targetCount = targetCount + 1
                     end
                 end
             end
         end
-        log("[TurnFlowStub] 범위 프리뷰: facing=" .. facing .. " 셀 " .. tostring(#ctx.flow.previewEntities) .. "칸")
+        log("[TurnFlowStub] 범위 프리뷰: facing=" .. facing .. " 타격 대상 " .. tostring(targetCount) .. "칸")
+    end
+
+    @ExecSpace("ServerOnly")
+    method void SpawnCellFx(any run, any cell, string fxRuid)
+        -- 칸 위 이펙트 1회 재생: 칸 slot 자식으로 animationclip을 잠깐 띄운다 (버프 시전/타격 공용).
+        -- BoardCell 모델을 껍데기로 스폰해 SpriteRUID만 교체 — 정식 연출 시스템 전까지의 스텁.
+        if cell == nil or fxRuid == nil or fxRuid == "" then return end
+        local slot = run.board.slots[cell.col .. "_" .. cell.row]
+        if slot == nil or not isvalid(slot) then return end
+        local fx = _SpawnService:SpawnByModelId("BoardCell", "fx_" .. cell.col .. "_" .. cell.row, Vector3(0, 0, -0.1), slot)
+        if isvalid(fx) then
+            local sr = fx.SpriteRendererComponent
+            if isvalid(sr) then sr.SpriteRUID = fxRuid end
+            fx:Destroy(0.8)
+        end
     end
 
     @ExecSpace("ServerOnly")
     method void SpawnHitEffects(any run, table hits)
-        -- 스킬 발동 연출: 타격 칸의 slot 자식으로 스킬별 이펙트(animationclip)를 잠깐 띄운다.
-        -- BoardCell 모델을 껍데기로 스폰해 SpriteRUID만 교체 — 정식 연출 시스템 전까지의 스텁.
+        -- 스킬 발동 연출: 타격 칸마다 스킬별 이펙트 재생.
         for _, h in ipairs(hits) do
-            local slot = run.board.slots[h.cell.col .. "_" .. h.cell.row]
-            if slot ~= nil and isvalid(slot) then
-                local skillDef = _SkillCatalogLogic:GetSkill(h.skillId)
-                if skillDef ~= nil and skillDef.hitFxRuid ~= nil and skillDef.hitFxRuid ~= "" then
-                    local fx = _SpawnService:SpawnByModelId("BoardCell", "fx_" .. h.cell.col .. "_" .. h.cell.row, Vector3(0, 0, -0.1), slot)
-                    if isvalid(fx) then
-                        local sr = fx.SpriteRendererComponent
-                        if isvalid(sr) then sr.SpriteRUID = skillDef.hitFxRuid end
-                        fx:Destroy(0.8)
-                    end
-                end
+            local skillDef = _SkillCatalogLogic:GetSkill(h.skillId)
+            if skillDef ~= nil then
+                self:SpawnCellFx(run, h.cell, skillDef.hitFxRuid)
             end
         end
+    end
+
+    @ExecSpace("Client")
+    method void NotifyFiringClient(integer orderIndex)
+        -- 소유 클라에서 실행: 지금 발동 중인 스킬(순서 리스트 위치)을 로컬 이벤트로 전달 (0=해제).
+        local ev = SkillFiringEvent()
+        ev.orderIndex = orderIndex
+        self:SendEvent(ev)
     end
 
     @ExecSpace("Client")
