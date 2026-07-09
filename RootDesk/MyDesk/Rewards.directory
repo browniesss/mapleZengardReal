@@ -1,0 +1,23 @@
+{
+  "Id": "",
+  "GameId": "",
+  "EntryKey": "directory://158b14317f9c4e9a97860ba43186ab10",
+  "ContentType": "x-mod/directory",
+  "Content": "",
+  "Usage": 0,
+  "UsePublish": 1,
+  "UseService": 0,
+  "CoreVersion": "26.5.0.0",
+  "StudioVersion": "",
+  "DynamicLoading": 0,
+  "ContentProto": {
+    "Use": "Json",
+    "Json": {
+      "entry_id": "directory://158b14317f9c4e9a97860ba43186ab10",
+      "name": "Rewards",
+      "lock": false,
+      "folding": false,
+      "nameEditable": true
+    }
+  }
+}
