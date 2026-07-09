@@ -37,6 +37,14 @@ script PlayerJobComponent extends Component
     end
 
     @ExecSpace("ServerOnly")
+    method boolean SpendLoot(integer amount)
+        -- 전리품 소모 (재추첨 등 전직 외 소비처 공용). 부족하면 false, 차감 없음.
+        if self.LootCount < amount then return false end
+        self.LootCount = self.LootCount - amount
+        return true
+    end
+
+    @ExecSpace("ServerOnly")
     method boolean CanAdvance()
         -- 전직 가능 = 노출 3회 이상 + 전리품 충분 + 4차 미만.
         if self.Tier >= 4 then return false end

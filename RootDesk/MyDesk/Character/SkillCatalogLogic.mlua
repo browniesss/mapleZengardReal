@@ -222,6 +222,8 @@ script SkillCatalogLogic extends Logic
                             iconRuid = row:GetItem("iconRuid"),
                             hitFxRuid = row:GetItem("hitFxRuid"),
                             desc = row:GetItem("desc"),
+                            supportEffect = self:ParseJsonCell(row:GetItem("supportEffect"), {}),
+                            supportTurns = math.floor(tonumber(row:GetItem("supportTurns")) or 0),
                         }
                         def.rarity = self:TierToRarity(def.tier)
                         def.perHitCoefLv3 = def.coefLv3 / self:CountBaseHits(def)
@@ -241,9 +243,16 @@ script SkillCatalogLogic extends Logic
     end
 
     @ExecSpace("ServerOnly")
+    method boolean IsSupportSkill(any def)
+        -- 버프/패시브 여부 — 공격 슬롯이 아니라 서포트 슬롯으로 장착된다 (사양서 §3-1 별도 슬롯).
+        return def.attackType == "buff" or def.attackType == "passive"
+    end
+
+    @ExecSpace("ServerOnly")
     method void ValidateSkill(any def)
         -- 적재 시 참조 무결성 검증: rangeId/baseTags/onHitStatus 존재 확인 (경고만, 차단 안 함).
-        if self:GetRangePattern(def.rangeId) == nil then
+        -- 서포트 스킬(버프/패시브)은 범위 패턴이 없으므로 rangeId 검증을 건너뛴다.
+        if not self:IsSupportSkill(def) and self:GetRangePattern(def.rangeId) == nil then
             log_error("[SkillCatalog] 스킬 " .. def.skillId .. " rangeId 무효: " .. tostring(def.rangeId))
         end
         local tags = self:GetTagDefs()

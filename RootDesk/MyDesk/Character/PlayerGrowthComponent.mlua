@@ -154,6 +154,7 @@ script PlayerGrowthComponent extends Component
         -- 슬롯 만석이어도 신규 스킬은 후보에 포함 — 선택 시 교체 플로우 진입 (사양서 §3-4).
         -- Lv.3 만렙 보유 스킬은 항상 제외. 후보 전무 시 nil.
         local isFull = #loadout.attackSlots >= loadout.MaxAttackSlots
+        local isSupportFull = #loadout.supportSlots >= loadout.MaxSupportSlots
         local rarity = self:RollRarity()
         local tier = self:RarityToTier(rarity)
         if tier > jobComp.Tier then tier = jobComp.Tier end
@@ -163,16 +164,27 @@ script PlayerGrowthComponent extends Component
             for _, skillId in ipairs(pool) do
                 local def = _SkillCatalogLogic:GetSkill(skillId)
                 if def.tier == tier then
-                    local slotIdx = loadout:FindSlotIndex(skillId)
-                    local owned = slotIdx > 0
-                    local maxed = owned and loadout.attackSlots[slotIdx].level >= 3
-                    if not maxed then
-                        table.insert(cands, def)
+                    if _SkillCatalogLogic:IsSupportSkill(def) then
+                        -- 서포트(버프/패시브): 레벨업·교체 없음 잠정 — 보유 중이거나 서포트 만석이면 제외
+                        if loadout:FindSupportIndex(skillId) == 0 and not isSupportFull then
+                            table.insert(cands, def)
+                        end
+                    else
+                        local slotIdx = loadout:FindSlotIndex(skillId)
+                        local owned = slotIdx > 0
+                        local maxed = owned and loadout.attackSlots[slotIdx].level >= 3
+                        if not maxed then
+                            table.insert(cands, def)
+                        end
                     end
                 end
             end
             if #cands > 0 then
                 local picked = cands[_UtilLogic:RandomIntegerRange(1, #cands)]
+                if _SkillCatalogLogic:IsSupportSkill(picked) then
+                    return { kind = "skill", skillId = picked.skillId, name = picked.name,
+                        rarity = picked.rarity, iconRuid = picked.iconRuid, desc = picked.desc }
+                end
                 local owned = loadout:FindSlotIndex(picked.skillId) > 0
                 local desc
                 if owned then

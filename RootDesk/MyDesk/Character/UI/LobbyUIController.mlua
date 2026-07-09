@@ -1,33 +1,76 @@
 @Component
 script LobbyUIController extends Component
-    -- 로비 '게임 시작' 버튼 컨트롤러 (UI 엔티티 부착, ClientOnly).
+    -- 로비 컨트롤러 (UI 엔티티 부착, ClientOnly): 게임 시작 -> 직업 선택 -> 런 시작 요청.
     -- UI 엔티티는 서버 RPC 호스팅 불가 — 시작 요청은 GameStartLogic(@Logic)의 Server 메서드로 위임.
-    -- 직업 선택 시트(MODE 화면) 도입 전이라 기본 직업 ARC로 요청한다.
 
     property ButtonComponent btnStart = "c509612e-ab2a-4792-bc4d-4ac228c1f328"
     property Entity lobbyPanel = "fc6f9124-6d50-4357-9b34-47dd46f40c87"
-    property any clickHandler = nil
+    property Entity jobPanel = "a9829cfe-92b2-40d5-ab0b-9c1e88138432"
+    property ButtonComponent btnJobWar = "468b5bdd-5cf2-4cb3-8223-5c8a07b4392d"
+    property ButtonComponent btnJobMag = "8a9f33b6-3253-41c0-8aee-ae786ed5c77e"
+    property ButtonComponent btnJobArc = "edaaa4ed-232b-42fe-8f95-ec2e23ca8447"
+    property ButtonComponent btnJobThf = "d0039571-d451-4fd7-a08d-bdc492780ab7"
+    property ButtonComponent btnJobBack = "bf47d870-b924-444b-a6d1-d2a88cdfe4ac"
+    property any handlers = nil
 
     @ExecSpace("ClientOnly")
     method void OnBeginPlay()
-        -- 버튼 클릭 구독.
-        self.clickHandler = self.btnStart.Entity:ConnectEvent(ButtonClickEvent, self.OnStartClicked)
+        -- 버튼 구독 + 직업 패널 초기 숨김.
+        self.handlers = {}
+        self:Wire(self.btnStart, self.OnStartClicked)
+        self:Wire(self.btnJobWar, function() self:OnJobPicked("WAR") end)
+        self:Wire(self.btnJobMag, function() self:OnJobPicked("MAG") end)
+        self:Wire(self.btnJobArc, function() self:OnJobPicked("ARC") end)
+        self:Wire(self.btnJobThf, function() self:OnJobPicked("THF") end)
+        self:Wire(self.btnJobBack, self.OnJobBackClicked)
+        if isvalid(self.jobPanel) then self.jobPanel.Enable = false end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void Wire(ButtonComponent btn, any callback)
+        -- 버튼 클릭 구독 + 핸들러 보관 (OnEndPlay 해제).
+        if not isvalid(btn) then return end
+        local h = btn.Entity:ConnectEvent(ButtonClickEvent, callback)
+        table.insert(self.handlers, { entity = btn.Entity, eventType = ButtonClickEvent, eventHandler = h })
     end
 
     @ExecSpace("ClientOnly")
     method void OnStartClicked()
-        -- 시작 요청 후 로비 패널 숨김 (컨트롤러 자신은 그룹 루트 소속이라 계속 살아있음).
-        log("[LobbyUI] 게임 시작 요청")
-        _GameStartLogic:RequestStartGame("ARC")
+        -- 게임 시작 -> 직업 선택 패널 노출 (실제 시작은 직업 확정 시).
+        if isvalid(self.jobPanel) then
+            self.jobPanel.Enable = true
+        else
+            -- 직업 패널 미배선 폴백: 종전 기본 직업으로 즉시 시작
+            _GameStartLogic:RequestStartGame("ARC")
+            self.lobbyPanel.Enable = false
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnJobPicked(string job)
+        -- 직업 확정 -> 런 시작 요청 + 로비 UI 숨김.
+        log("[LobbyUI] 직업 선택: " .. job)
+        _GameStartLogic:RequestStartGame(job)
+        self.jobPanel.Enable = false
         self.lobbyPanel.Enable = false
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnJobBackClicked()
+        -- 직업 선택 취소 -> 로비로 복귀.
+        self.jobPanel.Enable = false
     end
 
     @ExecSpace("ClientOnly")
     method void OnEndPlay()
         -- 구독 해제(필수).
-        if self.clickHandler then
-            self.btnStart.Entity:DisconnectEvent(ButtonClickEvent, self.clickHandler)
-            self.clickHandler = nil
+        if self.handlers ~= nil then
+            for _, rec in ipairs(self.handlers) do
+                if isvalid(rec.entity) then
+                    rec.entity:DisconnectEvent(rec.eventType, rec.eventHandler)
+                end
+            end
+            self.handlers = nil
         end
     end
 end

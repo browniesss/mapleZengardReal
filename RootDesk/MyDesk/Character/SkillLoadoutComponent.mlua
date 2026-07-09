@@ -5,8 +5,9 @@ script SkillLoadoutComponent extends Component
     -- 상태 변경 전부 ServerOnly, 변경 시 SkillLoadoutChangedEvent 발행.
 
     property integer MaxAttackSlots = 3           -- 사양서 §4 정책: 상한 3 엄수
+    property integer MaxSupportSlots = 2          -- 버프·패시브 슬롯 상한 (기획 미정 — 잠정 2)
     property any attackSlots = nil                -- [SkillInstance]
-    property any supportSlots = nil               -- [SkillInstance] (버프·패시브 — 상한 미정)
+    property any supportSlots = nil               -- [SkillInstance] (버프·패시브 — 레벨업/교체 없음 잠정)
     property any order = nil                      -- 발동 순서: attackSlots 인스턴스 참조 배열
 
     @ExecSpace("ServerOnly")
@@ -32,7 +33,23 @@ script SkillLoadoutComponent extends Component
         local ev = SkillLoadoutChangedEvent()
         ev.reason = reason
         self.Entity:SendEvent(ev)
-        self:SyncLoadoutClient(self:BuildSlotsSummary(), self.Entity.PlayerComponent.UserId)
+        self:SyncLoadoutClient(self:BuildSlotsSummary(), self:BuildSupportText(), self.Entity.PlayerComponent.UserId)
+    end
+
+    @ExecSpace("ServerOnly")
+    method string BuildSupportText()
+        -- 버프·패시브 슬롯 한 줄 요약 (HUD 스킬 패널 하단 표시용). 쿨다운 중이면 남은 턴 병기.
+        local text = ""
+        for _, inst in ipairs(self.supportSlots) do
+            local def = _SkillCatalogLogic:GetSkill(inst.skillId)
+            local name = def ~= nil and def.name or inst.skillId
+            if inst.cooldownLeft ~= nil and inst.cooldownLeft > 0 then
+                name = name .. "(쿨 " .. tostring(inst.cooldownLeft) .. ")"
+            end
+            if text ~= "" then text = text .. " · " end
+            text = text .. name
+        end
+        return text
     end
 
     @ExecSpace("ServerOnly")
@@ -76,6 +93,7 @@ script SkillLoadoutComponent extends Component
                 tagsText = tagsText,
                 orderIndex = orderIndex,
                 cooldownLeft = inst.cooldownLeft or 0,
+                desc = def ~= nil and def.desc or "",   -- 슬롯 호버 툴팁용
             })
         end
         return summary
@@ -121,11 +139,12 @@ script SkillLoadoutComponent extends Component
     end
 
     @ExecSpace("Client")
-    method void SyncLoadoutClient(table slots)
+    method void SyncLoadoutClient(table slots, string supportText)
         -- 소유 클라에서 실행: 스킬 패널 UI에 로컬 이벤트로 전달 (UI는 LocalPlayer 구독).
         -- (합성 요청 경로는 레벨업 선택지(PlayerGrowthComponent)로 일원화 — 별도 합성 RPC 없음)
         local ev = LoadoutSyncedEvent()
         ev.slots = slots
+        ev.supportText = supportText
         self.Entity:SendEvent(ev)
     end
 
@@ -139,11 +158,80 @@ script SkillLoadoutComponent extends Component
     end
 
     @ExecSpace("ServerOnly")
+    method integer FindSupportIndex(string skillId)
+        -- 서포트 슬롯(버프·패시브)에서 skillId 위치 (없으면 0).
+        for i, inst in ipairs(self.supportSlots) do
+            if inst.skillId == skillId then return i end
+        end
+        return 0
+    end
+
+    @ExecSpace("ServerOnly")
+    method string AcquireSupportSkill(any def)
+        -- 버프·패시브 장착 (레벨업/교체 없음 잠정 — 기획 확정 시 확장).
+        -- 패시브는 장착 즉시 스탯 반영 (런 종료 시 ResetForRun이 modifiers째 초기화하므로 해제 불필요).
+        if self:FindSupportIndex(def.skillId) > 0 then return "owned" end
+        if #self.supportSlots >= self.MaxSupportSlots then return "supportFull" end
+        local inst = _SkillInstanceLogic:NewInstance(def.skillId)
+        if inst == nil then return "error" end
+        table.insert(self.supportSlots, inst)
+        if def.attackType == "passive" then
+            local mods = {}
+            for _, e in ipairs(def.supportEffect) do
+                table.insert(mods, { stat = e.stat, type = e.type, value = e.value,
+                    source = "passive:" .. def.skillId })
+            end
+            ---@type PlayerStatComponent
+            local statComp = self.Entity:GetComponent("script.PlayerStatComponent")
+            if statComp == nil then
+                log_error("[SkillLoadout] PlayerStatComponent 없음 — 패시브 미적용: " .. def.skillId)
+            else
+                statComp:ApplyModifiers(mods)
+            end
+        end
+        self:NotifyChanged("supportAcquire")
+        return "acquired"
+    end
+
+    @ExecSpace("ServerOnly")
+    method table CastBuffs()
+        -- 공격 체인 시작 훅: 쿨다운이 아닌 버프를 전부 자동 시전 (지속턴 modifier + 쿨다운 개시).
+        -- 반환 [def] — 호출자(젠 플로우)가 시전 연출에 사용. 패시브는 상시 적용이라 제외.
+        local casted = {}
+        ---@type PlayerStatComponent
+        local statComp = self.Entity:GetComponent("script.PlayerStatComponent")
+        if statComp == nil then
+            log_error("[SkillLoadout] PlayerStatComponent 없음 — 버프 시전 생략")
+            return casted
+        end
+        for _, inst in ipairs(self.supportSlots) do
+            local def = _SkillCatalogLogic:GetSkill(inst.skillId)
+            if def ~= nil and def.attackType == "buff"
+                and (inst.cooldownLeft == nil or inst.cooldownLeft <= 0) then
+                local mods = {}
+                for _, e in ipairs(def.supportEffect) do
+                    table.insert(mods, { stat = e.stat, type = e.type, value = e.value,
+                        source = "buff:" .. def.skillId, duration = "turns:" .. tostring(def.supportTurns) })
+                end
+                statComp:ApplyModifiers(mods)
+                inst.cooldownLeft = def.cooldownTurns
+                table.insert(casted, def)
+                log("[SkillLoadout] 버프 시전: " .. def.name .. " (" .. tostring(def.supportTurns) .. "턴)")
+            end
+        end
+        if #casted > 0 then self:NotifyChanged("buffCast") end
+        return casted
+    end
+
+    @ExecSpace("ServerOnly")
     method string AcquireSkill(string skillId)
         -- 선택지 확정 진입점. 보유 중이면 레벨업(최대 Lv.3), 빈 슬롯이면 장착, 만석이면 "full".
-        -- 반환: acquired | leveled | maxed | full | error
+        -- 반환: acquired | leveled | maxed | full | owned | supportFull | error
         local def = _SkillCatalogLogic:GetSkill(skillId)
         if def == nil then return "error" end
+        if _SkillCatalogLogic:IsSupportSkill(def) then
+            return self:AcquireSupportSkill(def)
+        end
         local idx = self:FindSlotIndex(skillId)
         if idx > 0 then
             if _SkillInstanceLogic:LevelUpInstance(self.attackSlots[idx]) then
@@ -224,6 +312,43 @@ script SkillLoadoutComponent extends Component
         return picked
     end
 
+    property integer RerollLootCost = 1   -- 재추첨 1회 전리품 비용 (기획 미정 — 잠정 1, 횟수 무제한)
+
+    @ExecSpace("Server")
+    method void RequestRerollTagByOrder(integer orderPos)
+        -- 클라(스킬 패널 재추첨 버튼) -> 계승 태그 재추첨. 순서 리스트 위치를 attackSlots 인덱스로 변환.
+        -- 재추첨 성공 후에만 전리품 차감 — 계승 태그가 없는 스킬이면 전리품 보존.
+        if senderUserId ~= self.Entity.PlayerComponent.UserId then
+            log_warning("[SkillLoadout] 비소유자 재추첨 요청 무시: " .. senderUserId)
+            return
+        end
+        local inst = self.order[orderPos]
+        if inst == nil then return end
+        ---@type PlayerJobComponent
+        local jobComp = self.Entity:GetComponent("script.PlayerJobComponent")
+        if jobComp == nil or jobComp.LootCount < self.RerollLootCost then
+            log("[SkillLoadout] 재추첨 거부 — 전리품 부족")
+            return
+        end
+        local slotIndex = 0
+        for i, s in ipairs(self.attackSlots) do
+            if s == inst then slotIndex = i break end
+        end
+        if slotIndex == 0 then return end
+        local picked = self:RerollTag(slotIndex, true)
+        if picked == nil then
+            log("[SkillLoadout] 재추첨 불가 — 계승 태그 없음: " .. inst.skillId)
+            return
+        end
+        if not jobComp:SpendLoot(self.RerollLootCost) then
+            log_error("[SkillLoadout] 재추첨 전리품 차감 실패 — 사전 검사와 불일치")
+            return
+        end
+        local tagDef = _SkillCatalogLogic:GetTagDef(picked)
+        log("[SkillLoadout] 재추첨: " .. inst.skillId .. " -> " .. (tagDef ~= nil and tagDef.name or picked)
+            .. " (전리품 -" .. tostring(self.RerollLootCost) .. ")")
+    end
+
     @ExecSpace("ServerOnly")
     method boolean SetOrder(table slotIndices)
         -- 발동 순서 재설정 — attackSlots 인덱스 순열 (UI 드래그 반영).
@@ -262,8 +387,13 @@ script SkillLoadoutComponent extends Component
 
     @ExecSpace("ServerOnly")
     method void TickCooldowns()
-        -- 턴 종료 훅: 쿨다운 1턴 차감 (통합 지점 I-1). 순서 리스트의 쿨다운 표시 동기화 포함.
+        -- 턴 종료 훅: 공격·서포트 쿨다운 1턴 차감 (통합 지점 I-1). 쿨다운 표시 동기화 포함.
         for _, inst in ipairs(self.attackSlots) do
+            if inst.cooldownLeft ~= nil and inst.cooldownLeft > 0 then
+                inst.cooldownLeft = inst.cooldownLeft - 1
+            end
+        end
+        for _, inst in ipairs(self.supportSlots) do
             if inst.cooldownLeft ~= nil and inst.cooldownLeft > 0 then
                 inst.cooldownLeft = inst.cooldownLeft - 1
             end
