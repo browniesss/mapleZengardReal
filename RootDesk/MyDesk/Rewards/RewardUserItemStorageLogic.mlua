@@ -1,50 +1,211 @@
 @Logic
 script RewardUserItemStorageLogic extends Logic
-    -- 계층 ②: UserDataStorage 기반 유저 보상 수량 조작 레이어.
-    -- 저장 키는 reward_balance:<rewardType>. userId + rewardType 조합으로 보유량을 관리한다.
+    -- 계층 ②: UserDataStorage 기반 보상 엔트리 영속화 레이어.
+    -- 저장 키는 reward_balance:<rewardType>이며, (rewardType, rewardExtra)가 보유량의 유일한 식별자다.
 
-    property any userAmountCache = nil
+    property any userEntryCache = nil
     property any loadedTypeCache = nil
+    property any inFlightByUserId = nil
 
     @ExecSpace("ServerOnly")
     method void OnBeginPlay()
-        -- 사용자별 수량 캐시와 로드 상태 캐시를 초기화한다.
-        self.userAmountCache = {}
+        -- 사용자별 엔트리 캐시, 타입 로드 상태, 진행 중 작업 가드를 초기화한다.
+        self.userEntryCache = {}
         self.loadedTypeCache = {}
+        self.inFlightByUserId = {}
         log("[RewardStorage] ready")
     end
 
+    @ExecSpace("ServerOnly")
     method void EnsureUserState(string userId)
-        -- userId별 캐시 컨테이너를 보장한다.
-        if self.userAmountCache[userId] == nil then
-            self.userAmountCache[userId] = {}
+        -- userId별 캐시와 동시 실행 가드 컨테이너를 보장한다.
+        if self.userEntryCache == nil then
+            self.userEntryCache = {}
+        end
+        if self.loadedTypeCache == nil then
+            self.loadedTypeCache = {}
+        end
+        if self.inFlightByUserId == nil then
+            self.inFlightByUserId = {}
+        end
+        if self.userEntryCache[userId] == nil then
+            self.userEntryCache[userId] = {}
         end
         if self.loadedTypeCache[userId] == nil then
             self.loadedTypeCache[userId] = {}
         end
     end
 
+    @ExecSpace("ServerOnly")
     method string StorageKeyForType(string rewardType)
-        -- rewardType을 UserDataStorage 키 규칙으로 변환한다.
+        -- rewardType을 UserDataStorage 잔액 키 규칙으로 변환한다.
         return "reward_balance:" .. rewardType
     end
 
-    method integer ParseStoredAmount(string rawAmount)
-        -- 저장 문자열을 0 이상의 정수 수량으로 정규화한다.
-        local amount = math.floor(tonumber(rawAmount) or 0)
-        if amount < 0 then
-            return 0
-        end
-        return amount
+    @ExecSpace("ServerOnly")
+    method string ReceiptStorageKey(string purchaseId)
+        -- purchaseId를 사용자 범위 영수증 키 규칙으로 변환한다.
+        return "worldshop_receipt:" .. purchaseId
     end
 
-    method any ReadPageValues(DataStorageItemPages pages)
-        -- 페이지 결과를 key -> value 맵으로 펼친다. 여러 페이지면 끝까지 순회한다.
-        local result = {}
-        if pages == nil then
-            return result
+    @ExecSpace("ServerOnly")
+    method any BuildResult(boolean ok, string reason, table entries, boolean alreadyApplied)
+        -- 저장소 경계의 일관된 결과 객체를 생성한다.
+        return {
+            ok = ok,
+            reason = reason,
+            entries = entries,
+            alreadyApplied = alreadyApplied,
+        }
+    end
+
+    @ExecSpace("ServerOnly")
+    method any BuildFailure(string reason)
+        -- 실패 사유와 빈 엔트리를 갖는 표준 실패 결과를 생성한다.
+        return self:BuildResult(false, reason, {}, false)
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean IsDenseArray(table values)
+        -- 입력 테이블이 1부터 빈칸 없이 이어진 배열인지 확인한다.
+        local count = 0
+        for index, _ in pairs(values) do
+            if type(index) ~= "number" or index < 1 or math.floor(index) ~= index then
+                return false
+            end
+            count = count + 1
+        end
+        return count == #values
+    end
+
+    @ExecSpace("ServerOnly")
+    method any NormalizeUserId(any rawUserId)
+        -- userId를 비어 있지 않은 문자열로 정규화한 결과를 반환한다.
+        if rawUserId == nil then
+            return { ok = false, reason = "invalid_user_id" }
         end
 
+        local userId = tostring(rawUserId)
+        if userId == "" then
+            return { ok = false, reason = "invalid_user_id" }
+        end
+        return { ok = true, userId = userId }
+    end
+
+    @ExecSpace("ServerOnly")
+    method any NormalizeEntryKeys(any rawEntryKeys)
+        -- 조회할 엔트리 키 배열을 중복 없이 정규화한 결과를 반환한다.
+        if type(rawEntryKeys) ~= "table" or not self:IsDenseArray(rawEntryKeys) then
+            return { ok = false, reason = "invalid_entry_keys" }
+        end
+
+        local ordered = {}
+        local seenByType = {}
+        for _, rawEntryKey in ipairs(rawEntryKeys) do
+            if type(rawEntryKey) ~= "table"
+                or type(rawEntryKey.rewardType) ~= "string"
+                or rawEntryKey.rewardType == ""
+                or type(rawEntryKey.rewardExtra) ~= "string" then
+                return { ok = false, reason = "invalid_entry_key" }
+            end
+
+            local rewardType = rawEntryKey.rewardType
+            local rewardExtra = rawEntryKey.rewardExtra
+            if seenByType[rewardType] == nil then
+                seenByType[rewardType] = {}
+            end
+            if seenByType[rewardType][rewardExtra] ~= true then
+                seenByType[rewardType][rewardExtra] = true
+                table.insert(ordered, {
+                    rewardType = rewardType,
+                    rewardExtra = rewardExtra,
+                })
+            end
+        end
+        return { ok = true, entryKeys = ordered }
+    end
+
+    @ExecSpace("ServerOnly")
+    method any NormalizeMutations(any rawMutations)
+        -- 변경 엔트리 배열을 (rewardType, rewardExtra) 기준으로 합산한 결과를 반환한다.
+        if type(rawMutations) ~= "table" or not self:IsDenseArray(rawMutations) or #rawMutations == 0 then
+            return { ok = false, reason = "invalid_mutations" }
+        end
+
+        local normalized = {
+            ordered = {},
+            orderedTypes = {},
+            deltaByType = {},
+        }
+
+        for _, rawMutation in ipairs(rawMutations) do
+            if type(rawMutation) ~= "table"
+                or type(rawMutation.rewardType) ~= "string"
+                or rawMutation.rewardType == ""
+                or type(rawMutation.rewardExtra) ~= "string"
+                or type(rawMutation.delta) ~= "number"
+                or math.floor(rawMutation.delta) ~= rawMutation.delta then
+                return { ok = false, reason = "invalid_mutation" }
+            end
+
+            local rewardType = rawMutation.rewardType
+            local rewardExtra = rawMutation.rewardExtra
+            if normalized.deltaByType[rewardType] == nil then
+                normalized.deltaByType[rewardType] = {}
+                table.insert(normalized.orderedTypes, rewardType)
+            end
+
+            if normalized.deltaByType[rewardType][rewardExtra] == nil then
+                normalized.deltaByType[rewardType][rewardExtra] = 0
+                table.insert(normalized.ordered, {
+                    rewardType = rewardType,
+                    rewardExtra = rewardExtra,
+                })
+            end
+            normalized.deltaByType[rewardType][rewardExtra] =
+                normalized.deltaByType[rewardType][rewardExtra] + rawMutation.delta
+        end
+        return { ok = true, mutations = normalized }
+    end
+
+    @ExecSpace("ServerOnly")
+    method any NormalizeReceipt(any rawReceipt)
+        -- 선택 영수증을 검증하고 저장용 결과 객체를 반환한다.
+        if rawReceipt == nil then
+            return {
+                ok = true,
+                receipt = nil,
+                hasReceipt = false,
+            }
+        end
+
+        if type(rawReceipt) ~= "table"
+            or type(rawReceipt.purchaseId) ~= "string"
+            or rawReceipt.purchaseId == ""
+            or type(rawReceipt.productId) ~= "string"
+            or rawReceipt.productId == ""
+            or #rawReceipt.purchaseId > 80 then
+            return { ok = false, reason = "invalid_receipt" }
+        end
+
+        return {
+            ok = true,
+            receipt = {
+                purchaseId = rawReceipt.purchaseId,
+                productId = rawReceipt.productId,
+            },
+            hasReceipt = true,
+        }
+    end
+
+    @ExecSpace("ServerOnly")
+    method any ReadPageValues(DataStorageItemPages pages)
+        -- 페이지 결과를 끝까지 읽어 key -> value 맵 결과를 반환한다.
+        if pages == nil then
+            return { ok = true, values = {} }
+        end
+
+        local result = {}
         while true do
             for _, item in ipairs(pages:GetCurrentPageDatas()) do
                 if item ~= nil and item.KeyInfo ~= nil then
@@ -59,17 +220,72 @@ script RewardUserItemStorageLogic extends Logic
             local errorCode = pages:LoadNextPageAndWait()
             if errorCode ~= 0 then
                 log_error("[RewardStorage] 페이지 추가 로드 실패 errorCode=" .. tostring(errorCode))
-                break
+                return { ok = false, reason = "storage_read_failed" }
             end
             pages:MoveToNextPageAndWait()
         end
-
-        return result
+        return { ok = true, values = result }
     end
 
     @ExecSpace("ServerOnly")
-    method boolean LoadMissingRewardTypes(string userId, table rewardTypes)
-        -- 아직 캐시되지 않은 rewardType만 UserDataStorage에서 일괄 로드한다.
+    method any DecodeRewardTypeValue(any rawValue)
+        -- 레거시 정수 또는 JSON 엔트리 저장값을 extra -> amount 맵 결과로 복원한다.
+        if rawValue == nil or rawValue == "" then
+            return { ok = true, entries = {} }
+        end
+        if type(rawValue) ~= "string" then
+            return { ok = false, reason = "invalid_stored_value" }
+        end
+
+        if string.sub(rawValue, 1, 1) ~= "{" then
+            local legacyAmount = tonumber(rawValue)
+            if legacyAmount == nil or legacyAmount < 0 or math.floor(legacyAmount) ~= legacyAmount then
+                return { ok = false, reason = "invalid_stored_value" }
+            end
+            return { ok = true, entries = { [""] = legacyAmount } }
+        end
+
+        local decodeOk, decoded = pcall(function()
+            return _HttpService:JSONDecode(rawValue)
+        end)
+        if not decodeOk or type(decoded) ~= "table"
+            or decoded.SchemaVersion ~= 1
+            or type(decoded.Entries) ~= "table"
+            or not self:IsDenseArray(decoded.Entries) then
+            return { ok = false, reason = "invalid_stored_value" }
+        end
+
+        local entryMap = {}
+        for _, storedEntry in ipairs(decoded.Entries) do
+            if type(storedEntry) ~= "table"
+                or type(storedEntry.Extra) ~= "string"
+                or type(storedEntry.Amount) ~= "number"
+                or storedEntry.Amount < 0
+                or math.floor(storedEntry.Amount) ~= storedEntry.Amount
+                or entryMap[storedEntry.Extra] ~= nil then
+                return { ok = false, reason = "invalid_stored_value" }
+            end
+            entryMap[storedEntry.Extra] = storedEntry.Amount
+        end
+        return { ok = true, entries = entryMap }
+    end
+
+    @ExecSpace("ServerOnly")
+    method any CloneEntryMap(table source)
+        -- 타입별 extra -> amount 캐시 맵을 독립된 변경용 사본으로 복제한다.
+        local clone = {}
+        if source == nil then
+            return clone
+        end
+        for rewardExtra, amount in pairs(source) do
+            clone[rewardExtra] = amount
+        end
+        return clone
+    end
+
+    @ExecSpace("ServerOnly")
+    method any LoadMissingRewardTypes(string userId, table rewardTypes)
+        -- 아직 로드하지 않은 보상 타입만 일괄 조회해 캐시에 반영한 결과를 반환한다.
         self:EnsureUserState(userId)
 
         local missingTypes = {}
@@ -78,15 +294,14 @@ script RewardUserItemStorageLogic extends Logic
                 table.insert(missingTypes, rewardType)
             end
         end
-
         if #missingTypes == 0 then
-            return true
+            return { ok = true }
         end
 
         local storage = _DataStorageService:GetUserDataStorage(userId)
         if storage == nil then
             log_error("[RewardStorage] UserDataStorage 획득 실패 userId=" .. tostring(userId))
-            return false
+            return { ok = false, reason = "storage_unavailable" }
         end
 
         local keys = {}
@@ -94,118 +309,355 @@ script RewardUserItemStorageLogic extends Logic
             table.insert(keys, self:StorageKeyForType(rewardType))
         end
 
-        local errorCode, pages = storage:BatchGetAndWait(keys)
+        local readOk, errorCode, pages = pcall(function()
+            local code, resultPages = storage:BatchGetAndWait(keys)
+            return code, resultPages
+        end)
+        if not readOk then
+            log_error("[RewardStorage] BatchGet 예외 userId=" .. tostring(userId))
+            return { ok = false, reason = "storage_read_failed" }
+        end
         if errorCode ~= 0 then
             log_error("[RewardStorage] BatchGet 실패 userId=" .. tostring(userId)
                 .. " types=" .. tostring(#missingTypes)
                 .. " errorCode=" .. tostring(errorCode))
-            return false
+            return { ok = false, reason = "storage_read_failed" }
         end
 
-        local storedValues = self:ReadPageValues(pages)
+        local pageResult = self:ReadPageValues(pages)
+        if not pageResult.ok then
+            return pageResult
+        end
+
+        local parsedByType = {}
         for _, rewardType in ipairs(missingTypes) do
-            local key = self:StorageKeyForType(rewardType)
-            self.userAmountCache[userId][rewardType] = self:ParseStoredAmount(storedValues[key])
+            local decodeResult = self:DecodeRewardTypeValue(
+                pageResult.values[self:StorageKeyForType(rewardType)]
+            )
+            if not decodeResult.ok then
+                log_error("[RewardStorage] 저장값 거부 userId=" .. tostring(userId)
+                    .. " rewardType=" .. rewardType
+                    .. " reason=" .. decodeResult.reason)
+                return decodeResult
+            end
+            parsedByType[rewardType] = decodeResult.entries
+        end
+
+        for _, rewardType in ipairs(missingTypes) do
+            self.userEntryCache[userId][rewardType] = parsedByType[rewardType]
             self.loadedTypeCache[userId][rewardType] = true
         end
-
         log("[RewardStorage] load userId=" .. tostring(userId) .. " types=" .. tostring(#missingTypes))
-        return true
+        return { ok = true }
     end
 
     @ExecSpace("ServerOnly")
-    method any GetUserAmounts(string userId, table rewardTypes)
-        -- 요청한 rewardType들의 현재 수량 맵을 반환한다. 조회 실패 시 nil.
-        local result = {}
-        if rewardTypes == nil or #rewardTypes == 0 then
-            return result
-        end
-
-        if not self:LoadMissingRewardTypes(userId, rewardTypes) then
-            return nil
-        end
-
-        for _, rewardType in ipairs(rewardTypes) do
-            local amount = self.userAmountCache[userId][rewardType]
-            if amount == nil then
-                amount = 0
+    method any EncodeRewardTypeValue(table entryMap)
+        -- 타입별 엔트리 맵을 레거시 정수 또는 JSON 저장 문자열 결과로 인코딩한다.
+        local nonZeroEntries = {}
+        for rewardExtra, rawAmount in pairs(entryMap) do
+            if type(rewardExtra) ~= "string"
+                or type(rawAmount) ~= "number"
+                or rawAmount < 0
+                or math.floor(rawAmount) ~= rawAmount then
+                return { ok = false, reason = "invalid_entry_state" }
             end
-            result[rewardType] = amount
+            if rawAmount > 0 then
+                table.insert(nonZeroEntries, {
+                    Extra = rewardExtra,
+                    Amount = rawAmount,
+                })
+            end
+        end
+
+        if #nonZeroEntries == 0 then
+            return { ok = true, encoded = "0" }
+        end
+        if #nonZeroEntries == 1 and nonZeroEntries[1].Extra == "" then
+            local scalarEncoded = tostring(nonZeroEntries[1].Amount)
+            if #scalarEncoded > 4000 then
+                return { ok = false, reason = "value_too_large" }
+            end
+            return { ok = true, encoded = scalarEncoded }
+        end
+
+        table.sort(nonZeroEntries, function(left, right)
+            return left.Extra < right.Extra
+        end)
+        local encodeOk, encoded = pcall(function()
+            return _HttpService:JSONEncode({
+                SchemaVersion = 1,
+                Entries = nonZeroEntries,
+            })
+        end)
+        if not encodeOk or type(encoded) ~= "string" then
+            return { ok = false, reason = "storage_encode_failed" }
+        end
+        if #encoded > 4000 then
+            return { ok = false, reason = "value_too_large" }
+        end
+        return { ok = true, encoded = encoded }
+    end
+
+    @ExecSpace("ServerOnly")
+    method any GetStoredReceipt(any storage, table receipt)
+        -- 영수증 키를 조회해 저장된 productId 결과를 반환한다.
+        local readOk, errorCode, storedProductId = pcall(function()
+            local code, value = storage:GetAndWait(self:ReceiptStorageKey(receipt.purchaseId))
+            return code, value
+        end)
+        if not readOk then
+            log_error("[RewardStorage] 영수증 조회 예외 purchaseId=" .. receipt.purchaseId)
+            return { ok = false, reason = "storage_read_failed" }
+        end
+        if errorCode ~= 0 then
+            log_error("[RewardStorage] 영수증 조회 실패 purchaseId=" .. receipt.purchaseId
+                .. " errorCode=" .. tostring(errorCode))
+            return { ok = false, reason = "storage_read_failed" }
+        end
+        return { ok = true, productId = storedProductId or "" }
+    end
+
+    @ExecSpace("ServerOnly")
+    method any GetUserRewardEntries(string userId, table entryKeys)
+        -- 요청 키가 선택한 타입별로 기본 엔트리와 저장된 모든 extra 엔트리를 반환한다.
+        local userResult = self:NormalizeUserId(userId)
+        if not userResult.ok then
+            return self:BuildFailure(userResult.reason)
+        end
+        local normalizedUserId = userResult.userId
+
+        local keyResult = self:NormalizeEntryKeys(entryKeys)
+        if not keyResult.ok then
+            return self:BuildFailure(keyResult.reason)
+        end
+        local normalizedKeys = keyResult.entryKeys
+
+        self:EnsureUserState(normalizedUserId)
+        if self.inFlightByUserId[normalizedUserId] == true then
+            return self:BuildFailure("busy")
+        end
+
+        self.inFlightByUserId[normalizedUserId] = true
+        local operationOk, result = pcall(function()
+            local rewardTypes = {}
+            local seenTypes = {}
+            for _, entryKey in ipairs(normalizedKeys) do
+                if seenTypes[entryKey.rewardType] ~= true then
+                    seenTypes[entryKey.rewardType] = true
+                    table.insert(rewardTypes, entryKey.rewardType)
+                end
+            end
+
+            local loadResult = self:LoadMissingRewardTypes(normalizedUserId, rewardTypes)
+            if not loadResult.ok then
+                return self:BuildFailure(loadResult.reason)
+            end
+
+            local entries = {}
+            for _, rewardType in ipairs(rewardTypes) do
+                local typeEntries = self.userEntryCache[normalizedUserId][rewardType]
+                local emittedExtras = {}
+
+                for _, entryKey in ipairs(normalizedKeys) do
+                    if entryKey.rewardType == rewardType and emittedExtras[entryKey.rewardExtra] ~= true then
+                        emittedExtras[entryKey.rewardExtra] = true
+                        table.insert(entries, {
+                            rewardType = rewardType,
+                            rewardExtra = entryKey.rewardExtra,
+                            amount = typeEntries[entryKey.rewardExtra] or 0,
+                        })
+                    end
+                end
+
+                local storedExtras = {}
+                for rewardExtra, _ in pairs(typeEntries) do
+                    if emittedExtras[rewardExtra] ~= true then
+                        table.insert(storedExtras, rewardExtra)
+                    end
+                end
+                table.sort(storedExtras)
+                for _, rewardExtra in ipairs(storedExtras) do
+                    table.insert(entries, {
+                        rewardType = rewardType,
+                        rewardExtra = rewardExtra,
+                        amount = typeEntries[rewardExtra] or 0,
+                    })
+                end
+            end
+            return self:BuildResult(true, "", entries, false)
+        end)
+        self.inFlightByUserId[normalizedUserId] = nil
+
+        if not operationOk or result == nil then
+            log_error("[RewardStorage] 엔트리 조회 예외 userId=" .. normalizedUserId)
+            return self:BuildFailure("storage_read_failed")
         end
         return result
     end
 
     @ExecSpace("ServerOnly")
-    method any ApplyRewardDeltas(string userId, table rewardTypes, table deltaByType)
-        -- rewardType별 증분을 반영하고 영속화한다. 다건 변경은 트랜잭션으로 저장한다.
-        if rewardTypes == nil or #rewardTypes == 0 then
-            return {}
+    method any ApplyRewardTransaction(string userId, table mutations, any receipt)
+        -- 엔트리 증감과 선택 영수증을 하나의 원자적 저장 트랜잭션으로 적용한다.
+        local userResult = self:NormalizeUserId(userId)
+        if not userResult.ok then
+            return self:BuildFailure(userResult.reason)
+        end
+        local normalizedUserId = userResult.userId
+
+        local mutationResult = self:NormalizeMutations(mutations)
+        if not mutationResult.ok then
+            return self:BuildFailure(mutationResult.reason)
+        end
+        local normalizedMutations = mutationResult.mutations
+
+        local receiptResult = self:NormalizeReceipt(receipt)
+        if not receiptResult.ok then
+            return self:BuildFailure(receiptResult.reason)
+        end
+        local normalizedReceipt = receiptResult.receipt
+        local hasReceipt = receiptResult.hasReceipt
+
+        self:EnsureUserState(normalizedUserId)
+        if self.inFlightByUserId[normalizedUserId] == true then
+            return self:BuildFailure("busy")
         end
 
-        if not self:LoadMissingRewardTypes(userId, rewardTypes) then
-            return nil
-        end
+        self.inFlightByUserId[normalizedUserId] = true
+        local operationOk, result = pcall(function()
+            return self:ApplyRewardTransactionLocked(
+                normalizedUserId,
+                normalizedMutations,
+                normalizedReceipt,
+                hasReceipt
+            )
+        end)
+        self.inFlightByUserId[normalizedUserId] = nil
 
+        if not operationOk or result == nil then
+            log_error("[RewardStorage] 트랜잭션 예외 userId=" .. normalizedUserId)
+            return self:BuildFailure("storage_write_failed")
+        end
+        return result
+    end
+
+    @ExecSpace("ServerOnly")
+    method any ApplyRewardTransactionLocked(string userId, table normalizedMutations, any receipt, boolean hasReceipt)
+        -- 잠긴 사용자 캐시를 읽고 검증한 뒤 성공한 저장에만 새 엔트리를 반영한다.
         local storage = _DataStorageService:GetUserDataStorage(userId)
         if storage == nil then
-            log_error("[RewardStorage] UserDataStorage 획득 실패 userId=" .. tostring(userId))
-            return nil
+            log_error("[RewardStorage] UserDataStorage 획득 실패 userId=" .. userId)
+            return self:BuildFailure("storage_unavailable")
         end
 
-        local nextKeyValues = {}
-        local previousAmounts = {}
+        if hasReceipt then
+            local receiptReadResult = self:GetStoredReceipt(storage, receipt)
+            if not receiptReadResult.ok then
+                return self:BuildFailure(receiptReadResult.reason)
+            end
+            if receiptReadResult.productId ~= "" then
+                if receiptReadResult.productId == receipt.productId then
+                    return self:BuildResult(true, "", {}, true)
+                end
+                log_error("[RewardStorage] 영수증 productId 불일치 userId=" .. userId
+                    .. " purchaseId=" .. receipt.purchaseId)
+                return self:BuildFailure("receipt_product_mismatch")
+            end
+
+        end
+        local loadResult = self:LoadMissingRewardTypes(userId, normalizedMutations.orderedTypes)
+        if not loadResult.ok then
+            return self:BuildFailure(loadResult.reason)
+        end
+
+        local stagedByType = {}
+        local changedTypes = {}
+        local resultEntries = {}
+        for _, identity in ipairs(normalizedMutations.ordered) do
+            local rewardType = identity.rewardType
+            local rewardExtra = identity.rewardExtra
+            local delta = normalizedMutations.deltaByType[rewardType][rewardExtra]
+            local currentEntries = self.userEntryCache[userId][rewardType]
+            local beforeAmount = currentEntries[rewardExtra] or 0
+            local afterAmount = beforeAmount + delta
+            if afterAmount < 0 then
+                log_warning("[RewardStorage] 잔액 부족 userId=" .. userId
+                    .. " rewardType=" .. rewardType
+                    .. " rewardExtra=" .. rewardExtra)
+                return self:BuildFailure("insufficient_balance")
+            end
+
+            if stagedByType[rewardType] == nil then
+                stagedByType[rewardType] = self:CloneEntryMap(currentEntries)
+            end
+            stagedByType[rewardType][rewardExtra] = afterAmount
+            if afterAmount ~= beforeAmount then
+                changedTypes[rewardType] = true
+            end
+
+            table.insert(resultEntries, {
+                rewardType = rewardType,
+                rewardExtra = rewardExtra,
+                delta = delta,
+                beforeAmount = beforeAmount,
+                afterAmount = afterAmount,
+            })
+        end
+
+        local keyValues = {}
         local changedCount = 0
+        for _, rewardType in ipairs(normalizedMutations.orderedTypes) do
+            if changedTypes[rewardType] == true then
+                local encodeResult = self:EncodeRewardTypeValue(stagedByType[rewardType])
+                if not encodeResult.ok then
+                    log_error("[RewardStorage] 잔액 인코딩 거부 userId=" .. userId
+                        .. " rewardType=" .. rewardType
+                        .. " reason=" .. encodeResult.reason)
+                    return self:BuildFailure(encodeResult.reason)
+                end
+                keyValues[self:StorageKeyForType(rewardType)] = encodeResult.encoded
+                changedCount = changedCount + 1
+            end
+        end
 
-        for _, rewardType in ipairs(rewardTypes) do
-            local delta = math.floor(tonumber(deltaByType[rewardType]) or 0)
-            if delta > 0 then
-                local beforeAmount = self.userAmountCache[userId][rewardType] or 0
-                local afterAmount = beforeAmount + delta
-                previousAmounts[rewardType] = beforeAmount
-                if afterAmount ~= beforeAmount then
-                    self.userAmountCache[userId][rewardType] = afterAmount
-                    nextKeyValues[self:StorageKeyForType(rewardType)] = tostring(afterAmount)
-                    changedCount = changedCount + 1
+        if hasReceipt then
+            keyValues[self:ReceiptStorageKey(receipt.purchaseId)] = receipt.productId
+        end
+
+        local transactionKeyCount = changedCount + (hasReceipt and 1 or 0)
+        if transactionKeyCount > 20 then
+            log_error("[RewardStorage] 트랜잭션 키 한도 초과 userId=" .. userId
+                .. " keys=" .. tostring(transactionKeyCount))
+            return self:BuildFailure("transaction_key_limit")
+        end
+
+        if transactionKeyCount > 0 then
+            local writeOk, errorCode = pcall(function()
+                local code, _ = storage:TransactSetAndWait(keyValues)
+                return code
+            end)
+            if not writeOk then
+                log_error("[RewardStorage] TransactSet 예외 userId=" .. userId)
+                return self:BuildFailure("storage_write_failed")
+            end
+            if errorCode ~= 0 then
+                log_error("[RewardStorage] TransactSet 실패 userId=" .. userId
+                    .. " keys=" .. tostring(transactionKeyCount)
+                    .. " errorCode=" .. tostring(errorCode))
+                return self:BuildFailure("storage_write_failed")
+            end
+
+            for _, rewardType in ipairs(normalizedMutations.orderedTypes) do
+                if changedTypes[rewardType] == true then
+                    self.userEntryCache[userId][rewardType] = stagedByType[rewardType]
+                    self.loadedTypeCache[userId][rewardType] = true
                 end
             end
+            log("[RewardStorage] save userId=" .. userId
+                .. " balances=" .. tostring(changedCount)
+                .. " receipt=" .. tostring(hasReceipt))
         end
 
-        if changedCount == 0 then
-            return self:GetUserAmounts(userId, rewardTypes)
-        end
-
-        local errorCode = 0
-        if changedCount == 1 then
-            local onlyKey = nil
-            local onlyValue = nil
-            for key, value in pairs(nextKeyValues) do
-                onlyKey = key
-                onlyValue = value
-                break
-            end
-            errorCode = storage:SetAndWait(onlyKey, onlyValue)
-        else
-            errorCode, _ = storage:TransactSetAndWait(nextKeyValues)
-        end
-
-        if errorCode ~= 0 then
-            for _, rewardType in ipairs(rewardTypes) do
-                if previousAmounts[rewardType] ~= nil then
-                    self.userAmountCache[userId][rewardType] = previousAmounts[rewardType]
-                end
-            end
-            log_error("[RewardStorage] save 실패 userId=" .. tostring(userId)
-                .. " changed=" .. tostring(changedCount)
-                .. " errorCode=" .. tostring(errorCode))
-            return nil
-        end
-
-        local result = {}
-        for _, rewardType in ipairs(rewardTypes) do
-            result[rewardType] = self.userAmountCache[userId][rewardType] or 0
-        end
-
-        log("[RewardStorage] save userId=" .. tostring(userId) .. " changed=" .. tostring(changedCount))
-        return result
+        return self:BuildResult(true, "", resultEntries, false)
     end
 end

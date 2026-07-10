@@ -1,7 +1,6 @@
 @Logic
 script RewardServiceLogic extends Logic
-    -- 계층 ③: 보상 지급 비즈니스 로직 레이어.
-    -- 타입 검증, 다건 지급 집계, 필터 조회를 조합해 외부 소비자가 바로 쓸 수 있는 API를 제공한다.
+    -- 계층 ③: 검증된 보상·구매·재화 교환을 하나의 저장 트랜잭션으로 연결하는 서버 서비스다.
 
     @ExecSpace("ServerOnly")
     method void OnBeginPlay()
@@ -9,8 +8,24 @@ script RewardServiceLogic extends Logic
         log("[RewardService] ready")
     end
 
-    method any NormalizeUserId(any rawUserId)
-        -- 입력 userId를 비어있지 않은 문자열로 정규화한다. 불가하면 nil.
+    @ExecSpace("ServerOnly")
+    method any MakeFailure(string reason)
+        -- 호출자에게 빈 엔트리의 표준 실패 결과를 만든다.
+        local normalizedReason = reason
+        if normalizedReason == nil or normalizedReason == "" then
+            normalizedReason = "unknown_failure"
+        end
+        return {
+            ok = false,
+            reason = normalizedReason,
+            entries = {},
+            alreadyApplied = false,
+        }
+    end
+
+    @ExecSpace("ServerOnly")
+    method string NormalizeUserId(any rawUserId)
+        -- 입력 userId를 비어 있지 않은 문자열로 정규화하고 실패하면 nil을 반환한다.
         if rawUserId == nil then
             log_error("[RewardService] userId nil")
             return nil
@@ -24,76 +39,110 @@ script RewardServiceLogic extends Logic
         return userId
     end
 
-    method integer NormalizeGrantAmount(any rawAmount)
-        -- 지급 수량을 양의 정수로 정규화한다. 0 이하/비수치는 0.
+    @ExecSpace("ServerOnly")
+    method integer NormalizePositiveAmount(any rawAmount)
+        -- 입력 수량을 양의 정수로 한 번 정규화하고 유효하지 않으면 0을 반환한다.
         local amount = math.floor(tonumber(rawAmount) or 0)
-        if amount < 0 then
+        if amount <= 0 then
             return 0
         end
         return amount
     end
 
-    method boolean AppendGrantEntry(any normalized, any rawRewardType, any rawAmount)
-        -- 보상 1건을 rewardType별 합산 구조에 누적한다. 유효하지 않으면 false.
+    @ExecSpace("ServerOnly")
+    method boolean AppendMutation(any normalized, any rawRewardType, any rawRewardExtra, any rawAmount)
+        -- 보상 식별자와 extra별로 양의 지급 수량을 합산 mutation에 추가한다.
         if type(rawRewardType) ~= "string" or rawRewardType == "" then
             log_error("[RewardService] 잘못된 rewardType 입력")
             return false
         end
+        if type(rawRewardExtra) ~= "string" then
+            log_error("[RewardService] 잘못된 rewardExtra rewardType=" .. rawRewardType)
+            return false
+        end
 
-        local amount = self:NormalizeGrantAmount(rawAmount)
-        if amount <= 0 then
-            log_error("[RewardService] 잘못된 지급 수량 rewardType=" .. tostring(rawRewardType)
+        local amount = self:NormalizePositiveAmount(rawAmount)
+        if amount == 0 then
+            log_error("[RewardService] 잘못된 지급 수량 rewardType=" .. rawRewardType
                 .. " amount=" .. tostring(rawAmount))
             return false
         end
 
-        if normalized.deltaByType[rawRewardType] == nil then
-            normalized.deltaByType[rawRewardType] = 0
-            table.insert(normalized.orderedTypes, rawRewardType)
+        local mutationsByExtra = normalized.mutationByType[rawRewardType]
+        if mutationsByExtra == nil then
+            mutationsByExtra = {}
+            normalized.mutationByType[rawRewardType] = mutationsByExtra
         end
-        normalized.deltaByType[rawRewardType] = normalized.deltaByType[rawRewardType] + amount
+
+        local mutation = mutationsByExtra[rawRewardExtra]
+        if mutation == nil then
+            mutation = {
+                rewardType = rawRewardType,
+                rewardExtra = rawRewardExtra,
+                delta = 0,
+            }
+            mutationsByExtra[rawRewardExtra] = mutation
+            table.insert(normalized.mutations, mutation)
+        end
+        mutation.delta += amount
         return true
     end
 
+    @ExecSpace("ServerOnly")
     method any NormalizeGrantRewards(any rewards)
-        -- 배열([{rewardType,amount}]) 또는 맵({rewardType=amount}) 입력을 정규화한다.
+        -- 신규 entry 배열 또는 Mail 호환 legacy rewardType 맵을 엄격한 mutation 배열로 정규화한다.
         if type(rewards) ~= "table" then
             log_error("[RewardService] rewards는 table 이어야 함")
             return nil
         end
 
         local normalized = {
-            orderedTypes = {},
-            deltaByType = {},
+            mutations = {},
+            mutationByType = {},
         }
+        local arrayMode = rewards[1] ~= nil
 
-        local hasArrayEntries = false
-        for _, entry in ipairs(rewards) do
-            hasArrayEntries = true
-            if type(entry) ~= "table" then
-                log_error("[RewardService] 배열형 rewards 항목은 table 이어야 함")
+        if arrayMode then
+            local arrayLength = #rewards
+            local arrayCount = 0
+            for key, _ in pairs(rewards) do
+                if type(key) ~= "number"
+                    or math.floor(key) ~= key
+                    or key < 1
+                    or key > arrayLength then
+                    log_error("[RewardService] rewards 배열과 legacy 맵 입력을 함께 사용할 수 없음")
+                    return nil
+                end
+                arrayCount += 1
+            end
+            if arrayCount ~= arrayLength then
+                log_error("[RewardService] rewards 배열 인덱스가 연속되지 않음")
                 return nil
             end
-            if not self:AppendGrantEntry(normalized, entry.rewardType, entry.amount) then
-                return nil
+
+            for index = 1, arrayLength do
+                local entry = rewards[index]
+                if type(entry) ~= "table" then
+                    log_error("[RewardService] 배열형 rewards 항목은 table 이어야 함")
+                    return nil
+                end
+                if not self:AppendMutation(normalized, entry.rewardType, entry.rewardExtra, entry.amount) then
+                    return nil
+                end
+            end
+        else
+            for rewardType, amount in pairs(rewards) do
+                if type(rewardType) ~= "string" then
+                    log_error("[RewardService] legacy rewards 맵의 rewardType은 string 이어야 함")
+                    return nil
+                end
+                if not self:AppendMutation(normalized, rewardType, "", amount) then
+                    return nil
+                end
             end
         end
 
-        if hasArrayEntries then
-            if #normalized.orderedTypes == 0 then
-                log_error("[RewardService] 지급할 reward 항목이 없음")
-                return nil
-            end
-            return normalized
-        end
-
-        for rewardType, amount in pairs(rewards) do
-            if not self:AppendGrantEntry(normalized, rewardType, amount) then
-                return nil
-            end
-        end
-
-        if #normalized.orderedTypes == 0 then
+        if #normalized.mutations == 0 then
             log_error("[RewardService] 지급할 reward 항목이 없음")
             return nil
         end
@@ -101,31 +150,265 @@ script RewardServiceLogic extends Logic
     end
 
     @ExecSpace("ServerOnly")
-    method table GetUserItems(string userId, any rewardTypeFilter)
-        -- 사용자 보유 보상을 조회한다. 필터가 nil이면 전체, 있으면 해당 타입만 반환한다.
-        local normalizedUserId = self:NormalizeUserId(userId)
-        if normalizedUserId == nil then
-            return {}
+    method string ValidateMutationRewardTypes(table mutations)
+        -- mutation 전체의 rewardType 존재와 rewardExtra 문자열 계약을 확인한다.
+        if mutations == nil or #mutations == 0 then
+            return "missing_rewards"
         end
 
-        local defs = _RewardTypeCatalogLogic:GetRewardTypes(rewardTypeFilter)
-        local rewardTypeIds = {}
-        for _, def in ipairs(defs) do
-            table.insert(rewardTypeIds, def.rewardType)
+        for _, mutation in ipairs(mutations) do
+            if type(mutation) ~= "table"
+                or type(mutation.rewardType) ~= "string"
+                or mutation.rewardType == ""
+                or type(mutation.rewardExtra) ~= "string" then
+                return "invalid_reward_entry"
+            end
+            if not _RewardTypeCatalogLogic:HasRewardType(mutation.rewardType) then
+                log_error("[RewardService] 알 수 없는 rewardType: " .. mutation.rewardType)
+                return "unknown_reward_type"
+            end
         end
+        return nil
+    end
 
-        local amounts = _RewardUserItemStorageLogic:GetUserAmounts(normalizedUserId, rewardTypeIds)
-        if amounts == nil then
-            return {}
+    @ExecSpace("ServerOnly")
+    method any DecorateStorageEntries(any storageEntries)
+        -- 저장소 transaction 엔트리에 보상 라벨을 결합해 공개 결과 엔트리로 변환한다.
+        if type(storageEntries) ~= "table" then
+            return nil
         end
 
         local result = {}
-        for _, def in ipairs(defs) do
+        for _, entry in ipairs(storageEntries) do
+            if type(entry) ~= "table"
+                or type(entry.rewardType) ~= "string"
+                or entry.rewardType == ""
+                or type(entry.rewardExtra) ~= "string" then
+                return nil
+            end
+
+            local def = _RewardTypeCatalogLogic:GetRewardType(entry.rewardType)
+            if def == nil then
+                return nil
+            end
+
+            local beforeAmount = math.floor(tonumber(entry.beforeAmount) or 0)
+            local afterAmount = math.floor(tonumber(entry.afterAmount) or 0)
+            if beforeAmount < 0 or afterAmount < 0 then
+                return nil
+            end
+
             table.insert(result, {
-                rewardType = def.rewardType,
+                rewardType = entry.rewardType,
+                rewardExtra = entry.rewardExtra,
                 label = def.label,
-                amount = amounts[def.rewardType] or 0,
+                delta = math.floor(tonumber(entry.delta) or 0),
+                beforeAmount = beforeAmount,
+                afterAmount = afterAmount,
             })
+        end
+        return result
+    end
+
+    @ExecSpace("ServerOnly")
+    method any BuildTransactionResult(any storageResult)
+        -- 저장소 응답을 동일한 서비스 성공·실패 result shape로 변환한다.
+        if type(storageResult) ~= "table" then
+            return self:MakeFailure("storage_unavailable")
+        end
+        if storageResult.ok ~= true then
+            local reason = storageResult.reason
+            if type(reason) ~= "string" or reason == "" then
+                reason = "storage_failed"
+            end
+            return self:MakeFailure(reason)
+        end
+
+        local entries = self:DecorateStorageEntries(storageResult.entries)
+        if entries == nil then
+            return self:MakeFailure("storage_invalid_entries")
+        end
+
+        return {
+            ok = true,
+            reason = "",
+            entries = entries,
+            alreadyApplied = storageResult.alreadyApplied == true,
+        }
+    end
+
+    @ExecSpace("ServerOnly")
+    method any BuildPackageRewardMutations(any package, boolean requirePaidCurrency)
+        -- 패키지 보상 전체를 검증된 양의 저장 mutation 배열로 변환한다.
+        if type(package) ~= "table" or type(package.rewards) ~= "table" or #package.rewards == 0 then
+            return nil
+        end
+
+        local mutations = {}
+        for _, reward in ipairs(package.rewards) do
+            if type(reward) ~= "table"
+                or type(reward.rewardType) ~= "string"
+                or reward.rewardType == ""
+                or type(reward.rewardExtra) ~= "string" then
+                return nil
+            end
+
+            local amount = self:NormalizePositiveAmount(reward.amount)
+            if amount == 0 or not _RewardTypeCatalogLogic:HasRewardType(reward.rewardType) then
+                return nil
+            end
+            if requirePaidCurrency
+                and _RewardTypeCatalogLogic:IsCurrencyType(reward.rewardType)
+                and _RewardTypeCatalogLogic:GetCurrencyClass(reward.rewardType) ~= "paid" then
+                return nil
+            end
+
+            table.insert(mutations, {
+                rewardType = reward.rewardType,
+                rewardExtra = reward.rewardExtra,
+                delta = amount,
+            })
+        end
+        return mutations
+    end
+
+    @ExecSpace("ServerOnly")
+    method any BuildExchangeMutations(any package)
+        -- 유효한 교환 패키지에서 primary 차감과 secondary 지급을 하나의 mutation 배열로 만든다.
+        if type(package) ~= "table"
+            or package.productType ~= "currency_exchange"
+            or type(package.paymentRewardType) ~= "string"
+            or package.paymentRewardType == "" then
+            return nil
+        end
+
+        local price = self:NormalizePositiveAmount(package.productPrice)
+        local paymentRewardType = package.paymentRewardType
+        if price == 0
+            or not _RewardTypeCatalogLogic:IsCurrencyType(paymentRewardType)
+            or _RewardTypeCatalogLogic:GetCurrencyTier(paymentRewardType) ~= "primary" then
+            return nil
+        end
+
+        local paymentClass = _RewardTypeCatalogLogic:GetCurrencyClass(paymentRewardType)
+        if paymentClass == nil
+            or _RewardTypeCatalogLogic:FindCurrencyType("primary", paymentClass) ~= paymentRewardType then
+            return nil
+        end
+
+        local rewards = self:BuildPackageRewardMutations(package, false)
+        if rewards == nil then
+            return nil
+        end
+
+        local currencyRewardCount = 0
+        for _, reward in ipairs(rewards) do
+            if _RewardTypeCatalogLogic:IsCurrencyType(reward.rewardType) then
+                currencyRewardCount += 1
+                if _RewardTypeCatalogLogic:GetCurrencyTier(reward.rewardType) ~= "secondary"
+                    or _RewardTypeCatalogLogic:GetCurrencyClass(reward.rewardType) ~= paymentClass then
+                    return nil
+                end
+            end
+        end
+        if currencyRewardCount ~= 1 then
+            return nil
+        end
+
+        local mutations = {
+            {
+                rewardType = paymentRewardType,
+                rewardExtra = "",
+                delta = -price,
+            },
+        }
+        for _, reward in ipairs(rewards) do
+            table.insert(mutations, reward)
+        end
+        return mutations
+    end
+
+    @ExecSpace("ServerOnly")
+    method table GetUserItems(string userId, any rewardTypeFilter)
+        -- 필터의 모든 보상 타입과 각 rewardExtra 보유량을 평면 스냅샷으로 반환한다.
+        local normalizedUserId = self:NormalizeUserId(userId)
+        if normalizedUserId == nil then
+            return nil
+        end
+
+        local defs = _RewardTypeCatalogLogic:GetRewardTypes(rewardTypeFilter)
+        if #defs == 0 then
+            return {}
+        end
+
+        local entryKeys = {}
+        local defByType = {}
+        for _, def in ipairs(defs) do
+            defByType[def.rewardType] = def
+            table.insert(entryKeys, {
+                rewardType = def.rewardType,
+                rewardExtra = "",
+            })
+        end
+
+        local storageResult = _RewardUserItemStorageLogic:GetUserRewardEntries(normalizedUserId, entryKeys)
+        if type(storageResult) ~= "table" or storageResult.ok ~= true then
+            local reason = type(storageResult) == "table" and storageResult.reason or "storage_unavailable"
+            log_error("[RewardService] query failed userId=" .. normalizedUserId
+                .. " reason=" .. tostring(reason))
+            return nil
+        end
+        if type(storageResult.entries) ~= "table" then
+            log_error("[RewardService] storage query returned missing entries")
+            return nil
+        end
+
+        local result = {}
+        local seenByType = {}
+        for _, entry in ipairs(storageResult.entries) do
+            if type(entry) ~= "table"
+                or type(entry.rewardType) ~= "string"
+                or type(entry.rewardExtra) ~= "string"
+                or defByType[entry.rewardType] == nil then
+                log_error("[RewardService] storage query returned invalid entry")
+                return nil
+            end
+
+            local entriesByExtra = seenByType[entry.rewardType]
+            if entriesByExtra == nil then
+                entriesByExtra = {}
+                seenByType[entry.rewardType] = entriesByExtra
+            end
+            if entriesByExtra[entry.rewardExtra] then
+                log_error("[RewardService] storage query returned duplicate entry")
+                return nil
+            end
+            entriesByExtra[entry.rewardExtra] = true
+
+            local amount = math.floor(tonumber(entry.amount) or 0)
+            if amount < 0 then
+                log_error("[RewardService] storage query returned negative amount")
+                return nil
+            end
+
+            table.insert(result, {
+                rewardType = entry.rewardType,
+                rewardExtra = entry.rewardExtra,
+                label = defByType[entry.rewardType].label,
+                amount = amount,
+            })
+        end
+
+        for _, def in ipairs(defs) do
+            local entriesByExtra = seenByType[def.rewardType]
+            if entriesByExtra == nil or not entriesByExtra[""] then
+                table.insert(result, {
+                    rewardType = def.rewardType,
+                    rewardExtra = "",
+                    label = def.label,
+                    amount = 0,
+                })
+            end
         end
 
         log("[RewardService] query userId=" .. normalizedUserId .. " count=" .. tostring(#result))
@@ -133,52 +416,120 @@ script RewardServiceLogic extends Logic
     end
 
     @ExecSpace("ServerOnly")
-    method table GrantRewards(string userId, table rewards)
-        -- 여러 rewardType 지급을 검증·집계한 뒤 저장소에 반영하고 변경 결과를 반환한다.
+    method any GrantRewards(string userId, table rewards)
+        -- legacy 맵과 신규 entry 배열의 보상을 검증해 receipt 없는 원자 transaction으로 지급한다.
         local normalizedUserId = self:NormalizeUserId(userId)
         if normalizedUserId == nil then
-            return {}
+            return self:MakeFailure("invalid_user_id")
         end
 
         local normalized = self:NormalizeGrantRewards(rewards)
         if normalized == nil then
-            return {}
+            return self:MakeFailure("invalid_rewards")
         end
 
-        for _, rewardType in ipairs(normalized.orderedTypes) do
-            if not _RewardTypeCatalogLogic:HasRewardType(rewardType) then
-                log_error("[RewardService] 알 수 없는 rewardType 지급 시도: " .. rewardType)
-                return {}
-            end
+        local validationReason = self:ValidateMutationRewardTypes(normalized.mutations)
+        if validationReason ~= nil then
+            return self:MakeFailure(validationReason)
         end
 
-        local beforeAmounts = _RewardUserItemStorageLogic:GetUserAmounts(normalizedUserId, normalized.orderedTypes)
-        if beforeAmounts == nil then
-            return {}
-        end
-
-        local afterAmounts = _RewardUserItemStorageLogic:ApplyRewardDeltas(
+        local storageResult = _RewardUserItemStorageLogic:ApplyRewardTransaction(
             normalizedUserId,
-            normalized.orderedTypes,
-            normalized.deltaByType
+            normalized.mutations,
+            nil
         )
-        if afterAmounts == nil then
-            return {}
+        local result = self:BuildTransactionResult(storageResult)
+        if result.ok then
+            log("[RewardService] grant userId=" .. normalizedUserId
+                .. " entries=" .. tostring(#result.entries))
         end
-
-        local result = {}
-        for _, rewardType in ipairs(normalized.orderedTypes) do
-            local def = _RewardTypeCatalogLogic:GetRewardType(rewardType)
-            table.insert(result, {
-                rewardType = rewardType,
-                label = def ~= nil and def.label or rewardType,
-                grantedAmount = normalized.deltaByType[rewardType],
-                beforeAmount = beforeAmounts[rewardType] or 0,
-                afterAmount = afterAmounts[rewardType] or 0,
-            })
-        end
-
-        log("[RewardService] grant userId=" .. normalizedUserId .. " types=" .. tostring(#result))
         return result
+    end
+
+    @ExecSpace("ServerOnly")
+    method any GrantWorldShopPurchase(string userId, string purchaseId, string productId)
+        -- 유효한 인앱 패키지만 영수증 transaction으로 지급해 중복 native 콜백을 멱등 처리한다.
+        local normalizedUserId = self:NormalizeUserId(userId)
+        if normalizedUserId == nil then
+            return self:MakeFailure("invalid_user_id")
+        end
+        if type(purchaseId) ~= "string" or purchaseId == "" then
+            return self:MakeFailure("invalid_purchase_id")
+        end
+        if type(productId) ~= "string" or productId == "" then
+            return self:MakeFailure("invalid_product_id")
+        end
+
+        local package = _PackageCatalogLogic:GetPackage(productId)
+        if package == nil or package.productType ~= "in_app_purchase" then
+            return self:MakeFailure("invalid_in_app_package")
+        end
+
+        local mutations = self:BuildPackageRewardMutations(package, true)
+        if mutations == nil then
+            return self:MakeFailure("invalid_in_app_package_rewards")
+        end
+
+        local storageResult = _RewardUserItemStorageLogic:ApplyRewardTransaction(
+            normalizedUserId,
+            mutations,
+            {
+                purchaseId = purchaseId,
+                productId = productId,
+            }
+        )
+        local result = self:BuildTransactionResult(storageResult)
+        if result.ok then
+            log("[RewardService] worldshop grant userId=" .. normalizedUserId
+                .. " productId=" .. productId
+                .. " alreadyApplied=" .. tostring(result.alreadyApplied))
+        end
+        return result
+    end
+
+    @ExecSpace("ServerOnly")
+    method any ExchangeCurrency(string userId, string productId)
+        -- currency_exchange 패키지의 primary 차감과 최종 보상을 단일 원자 transaction으로 적용한다.
+        local normalizedUserId = self:NormalizeUserId(userId)
+        if normalizedUserId == nil then
+            return self:MakeFailure("invalid_user_id")
+        end
+        if type(productId) ~= "string" or productId == "" then
+            return self:MakeFailure("invalid_product_id")
+        end
+
+        local package = _PackageCatalogLogic:GetPackage(productId)
+        if package == nil or package.productType ~= "currency_exchange" then
+            return self:MakeFailure("invalid_currency_exchange_package")
+        end
+
+        local mutations = self:BuildExchangeMutations(package)
+        if mutations == nil then
+            return self:MakeFailure("invalid_currency_exchange_package")
+        end
+
+        local storageResult = _RewardUserItemStorageLogic:ApplyRewardTransaction(
+            normalizedUserId,
+            mutations,
+            nil
+        )
+        local result = self:BuildTransactionResult(storageResult)
+        if result.ok then
+            log("[RewardService] exchange userId=" .. normalizedUserId
+                .. " productId=" .. productId
+                .. " entries=" .. tostring(#result.entries))
+        end
+        return result
+    end
+
+    @ExecSpace("Server")
+    method void RequestCurrencyExchange(string productId)
+        -- 클라이언트 요청자의 userId만 사용해 서버 권한 재화 교환을 실행한다.
+        local result = self:ExchangeCurrency(senderUserId, productId)
+        if not result.ok then
+            log_warning("[RewardService] exchange request failed userId=" .. tostring(senderUserId)
+                .. " productId=" .. tostring(productId)
+                .. " reason=" .. tostring(result.reason))
+        end
     end
 end
