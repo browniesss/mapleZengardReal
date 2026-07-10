@@ -5,12 +5,12 @@ script LobbyUIController extends Component
 
     property ButtonComponent btnStart = "c509612e-ab2a-4792-bc4d-4ac228c1f328"
     property Entity lobbyPanel = "fc6f9124-6d50-4357-9b34-47dd46f40c87"
-    property Entity jobPanel = "a9829cfe-92b2-40d5-ab0b-9c1e88138432"
-    property ButtonComponent btnJobWar = "468b5bdd-5cf2-4cb3-8223-5c8a07b4392d"
-    property ButtonComponent btnJobMag = "8a9f33b6-3253-41c0-8aee-ae786ed5c77e"
-    property ButtonComponent btnJobArc = "edaaa4ed-232b-42fe-8f95-ec2e23ca8447"
-    property ButtonComponent btnJobThf = "d0039571-d451-4fd7-a08d-bdc492780ab7"
-    property ButtonComponent btnJobBack = "bf47d870-b924-444b-a6d1-d2a88cdfe4ac"
+    property Entity jobPanel = "650a58ba-2820-4256-91a1-2e69b2c38597"
+    property ButtonComponent btnJobWar = "a949fb37-e798-4451-86fb-e6cb09042985"
+    property ButtonComponent btnJobMag = "67e26aff-5c25-43e6-a18b-b7e4af4887a7"
+    property ButtonComponent btnJobArc = "e6b5b38b-6db8-4d9f-b852-72d3f58594c1"
+    property ButtonComponent btnJobThf = "2c37efe0-a5c3-4b53-9273-409f01147221"
+    property ButtonComponent btnJobBack = "2f6d9d9d-4c11-4535-b913-1a3976824127"
     property any handlers = nil
 
     @ExecSpace("ClientOnly")
