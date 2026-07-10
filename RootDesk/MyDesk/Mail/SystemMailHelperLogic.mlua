@@ -135,7 +135,7 @@ script SystemMailHelperLogic extends Logic
         end
         local window = self:ResolveWindow(retentionDays)
 
-        _GMMailLogic:SavePlayerMail(
+        local saved = _GMMailLogic:SavePlayerMail(
             userId,
             title,
             message,
@@ -145,6 +145,10 @@ script SystemMailHelperLogic extends Logic
             window.endDate,
             items
         )
+        if saved ~= true then
+            log_error("[SystemMail] player send failed userId=" .. tostring(userId) .. " title=" .. title)
+            return false
+        end
         log("[SystemMail] player sent userId=" .. tostring(userId)
             .. " title=" .. title
             .. " items=" .. tostring(#items))

@@ -23,7 +23,7 @@ script UIGMMailTool_ItemInfo extends Component
 	end
 
 	@ExecSpace("ClientOnly")
-	method void Apply(ItemBase item, integer index, any onRemove)
+	method void Apply(any item, integer index, any onRemove)
 		self.onRemove = onRemove
 		self.ItemId.TextComponent.Text = item.ItemID
 		self.ItemCount.TextComponent.Text = tostring(item.ItemCount)

@@ -14,55 +14,140 @@ script PlayerMail extends Component
 	property table ScheduledMails = {}
 
 	property boolean IsSaveDB = false
-
-	property boolean ResetStagingDB = false
+	property table PendingStagingUUIDs = {}
+	property boolean MailboxOperationLocked = false
+	property table PendingMailboxOperations = {}
 
 	property any handleReceiveMailItems = nil
 
 	@ExecSpace("ServerOnly")
+	method void EnqueueMailboxOperation(any operation)
+		-- Serializes every mailbox mutation for this player.
+		if operation == nil then
+			return
+		end
+		if self.MailboxOperationLocked then
+			table.insert(self.PendingMailboxOperations, operation)
+			return
+		end
+		self.MailboxOperationLocked = true
+		operation()
+		self:DrainMailboxOperations()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void DrainMailboxOperations()
+		-- Runs queued mailbox work after the active operation completes.
+		while #self.PendingMailboxOperations > 0 do
+			local operation = table.remove(self.PendingMailboxOperations, 1)
+			operation()
+		end
+		self.MailboxOperationLocked = false
+	end
+
+	@ExecSpace("ServerOnly")
+	method string SerializePersistentState(table mails, table scheduledMails, integer globalReadIndex)
+		-- Serializes a mailbox snapshot without mutating dirty state.
+		local total = {}
+		local serializedMails = {}
+		for _, m in pairs(mails) do
+			---@type Mail
+			local mail = m
+			table.insert(serializedMails, mail:Serialize())
+		end
+		if not _Util:IsNilorEmptyTable(serializedMails) then
+			total["Mails"] = serializedMails
+		end
+
+		local serializedScheduledMails = {}
+		for _, m in pairs(scheduledMails) do
+			---@type MailBase
+			local mail = m
+			table.insert(serializedScheduledMails, mail:Serialize())
+		end
+		if not _Util:IsNilorEmptyTable(serializedScheduledMails) then
+			total["ScheduledMails"] = serializedScheduledMails
+		end
+		total["GlobalReadIndex"] = globalReadIndex
+		return _HttpService:JSONEncode(total)
+	end
+
+	@ExecSpace("ServerOnly")
+	method table BuildStagingRefreshSnapshot(table stagingPayload, integer currentTime)
+		-- Builds a temporary staged-mail merge without exposing it to clients.
+		local snapshot = {
+			Mails = {},
+			ScheduledMails = {},
+			ConsumedUUIDs = {},
+			AddedCount = 0,
+		}
+		for uuid, mail in pairs(self.Mails) do
+			snapshot.Mails[uuid] = mail
+		end
+		for uuid, mail in pairs(self.ScheduledMails) do
+			snapshot.ScheduledMails[uuid] = mail
+		end
+
+		local revokedMails = stagingPayload["RevokedMails"]
+		local stagingMails = stagingPayload["StagingMails"]
+		if _Util:IsNilorEmptyTable(stagingMails) then
+			return snapshot
+		end
+
+		for uuid, data in pairs(stagingMails) do
+			snapshot.ConsumedUUIDs[uuid] = true
+			if snapshot.Mails[uuid] ~= nil or snapshot.ScheduledMails[uuid] ~= nil then
+				continue
+			end
+			local stagingMail = MailBase()
+			stagingMail:Deserialize(data)
+			if stagingMail.UUID == nil or stagingMail.UUID == "" then
+				continue
+			end
+			if _GMMailLogic:IsRevokedMail(revokedMails, stagingMail.UUID) or stagingMail.EndDate <= currentTime then
+				continue
+			end
+			if stagingMail.StartDate > currentTime then
+				snapshot.ScheduledMails[stagingMail.UUID] = stagingMail
+				snapshot.AddedCount += 1
+				continue
+			end
+			local mail = Mail()
+			if mail:FillMailDataFromBase(stagingMail) then
+				snapshot.Mails[mail.UUID] = mail
+				snapshot.AddedCount += 1
+			end
+		end
+		return snapshot
+	end
+
+	@ExecSpace("ServerOnly")
+	method void CommitStagingRefreshSnapshot(table snapshot)
+		-- Commits a previously durable staged-mail snapshot.
+		self.Mails = snapshot.Mails
+		self.ScheduledMails = snapshot.ScheduledMails
+	end
+
+	@ExecSpace("ServerOnly")
+	method void MarkMailPersistenceSucceeded(table consumedUuids)
+		-- Clears only staging UUIDs confirmed by the successful CAS handoff.
+		for uuid, _ in pairs(consumedUuids) do
+			self.PendingStagingUUIDs[uuid] = nil
+		end
+		self.IsSaveDB = false
+	end
+
+	@ExecSpace("ServerOnly")
 	method boolean SaveToDB(table saveData)
+		-- Produces the PMail write payload while retaining dirty state until confirmed.
 		if self.IsSaveDB == false then
 			return false
 		end
-		
-		local total = {}
-		local mails = {}
-		for uuid, m in pairs(self.Mails) do
-			---@type Mail
-			local mail = m
-			local result = mail:Serialize()
-			table.insert(mails, result)
-		end
-		
-		if not _Util:IsNilorEmptyTable(mails) then
-			total["Mails"] = mails
-		end
-		
-		local scheduledMails = {}
-		for uuid, m in pairs(self.ScheduledMails) do
-			---@type MailBase
-			local mail = m
-			local result = mail:Serialize()
-			table.insert(scheduledMails, result)
-		end
-		if not _Util:IsNilorEmptyTable(scheduledMails) then
-			total["ScheduledMails"] = scheduledMails
-		end
-		
-		total["GlobalReadIndex"] = self.GlobalMailLastReadIndex
-		
-		local dbString = ""
-		if not _Util:IsNilorEmptyTable(total) then
-			dbString = _HttpService:JSONEncode(total)
-		end
-		
-		saveData[_GMMailLogic.PlayerMailStorage] = dbString
-		
-		if self.ResetStagingDB then
-			saveData[_GMMailLogic.PlayerStagingMailStorage] = ""	
-		end
-		
-		self.IsSaveDB = false
+		saveData[_GMMailLogic.PlayerMailStorage] = self:SerializePersistentState(
+			self.Mails,
+			self.ScheduledMails,
+			self.GlobalMailLastReadIndex
+		)
 		return true
 	end
 
@@ -78,29 +163,12 @@ script PlayerMail extends Component
 		local scheduledMailCandidates = {}
 		local revokedMails = {}
 		
-		-- load staging mails
+		-- Keep staging data out of the live cache until the bootstrap CAS handoff.
 		---@type DataStorageItem
 		local sds = loadedData[_GMMailLogic.PlayerStagingMailStorage]
 		if sds ~= nil and (_Util:IsNilorEmptyString(sds.Value) == false) then
 			local dataTable = _HttpService:JSONDecode(sds.Value)
-			
-			revokedMails = dataTable["RevokedMails"]	
-			local stagingMails = dataTable["StagingMails"]
-			local curElapsed = _DateTimeLogic:GetTimeElapsed()
-			if not _Util:IsNilorEmptyTable(stagingMails) then
-				for _, m in pairs(stagingMails) do
-					local mail = MailBase()
-					mail:Deserialize(m)
-					
-					if _GMMailLogic:IsRevokedMail(revokedMails, mail.UUID) then
-						continue
-					end
-					
-					self:FinalizeStagedMail(mail, curElapsed)
-				end
-			end
-			
-			self.ResetStagingDB = true
+			revokedMails = dataTable["RevokedMails"]
 		end
 		
 		-- load mails
@@ -152,8 +220,8 @@ script PlayerMail extends Component
 		self:LoadNewGlobalMail(globalRevokedMails)
 		
 		self:DeleteExcessMails(false)
-		
-		self:SyncInitMails(self.Mails, self.Entity.PlayerComponent.UserId)
+
+		-- Initial client sync is deferred until the bootstrap commits staging.
 		return true
 	end
 
@@ -259,26 +327,24 @@ script PlayerMail extends Component
 
 	@ExecSpace("ServerOnly")
 	method void ReadNewGlobalMail(string uuid)
-		if _Util:IsNilorEmptyString(uuid) then
-			return
-		end
-		
-		local revokedMails = _GMMailLogic:GetGlobalRevokedMails()
-		if not self:LoadNewGlobalMail(revokedMails) then
-			return
-		end
-		
-		self.IsSaveDB = true
-		
-		self:DeleteExcessMails(true)
-		
-		local syncTable = {}
-		if self.Mails[uuid] ~= nil then
-			syncTable[uuid] = self.Mails[uuid]
-		end
-		if not _Util:IsNilorEmptyTable(syncTable) then
-			self:SyncMails(syncTable, nil, self.Entity.PlayerComponent.UserId)	
-		end
+		-- Queues global-mail ingestion with every other mailbox mutation.
+		self:EnqueueMailboxOperation(function()
+			if _Util:IsNilorEmptyString(uuid) then
+				return
+			end
+			local revokedMails = _GMMailLogic:GetGlobalRevokedMails()
+			if not self:LoadNewGlobalMail(revokedMails) then
+				return
+			end
+			self:DeleteExcessMails(true)
+			local syncTable = {}
+			if self.Mails[uuid] ~= nil then
+				syncTable[uuid] = self.Mails[uuid]
+			end
+			if not _Util:IsNilorEmptyTable(syncTable) then
+				self:SyncMails(syncTable, nil, self.Entity.PlayerComponent.UserId)
+			end
+		end)
 	end
 
 	@ExecSpace("Client")
@@ -343,7 +409,10 @@ script PlayerMail extends Component
 
 	@ExecSpace("Server")
 	method void RequestDeleteExpiredMails()
-		self:DeleteExpiredMails()
+		-- Queues expired-mail cleanup with other mailbox mutations.
+		self:EnqueueMailboxOperation(function()
+			self:DeleteExpiredMails()
+		end)
 	end
 
 	@ExecSpace("ServerOnly")
@@ -363,9 +432,12 @@ script PlayerMail extends Component
 
 	@ExecSpace("Server")
 	method void RequestDeleteReadMails()
-		self:DeleteReadMails()
-	end
+		-- Queues read-mail cleanup with other mailbox mutations.
+		self:EnqueueMailboxOperation(function()
+			self:DeleteReadMails()
+		end)
 
+	end
 	@ExecSpace("ServerOnly")
 	method void DeleteReadMails()
 		local deleteUUIDs = {}
@@ -382,9 +454,12 @@ script PlayerMail extends Component
 
 	@ExecSpace("Server")
 	method void RequestDeleteCurrentMail(string uuid)
-		self:DeleteMail(uuid, true)
-	end
+		-- Queues deletion of the selected mailbox entry.
+		self:EnqueueMailboxOperation(function()
+			self:DeleteMail(uuid, true)
+		end)
 
+	end
 	@ExecSpace("ServerOnly")
 	method boolean DeleteExcessMails(boolean isSync)
 		-- Calculates the number of exceeded mails.
@@ -472,7 +547,10 @@ script PlayerMail extends Component
 
 	@ExecSpace("Server")
 	method void RequestReceiveMail(string uuid)
-		self:ReceiveMail(uuid)
+		-- Queues one reward claim with every other mailbox mutation.
+		self:EnqueueMailboxOperation(function()
+			self:ReceiveMail(uuid)
+		end)
 	end
 
 	@ExecSpace("ServerOnly")
@@ -519,7 +597,10 @@ script PlayerMail extends Component
 
 	@ExecSpace("Server")
 	method void RequestReceiveMails(table uuids)
-		self:ReceiveMails(uuids)
+		-- Queues bulk reward claims with every other mailbox mutation.
+		self:EnqueueMailboxOperation(function()
+			self:ReceiveMails(uuids)
+		end)
 	end
 
 	@ExecSpace("ServerOnly")
@@ -574,13 +655,15 @@ script PlayerMail extends Component
 
 	@ExecSpace("ServerOnly")
 	method boolean FinalizeStagedMail(MailBase stagingMail, integer currentTime)
-		-- Moves stored mails to the user's mail data.
-		if stagingMail.StartDate > currentTime then	
+		-- Moves only unexpired staged mail into the live mailbox.
+		if stagingMail == nil or stagingMail.EndDate <= currentTime then
+			return false
+		end
+		if stagingMail.StartDate > currentTime then
 			self:AddScheduledMail(stagingMail)
-		else	
+		else
 			self:AddMail(stagingMail, false)
 		end
-		
 		self.IsSaveDB = true
 		return true
 	end
@@ -638,25 +721,24 @@ script PlayerMail extends Component
 
 	@ExecSpace("ServerOnly")
 	method void OnUpdate(number delta)
-		-- Scheduled mail time check.
+		-- Queues due scheduled-mail delivery instead of racing active mutations.
 		local mailsToSend = {}
-		
 		local curElapsed = _DateTimeLogic:GetTimeElapsed()
-		for uuid, m in pairs(self.ScheduledMails) do
+		for _, m in pairs(self.ScheduledMails) do
 			---@type MailBase
 			local mail = m
-			
 			if mail.StartDate <= curElapsed then
-				table.insert(mailsToSend, m)
+				table.insert(mailsToSend, mail)
 			end
 		end
-		
-		for _, m in pairs(mailsToSend) do
-			---@type MailBase
-			local mail = m
-			
-			self:SendScheduledMail(mail)		
+		if #mailsToSend == 0 then
+			return
 		end
+		self:EnqueueMailboxOperation(function()
+			for _, mail in pairs(mailsToSend) do
+				self:SendScheduledMail(mail)
+			end
+		end)
 	end
 
 end

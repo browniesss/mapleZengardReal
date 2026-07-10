@@ -36,8 +36,11 @@ script MailBase
 			local items = {}
 			for _, i in pairs(self.Items) do
 				---@type ItemBase
-				local item = i		
-				table.insert(items, item:Serialize())
+				local item = i
+				table.insert(items, {
+					ID = item.ItemID,
+					Count = item.ItemCount,
+				})
 			end
 			
 			result["Items"] = items

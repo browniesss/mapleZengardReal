@@ -9,6 +9,9 @@ script UIMailBox extends Component
     property any DetailComp = nil
     property any selectedUuid = nil
     property any closeHandler = nil
+    property Entity BtnClose = nil
+    property Entity BtnTestMail = nil
+    property any testMailHandler = nil
 
     @ExecSpace("ClientOnly")
     method void OnBeginPlay()
@@ -48,12 +51,17 @@ script UIMailBox extends Component
 
         local title = panel:GetChildByName("Title")
         if title ~= nil then
-            local btnClose = title:GetChildByName("Btn_Exit")
-            if btnClose ~= nil then
-                self.closeHandler = btnClose:ConnectEvent(ButtonClickEvent, function(evt)
+            self.BtnClose = title:GetChildByName("Btn_Exit")
+            if self.BtnClose ~= nil and self.closeHandler == nil then
+                self.closeHandler = self.BtnClose:ConnectEvent(ButtonClickEvent, function(evt)
                     self:Close()
                 end)
             end
+        end
+
+        self:EnsureTestMailButton(panel, itemUI)
+        if self.BtnTestMail ~= nil and self.testMailHandler == nil then
+            self.testMailHandler = self.BtnTestMail:ConnectEvent(ButtonClickEvent, self.OnTestMailClicked)
         end
 
         self:EnsureDetailPanel(panel, itemUI)
@@ -61,6 +69,78 @@ script UIMailBox extends Component
             self.DetailComp:Clear()
         end
         log("[MailBox] ready")
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnEndPlay()
+        -- 우편함 버튼 이벤트 연결을 해제한다.
+        if self.closeHandler ~= nil then
+            if isvalid(self.BtnClose) then
+                self.BtnClose:DisconnectEvent(ButtonClickEvent, self.closeHandler)
+            end
+            self.closeHandler = nil
+        end
+        if self.testMailHandler ~= nil then
+            if isvalid(self.BtnTestMail) then
+                self.BtnTestMail:DisconnectEvent(ButtonClickEvent, self.testMailHandler)
+            end
+            self.testMailHandler = nil
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void EnsureTestMailButton(Entity panel, Entity itemTemplate)
+        -- 기존 우편 행 버튼을 복제해 제목 바에 테스트 발송 버튼을 배치한다.
+        if panel == nil or itemTemplate == nil then
+            log_warning("[MailBox] test mail button source 없음")
+            return
+        end
+
+        local title = panel:GetChildByName("Title")
+        if title == nil then
+            log_warning("[MailBox] test mail title 없음")
+            return
+        end
+
+        self.BtnTestMail = title:GetChildByName("BtnTestMail")
+        if self.BtnTestMail == nil then
+            local template = itemTemplate:GetChildByName("BtnReceive")
+            if template == nil then
+                log_warning("[MailBox] test mail button template 없음")
+                return
+            end
+            self.BtnTestMail = _SpawnService:SpawnByEntity(template, "BtnTestMail", Vector3.zero, title)
+            if self.BtnTestMail == nil then
+                log_error("[MailBox] test mail button spawn 실패")
+                return
+            end
+        end
+
+        self.BtnTestMail:SetEnable(true)
+        local buttonTransform = self.BtnTestMail.UITransformComponent
+        if buttonTransform ~= nil then
+            buttonTransform.AlignmentOption = AlignmentType.Right
+            buttonTransform.anchoredPosition = Vector2(-200, 0)
+            buttonTransform.RectSize = Vector2(230, 88)
+        end
+        if self.BtnTestMail.TextComponent ~= nil then
+            self.BtnTestMail.TextComponent.Text = "테스트 우편 보내기"
+            self.BtnTestMail.TextComponent.FontSize = 24
+            self.BtnTestMail.TextComponent.Alignment = 4
+            self.BtnTestMail.TextComponent.Bold = true
+        end
+        log("[MailBox] test mail button ready")
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnTestMailClicked(ButtonClickEvent event)
+        -- 서버 RPC로 클릭한 사용자 본인에게 테스트 보상 우편을 발송한다.
+        if _SystemMailHelperLogic == nil then
+            log_error("[MailBox] SystemMailHelperLogic 없음")
+            return
+        end
+        _SystemMailHelperLogic:RequestSendTestMailToSelf()
+        log("[MailBox] test mail request sent")
     end
 
     @ExecSpace("ClientOnly")
@@ -73,9 +153,6 @@ script UIMailBox extends Component
             if detail == nil then
                 log_error("[MailBox] Detail 스폰 실패")
                 return
-            end
-            if detail.UITransformComponent ~= nil then
-                detail.UITransformComponent.anchoredPosition = Vector2(0, -220)
             end
             log("[MailBox] Detail spawned")
         end
@@ -109,26 +186,28 @@ script UIMailBox extends Component
 
     @ExecSpace("ClientOnly")
     method void Open()
-        -- 만료 정리 후 리스트를 갱신하고 창을 연다.
+        -- 현재 캐시를 먼저 표시하고 서버 staging handoff를 요청한다.
         local player = _UserService.LocalPlayer
         if player == nil then
             log_error("[MailBox] LocalPlayer 없음")
             return
         end
-        local playerMail = player:GetComponent("script.PlayerMail")
-        if playerMail == nil then
-            playerMail = player.PlayerMail
-        end
-        if playerMail ~= nil and self:IsExpired() then
-            playerMail:RequestDeleteExpiredMails()
-        end
-
         self.selectedUuid = nil
         if self.DetailComp ~= nil then
             self.DetailComp:Clear()
         end
-        self:SetMailData()
         self.Entity:SetEnable(true)
+        self:SetMailData()
+
+        local bootstrap = player:GetComponent("script.PlayerMailBootstrapComponent")
+        if bootstrap == nil then
+            bootstrap = player.PlayerMailBootstrapComponent
+        end
+        if bootstrap == nil then
+            log_error("[MailBox] PlayerMailBootstrapComponent 없음")
+            return
+        end
+        bootstrap:RequestRefreshStagingMails()
         log("[MailBox] open count=" .. tostring(_Util:TableLen(self.Mails)))
     end
 

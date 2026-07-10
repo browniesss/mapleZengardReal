@@ -599,61 +599,60 @@ script GMMailLogic extends Logic
 			return
 		end
 				
-		self:SavePlayerMail(userId, title, desc, sender, retentionDays, startDate, endDate, items)
+		if not self:SavePlayerMail(userId, title, desc, sender, retentionDays, startDate, endDate, items) then
+			log_error("[GMMail] 개인 우편 저장 실패 userId=" .. tostring(userId))
+		end
 	end
 
 	@ExecSpace("ServerOnly")
-	method void SavePlayerMail(string userId, string title, string desc, string sender, integer retentionDays, integer startDate, integer endDate, table items)
+	method boolean SavePlayerMail(string userId, string title, string desc, string sender, integer retentionDays, integer startDate, integer endDate, table items)
+		-- Retries a conditional staging write without losing concurrent mail.
 		if _Util:IsNilorEmptyString(userId) then
 			log_error("userId is empty.")
-			return
+			return false
 		end
-		
 		local ds = _DataStorageService:GetUserDataStorage(userId)
 		if ds == nil then
 			log_error("Failed to load data storage.")
-			return
+			return false
 		end
-		
-		local dataTable = {}
-		local originalData = ""
-		local returnCode, strData = ds:GetAndWait(self.PlayerStagingMailStorage)
-		if returnCode ~= 0 then
-			log_error(string.format("[Error: %d] A database error has occurred.",returnCode))
-			return
-		end
-		
-		if not _Util:IsNilorEmptyString(strData) then
-			dataTable = _HttpService:JSONDecode(strData)
-			originalData = strData
-		end
-		
-		local stagingMails = dataTable["StagingMails"]
-		if _Util:IsNilorEmptyTable(stagingMails) then
-			dataTable["StagingMails"] = {}
-			stagingMails = dataTable["StagingMails"]
-		end
-		
 		local uuid = _UUIDLogic:GenerateUUIDv4()
 		local newMail = MailBase()
 		if not newMail:FillMailData(uuid, 1, title, desc, sender, retentionDays, startDate, endDate, items) then
 			log_error("Failed to create the mail. Please check the data.")
-			return
+			return false
 		end
-		
-		stagingMails[newMail.UUID] = newMail:Serialize()
-		
-		local error = -1
-		local result = ""
-		if _Util:IsNilorEmptyString(originalData) then
-			error = ds:SetAndWait(self.PlayerStagingMailStorage, _HttpService:JSONEncode(dataTable))
-		else
-			error, result = ds:UpdateAndWait(self.PlayerStagingMailStorage, originalData, _HttpService:JSONEncode(dataTable))
+		for attempt = 1, 3 do
+			local returnCode, originalData = ds:GetAndWait(self.PlayerStagingMailStorage)
+			if returnCode ~= 0 then
+				log_error(string.format("[Error: %d] A database error has occurred.", returnCode))
+				return false
+			end
+			local dataTable = {}
+			if not _Util:IsNilorEmptyString(originalData) then
+				dataTable = _HttpService:JSONDecode(originalData)
+			end
+			local stagingMails = dataTable["StagingMails"]
+			if _Util:IsNilorEmptyTable(stagingMails) then
+				dataTable["StagingMails"] = {}
+				stagingMails = dataTable["StagingMails"]
+			end
+			stagingMails[newMail.UUID] = newMail:Serialize()
+			dataTable["SchemaVersion"] = 1
+			local encoded = _HttpService:JSONEncode(dataTable)
+			local writeCode = -1
+			if _Util:IsNilorEmptyString(originalData) then
+				writeCode = ds:SetAndWait(self.PlayerStagingMailStorage, encoded)
+			else
+				local updateCode, updatedData = ds:UpdateAndWait(self.PlayerStagingMailStorage, originalData, encoded)
+				writeCode = updateCode
+			end
+			if writeCode == 0 then
+				return true
+			end
 		end
-		if error ~= 0 then
-			log_error(string.format("[Error: %d] A database error has occurred.",error))
-			return
-		end
+		log_error("[GMMail] staging save conflict userId=" .. tostring(userId))
+		return false
 	end
 
 	@ExecSpace("Server")
@@ -663,117 +662,94 @@ script GMMailLogic extends Logic
 			return
 		end
 		
-		self:RevokePlayerMail(userId, uuid)
+		if not self:RevokePlayerMail(userId, uuid) then
+			log_error("[GMMail] 개인 우편 회수 실패 userId=" .. tostring(userId) .. " uuid=" .. tostring(uuid))
+		end
 	end
 
 	@ExecSpace("ServerOnly")
-	method void RevokePlayerMail(string userId, string uuid)
+	method boolean RevokePlayerMail(string userId, string uuid)
+		-- Retries a conditional staging revoke without losing concurrent mail.
+		if _Util:IsNilorEmptyString(userId) or _Util:IsNilorEmptyString(uuid) then
+			return false
+		end
 		local ds = _DataStorageService:GetUserDataStorage(userId)
 		if ds == nil then
-			return
+			return false
 		end
-		
-		local errorCode, strData = ds:GetAndWait(self.PlayerStagingMailStorage)
-		if errorCode ~= 0 then
-			log_error(string.format("[Error: %d] A database error has occurred.",errorCode))
-			return
-		end
-		
-		local error, strMailData = ds:GetAndWait(self.PlayerMailStorage)
-		if error ~= 0 then
-			log_error(string.format("[Error: %d] A database error has occurred.",error))
-			return
-		end
-		
-		local dataTable = {}
-		local originalData = ""
-		if not _Util:IsNilorEmptyString(strData) then
-			dataTable = _HttpService:JSONDecode(strData)
-			originalData = strData
-		end
-		
-		local hasMail = false
-		if not _Util:IsNilorEmptyString(strMailData) then
-			local mailDataTable = _HttpService:JSONDecode(strMailData)
-			local mails = mailDataTable["Mails"]
-			if not _Util:IsNilorEmptyTable(mails) then
-				for _, m in pairs(mails) do
-					local mailUUID = m["UUID"]				
-					if mailUUID == uuid then
+		for attempt = 1, 3 do
+			local stagingCode, originalData = ds:GetAndWait(self.PlayerStagingMailStorage)
+			if stagingCode ~= 0 then
+				log_error(string.format("[Error: %d] A database error has occurred.", stagingCode))
+				return false
+			end
+			local mailCode, strMailData = ds:GetAndWait(self.PlayerMailStorage)
+			if mailCode ~= 0 then
+				log_error(string.format("[Error: %d] A database error has occurred.", mailCode))
+				return false
+			end
+			local dataTable = {}
+			if not _Util:IsNilorEmptyString(originalData) then
+				dataTable = _HttpService:JSONDecode(originalData)
+			end
+			local hasMail = false
+			if not _Util:IsNilorEmptyString(strMailData) then
+				local mailDataTable = _HttpService:JSONDecode(strMailData)
+				for _, m in pairs(mailDataTable["Mails"] or {}) do
+					if m["UUID"] == uuid then
 						hasMail = true
 						break
 					end
 				end
-			end
-			
-			if not hasMail then
-				local scheduledMails = mailDataTable["ScheduledMails"]
-				if not _Util:IsNilorEmptyTable(scheduledMails) then
-					for _, m in pairs(scheduledMails) do
-						local mailUUID = m["UUID"]
-						if mailUUID == uuid then
+				if not hasMail then
+					for _, m in pairs(mailDataTable["ScheduledMails"] or {}) do
+						if m["UUID"] == uuid then
 							hasMail = true
 							break
 						end
 					end
 				end
 			end
-		end
-		
-		if hasMail then
-			local revokedMails = dataTable["RevokedMails"]
-			if _Util:IsNilorEmptyTable(revokedMails) then
-				dataTable["RevokedMails"] = {}
-				revokedMails = dataTable["RevokedMails"]
-			end
-			
-			if revokedMails[uuid] then
-				log_error("The mail has already been retrieved.")
-				return
-			end
-			
-			revokedMails[uuid] = 1
-		else
-			local removeMail = false
-			local stagingMails = dataTable["StagingMails"]
-			if not _Util:IsNilorEmptyTable(stagingMails) then
-				for _, m in pairs(stagingMails) do
-					local mailUUID = m["UUID"]			
-					if mailUUID == uuid then
-						removeMail = true
-						break
+			if hasMail then
+				local revokedMails = dataTable["RevokedMails"]
+				if _Util:IsNilorEmptyTable(revokedMails) then
+					dataTable["RevokedMails"] = {}
+					revokedMails = dataTable["RevokedMails"]
+				end
+				if revokedMails[uuid] then
+					log_error("The mail has already been retrieved.")
+					return false
+				end
+				revokedMails[uuid] = 1
+			else
+				local stagingMails = dataTable["StagingMails"]
+				if not _Util:IsNilorEmptyTable(stagingMails) and stagingMails[uuid] ~= nil then
+					stagingMails[uuid] = nil
+					hasMail = true
+					if _Util:IsNilorEmptyTable(stagingMails) then
+						dataTable["StagingMails"] = nil
 					end
 				end
-				
-				if removeMail then
-					stagingMails[uuid] = nil
-					hasMail = true	
-				end
 			end
-			
-			if _Util:IsNilorEmptyTable(stagingMails) then
-				dataTable["StagingMails"] = nil
+			if not hasMail then
+				log_error("The mail does not belong to the user")
+				return false
+			end
+			dataTable["SchemaVersion"] = 1
+			local encoded = _HttpService:JSONEncode(dataTable)
+			local writeCode = -1
+			if _Util:IsNilorEmptyString(originalData) then
+				writeCode = ds:SetAndWait(self.PlayerStagingMailStorage, encoded)
+			else
+				local updateCode, updatedData = ds:UpdateAndWait(self.PlayerStagingMailStorage, originalData, encoded)
+				writeCode = updateCode
+			end
+			if writeCode == 0 then
+				return true
 			end
 		end
-		
-		if not hasMail then
-			log_error("The mail does not belong to the user")
-			return
-		end
-		
-		local dsError = -1
-		local result = ""
-		if _Util:IsNilorEmptyString(originalData) then
-			dsError = ds:SetAndWait(self.PlayerStagingMailStorage, _HttpService:JSONEncode(dataTable))
-		else
-			dsError, result = ds:UpdateAndWait(self.PlayerStagingMailStorage, originalData, _HttpService:JSONEncode(dataTable))
-		end
-		
-		if dsError ~= 0 then
-			log_error(string.format("[Error: %d] A database error has occurred.",dsError))
-			return
-		
-		end	
+		log_error("[GMMail] staging revoke conflict userId=" .. tostring(userId))
+		return false
 	end
 
 	@ExecSpace("Server")
