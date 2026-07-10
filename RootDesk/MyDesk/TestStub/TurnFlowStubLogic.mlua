@@ -2,6 +2,14 @@
 script TurnFlowStubLogic extends Logic
     -- [임시 스텁] 젠(WAVE) 사이클 오케스트레이터 (규칙서 §2 수동 턴 절차의 최소 구현).
     -- 정식 젠 플로우는 보드 담당자의 BoardFlowLogic 소관 — 도입 시 TestStub/ 폴더째 제거.
+    --
+    -- ▶ BoardFlowLogic 이관 체크리스트 (폴더 삭제 전 아래 참조 지점을 함께 수정):
+    --   1. GameStartLogic.OnBoardReady — _MonsterStubLogic:SpawnWave / _TurnFlowStubLogic:NotifyPhaseClient 직접 호출
+    --   2. @EventSender("Logic", "TurnFlowStubLogic") 3곳 — InGameHUDController(OnPhaseChanged),
+    --      InGameChoiceController(OnPhaseChanged), InGameSlotController(OnSkillFiring) → 발신자명 교체
+    --   3. InGameHUDController — RequestZen/RequestAttack/RequestRangePreview/RequestSetBattleMode 직접 호출
+    --   4. PlayerGrowthComponent.CommitAdvance — SpawnCellFx(전직 연출) 직접 호출
+    --   5. MonsterStubLogic.ApplyHitPlan 소비자 계약(HitPlan/EXP/전리품)은 몬스터 담당 정식 구현이 승계
     -- 사이클: 젠 터치 -> ①몬스터 신규 스폰(위치 고정 누적) ②캐릭터만 랜덤 재배치(+칸 효과 배선 I-5)
     --        -> 버튼 '공격' 전환(aim) -> 방향 설정 -> 공격 터치 -> 스킬 순서 발동 -> 턴 종료 -> idle.
     -- 상태는 run.flow에만 보관(무상태 Logic). 선택지 노출 중에는 사이클 일시정지(규칙서 §8.1).
@@ -323,8 +331,8 @@ script TurnFlowStubLogic extends Logic
         local targetCount = 0
         for _, inst in ipairs(loadout:GetOrderedInstances()) do
             if inst.cooldownLeft == nil or inst.cooldownLeft <= 0 then
-                local skillDef = _SkillCatalogLogic:GetSkill(inst.skillId)
-                local pattern = skillDef ~= nil and _SkillCatalogLogic:GetRangePattern(skillDef.rangeId) or nil
+                local skillDef = _SkillCatalogLogic:GetSkillRO(inst.skillId)
+                local pattern = skillDef ~= nil and _SkillCatalogLogic:GetRangePatternRO(skillDef.rangeId) or nil
                 if pattern ~= nil then
                     local eff = _CombatResolveLogic:BuildTagEffects(inst)
                     local cells = _CombatResolveLogic:ComputeRangeCells(pattern, eff, facing, ctx.flow.playerCell, ctx.def)
@@ -364,7 +372,7 @@ script TurnFlowStubLogic extends Logic
     method void SpawnHitEffects(any run, table hits)
         -- 스킬 발동 연출: 타격 칸마다 스킬별 이펙트 재생.
         for _, h in ipairs(hits) do
-            local skillDef = _SkillCatalogLogic:GetSkill(h.skillId)
+            local skillDef = _SkillCatalogLogic:GetSkillRO(h.skillId)
             if skillDef ~= nil then
                 self:SpawnCellFx(run, h.cell, skillDef.hitFxRuid)
             end

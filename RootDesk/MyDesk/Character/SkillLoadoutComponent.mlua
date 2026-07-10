@@ -41,7 +41,7 @@ script SkillLoadoutComponent extends Component
         -- 버프·패시브 슬롯 한 줄 요약 (HUD 스킬 패널 하단 표시용). 쿨다운 중이면 남은 턴 병기.
         local text = ""
         for _, inst in ipairs(self.supportSlots) do
-            local def = _SkillCatalogLogic:GetSkill(inst.skillId)
+            local def = _SkillCatalogLogic:GetSkillRO(inst.skillId)
             local name = def ~= nil and def.name or inst.skillId
             if inst.cooldownLeft ~= nil and inst.cooldownLeft > 0 then
                 name = name .. "(쿨 " .. tostring(inst.cooldownLeft) .. ")"
@@ -66,7 +66,7 @@ script SkillLoadoutComponent extends Component
         end
         local text = ""
         for _, tagId in ipairs(orderKeys) do
-            local tagDef = _SkillCatalogLogic:GetTagDef(tagId)
+            local tagDef = _SkillCatalogLogic:GetTagDefRO(tagId)
             local tagName = tagDef ~= nil and tagDef.name or tagId
             if counts[tagId] > 1 then
                 tagName = tagName .. " ×" .. tostring(counts[tagId])
@@ -83,7 +83,7 @@ script SkillLoadoutComponent extends Component
         -- 순번/이름/레벨/아이콘/태그(중첩 집계)/쿨다운 남은 턴.
         local summary = {}
         for orderIndex, inst in ipairs(self.order) do
-            local def = _SkillCatalogLogic:GetSkill(inst.skillId)
+            local def = _SkillCatalogLogic:GetSkillRO(inst.skillId)   -- 요약 표기는 읽기만
             local tagsText = self:BuildTagsText(inst)
             table.insert(summary, {
                 skillId = inst.skillId,
@@ -104,7 +104,7 @@ script SkillLoadoutComponent extends Component
         -- 교체 UI용 요약: **attackSlots 순서** (ReplaceSkill이 attackSlots 인덱스를 받으므로 order 기준과 별도).
         local summary = {}
         for slotIndex, inst in ipairs(self.attackSlots) do
-            local def = _SkillCatalogLogic:GetSkill(inst.skillId)
+            local def = _SkillCatalogLogic:GetSkillRO(inst.skillId)   -- 요약 표기는 읽기만
             table.insert(summary, {
                 slotIndex = slotIndex,
                 skillId = inst.skillId,
@@ -205,7 +205,7 @@ script SkillLoadoutComponent extends Component
             return casted
         end
         for _, inst in ipairs(self.supportSlots) do
-            local def = _SkillCatalogLogic:GetSkill(inst.skillId)
+            local def = _SkillCatalogLogic:GetSkillRO(inst.skillId)   -- supportEffect는 필드 복사만
             if def ~= nil and def.attackType == "buff"
                 and (inst.cooldownLeft == nil or inst.cooldownLeft <= 0) then
                 local mods = {}
@@ -227,7 +227,7 @@ script SkillLoadoutComponent extends Component
     method string AcquireSkill(string skillId)
         -- 선택지 확정 진입점. 보유 중이면 레벨업(최대 Lv.3), 빈 슬롯이면 장착, 만석이면 "full".
         -- 반환: acquired | leveled | maxed | full | owned | supportFull | error
-        local def = _SkillCatalogLogic:GetSkill(skillId)
+        local def = _SkillCatalogLogic:GetSkillRO(skillId)   -- 판정/필드 복사만 (인스턴스 생성은 SkillInstanceLogic이 copy)
         if def == nil then return "error" end
         if _SkillCatalogLogic:IsSupportSkill(def) then
             return self:AcquireSupportSkill(def)
@@ -293,7 +293,7 @@ script SkillLoadoutComponent extends Component
     method boolean AddTagToSlot(integer slotIndex, string tagId)
         -- 태그 직접 부여(능력치 선택지 "사거리 증가" 등). 존재하는 태그만 허용.
         local inst = self.attackSlots[slotIndex]
-        if inst == nil or _SkillCatalogLogic:GetTagDef(tagId) == nil then
+        if inst == nil or _SkillCatalogLogic:GetTagDefRO(tagId) == nil then
             log_error("[SkillLoadout] 태그 부여 실패: slot=" .. tostring(slotIndex) .. " tag=" .. tostring(tagId))
             return false
         end
@@ -344,7 +344,7 @@ script SkillLoadoutComponent extends Component
             log_error("[SkillLoadout] 재추첨 전리품 차감 실패 — 사전 검사와 불일치")
             return
         end
-        local tagDef = _SkillCatalogLogic:GetTagDef(picked)
+        local tagDef = _SkillCatalogLogic:GetTagDefRO(picked)
         log("[SkillLoadout] 재추첨: " .. inst.skillId .. " -> " .. (tagDef ~= nil and tagDef.name or picked)
             .. " (전리품 -" .. tostring(self.RerollLootCost) .. ")")
     end

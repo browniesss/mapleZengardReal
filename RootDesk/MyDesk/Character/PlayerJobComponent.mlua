@@ -63,15 +63,4 @@ script PlayerJobComponent extends Component
         return true
     end
 
-    @ExecSpace("Server")
-    method void RequestAdvance()
-        -- 클라(전직 버튼) -> 서버 전직 요청. 소유자 검증 후 조건 재검증(Advance 내부)까지 서버에서.
-        if senderUserId ~= self.Entity.PlayerComponent.UserId then
-            log_warning("[PlayerJob] 비소유자 전직 요청 무시: " .. senderUserId)
-            return
-        end
-        if not self:Advance() then
-            log("[PlayerJob] 전직 조건 미충족 — 요청 거부")
-        end
-    end
 end

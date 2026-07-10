@@ -57,7 +57,7 @@ script CombatResolveLogic extends Logic
         -- "같은 속성 중복 시 효과 강화" 소비자(몬스터 측)용 중첩 수.
         local eff = { castAdd = 0, rangeAdd = 0, pierce = false, element = nil, elementStacks = {} }
         for _, tagId in ipairs(inst.tags) do
-            local def = _SkillCatalogLogic:GetTagDef(tagId)
+            local def = _SkillCatalogLogic:GetTagDefRO(tagId)
             if def ~= nil then
                 if def.effect.castAdd ~= nil then
                     eff.castAdd = eff.castAdd + math.floor(def.effect.castAdd)
@@ -201,11 +201,12 @@ script CombatResolveLogic extends Logic
             if inst.cooldownLeft ~= nil and inst.cooldownLeft > 0 then
                 table.insert(result.skipped, inst.skillId)
             else
-                local skillDef = _SkillCatalogLogic:GetSkill(inst.skillId)
+                -- 해석은 def/pattern을 읽기만 한다 — RO 게터로 deep-copy 비용 제거 (핫패스)
+                local skillDef = _SkillCatalogLogic:GetSkillRO(inst.skillId)
                 if skillDef == nil then
                     log_error("[CombatResolve] 알 수 없는 스킬: " .. tostring(inst.skillId))
                 else
-                    local pattern = _SkillCatalogLogic:GetRangePattern(skillDef.rangeId)
+                    local pattern = _SkillCatalogLogic:GetRangePatternRO(skillDef.rangeId)
                     if pattern == nil then
                         log_error("[CombatResolve] 범위 패턴 없음: " .. tostring(skillDef.rangeId) .. " skill=" .. inst.skillId)
                     else

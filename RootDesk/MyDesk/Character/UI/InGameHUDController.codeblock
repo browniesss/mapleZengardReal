@@ -1,7 +1,7 @@
 {
   "Id": "",
   "GameId": "",
-  "EntryKey": "codeblock://d05b873a-3145-4073-9a4f-421d7688eaf5",
+  "EntryKey": "codeblock://4d05e6bc-89b4-47a1-8cae-0b499ab38a33",
   "ContentType": "x-mod/codeblock",
   "Content": "",
   "Usage": 0,
@@ -22,9 +22,9 @@
         "Minor": 1
       },
       "Description": "",
-      "Id": "d05b873a-3145-4073-9a4f-421d7688eaf5",
+      "Id": "4d05e6bc-89b4-47a1-8cae-0b499ab38a33",
       "Language": 1,
-      "Name": "InGameUIController",
+      "Name": "InGameHUDController",
       "Type": 1,
       "Source": 0,
       "Target": null

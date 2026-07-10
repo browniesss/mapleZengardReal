@@ -7,6 +7,7 @@ script SkillCatalogLogic extends Logic
     property boolean RunSelfTest = false   -- OnBeginPlay 자가검증. 본배선 검증 완료로 off(필요시 on).
 
     property any skillCache = nil          -- skillId -> def
+    property any jobTierIndex = nil        -- job -> tier -> [skillId] (선택지 풀 조회 인덱스, 적재 시 구축)
     property any rangeCache = nil          -- rangeId -> def(offsets 포함)
     property any tagCache = nil            -- tagId -> def
     property any statusCache = nil         -- statusId -> def
@@ -108,6 +109,20 @@ script SkillCatalogLogic extends Logic
         return self:DeepCopy(defs[tagId])
     end
 
+    @ExecSpace("ServerOnly")
+    method any GetTagDefRO(string tagId)
+        -- 읽기 전용 원본 참조 — **절대 변이 금지**. 핫패스(태그 집계/표기)의 deep-copy 비용 제거용.
+        local defs = self:GetTagDefs()
+        return defs[tagId]
+    end
+
+    @ExecSpace("ServerOnly")
+    method any GetRangePatternRO(string rangeId)
+        -- 읽기 전용 원본 참조 — **절대 변이 금지**. 첫 호출만 캐시 구축을 위해 기존 게터를 경유.
+        if self.rangeCache == nil then self:GetRangePattern(rangeId) end
+        return self.rangeCache[rangeId]
+    end
+
     -- ===== RangePattern =====
 
     method any ParseGridOffsets(string rangeId, any grid)
@@ -198,6 +213,7 @@ script SkillCatalogLogic extends Logic
         -- SkillMaster 전체 적재(1회). rarity/perHitCoefLv3는 적재 시 산출.
         if self.skillCache == nil then
             self.skillCache = {}
+            self.jobTierIndex = {}
             local ds = _DataService:GetTable("SkillMaster")
             if ds == nil then
                 log_error("[SkillCatalog] SkillMaster 데이터셋 없음")
@@ -229,6 +245,9 @@ script SkillCatalogLogic extends Logic
                         def.perHitCoefLv3 = def.coefLv3 / self:CountBaseHits(def)
                         self:ValidateSkill(def)
                         self.skillCache[id] = def
+                        if self.jobTierIndex[def.job] == nil then self.jobTierIndex[def.job] = {} end
+                        if self.jobTierIndex[def.job][def.tier] == nil then self.jobTierIndex[def.job][def.tier] = {} end
+                        table.insert(self.jobTierIndex[def.job][def.tier], id)
                     end
                 end
             end
@@ -240,6 +259,14 @@ script SkillCatalogLogic extends Logic
         -- skillId -> def(deep-copy). 미존재 시 nil.
         self:EnsureSkillCache()
         return self:DeepCopy(self.skillCache[skillId])
+    end
+
+    @ExecSpace("ServerOnly")
+    method any GetSkillRO(string skillId)
+        -- 읽기 전용 원본 참조 — **절대 변이 금지**. 후보 필터링/요약 표기 등 읽기만 하는
+        -- 핫패스용 (46종 스케일에서 GetSkill의 deep-copy가 지배 비용이라 분리 — 아키텍처 검수 2026-07-10).
+        self:EnsureSkillCache()
+        return self.skillCache[skillId]
     end
 
     @ExecSpace("ServerOnly")
@@ -268,12 +295,16 @@ script SkillCatalogLogic extends Logic
 
     @ExecSpace("ServerOnly")
     method table GetSkillIdsByJobTier(string job, integer maxTier)
-        -- 직업 + 차수 상한 필터 스킬 id 목록 (선택지 풀).
+        -- 직업 + 차수 상한 필터 스킬 id 목록 (선택지 풀) — 적재 시 구축한 인덱스 조회.
         self:EnsureSkillCache()
         local result = {}
-        for id, def in pairs(self.skillCache) do
-            if def.job == job and def.tier <= maxTier then
-                table.insert(result, id)
+        local byJob = self.jobTierIndex[job]
+        if byJob == nil then return result end
+        for tier = 1, maxTier do
+            if byJob[tier] ~= nil then
+                for _, id in ipairs(byJob[tier]) do
+                    table.insert(result, id)
+                end
             end
         end
         return result

@@ -1,0 +1,156 @@
+@Component
+script InGameHUDController extends Component
+    -- 인게임 HUD 상시 요소 (ClientOnly): 젠↔공격 메인 버튼(⑫), 방향 패드(⑩), 진행도·위험(③④),
+    -- 프로필/EXP(①), 전투 방식 토글(⑨). 페이즈는 TurnFlowStubLogic 클라 이벤트 수신.
+    -- (구 InGameUIController를 HUD/선택지/슬롯 3분할 — 아키텍처 검수 2026-07-10)
+
+    property Entity rootPanel = "04b1395f-0de4-49ed-8ae8-8a926dfac120"
+    property ButtonComponent btnMain = "4f475f59-a098-4f22-ae5a-4d7db75f25e9"
+    property Entity dirPanel = "d0d3ed54-e6c3-4401-a7d0-234d355df731"
+    property ButtonComponent btnUp = "72014a3b-f982-434f-885d-72291aa50088"
+    property ButtonComponent btnDown = "7c551818-cc2e-443b-8efa-285d0e0c9b11"
+    property ButtonComponent btnLeft = "b37c62a8-b3c4-47dd-860e-9cb6e0a4fdc3"
+    property ButtonComponent btnRight = "d01f52b8-ec13-4fb1-a914-759e0170db96"
+    property TextComponent waveText = "6d6413a2-69e2-411f-bc8a-5f40b30c9ca5"
+    property TextComponent profileText = "fab702df-78f2-468a-bf55-be0bd2621d5d"
+    property Entity dangerText = "64dd5bfe-5f66-4b52-aed5-9b830c17fa36"
+    property ButtonComponent btnMode = "f76490bf-e94d-4a4e-a378-32787878513c"
+    property SpriteGUIRendererComponent expBarFill = "24828e11-1a92-4a13-b0f2-fdf2386cc3f0"
+    property Entity choicePanel = "fe8835d2-00c8-4ac1-a468-ce8d41ef7df3"   -- 읽기 전용 — 소유자는 InGameChoiceController (노출 중 사이클 정지 판정)
+
+    property string curPhase = "none"
+    property string facingDir = "UP"
+    property boolean autoMode = false      -- 전투 방식 (규칙서 §5.2) — 서버 flow와 동기 유지
+    property number profileTick = 0
+    property any handlers = nil
+
+    @ExecSpace("ClientOnly")
+    method void OnBeginPlay()
+        -- 초기 숨김 + 버튼 구독 (클로저는 handlers에 보관, OnEndPlay 해제).
+        self.rootPanel.Enable = false
+        self.dirPanel.Enable = false
+        self.handlers = {}
+        self:Wire(self.btnMain, self.OnMainClicked)
+        self:Wire(self.btnUp, function() self:SetFacing("UP") end)
+        self:Wire(self.btnDown, function() self:SetFacing("DOWN") end)
+        self:Wire(self.btnLeft, function() self:SetFacing("LEFT") end)
+        self:Wire(self.btnRight, function() self:SetFacing("RIGHT") end)
+        self:Wire(self.btnMode, self.OnModeToggle)
+        if isvalid(self.dangerText) then self.dangerText.Enable = false end
+        if isvalid(self.expBarFill) then
+            self.expBarFill.Type = ImageType.Filled   -- FillAmount 기반 가로 게이지 (FillMethod 기본 Horizontal)
+            self.expBarFill.FillAmount = 0
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void Wire(ButtonComponent btn, any callback)
+        -- 버튼 클릭 구독 + 핸들러 보관. 미배선 UUID여도 나머지 초기화가 죽지 않게 방어.
+        if not isvalid(btn) then return end
+        local h = btn.Entity:ConnectEvent(ButtonClickEvent, callback)
+        table.insert(self.handlers, { entity = btn.Entity, eventType = ButtonClickEvent, eventHandler = h })
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnEndPlay()
+        -- 구독 해제(필수).
+        if self.handlers ~= nil then
+            for _, rec in ipairs(self.handlers) do
+                if isvalid(rec.entity) then
+                    rec.entity:DisconnectEvent(rec.eventType, rec.eventHandler)
+                end
+            end
+            self.handlers = nil
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnUpdate(number delta)
+        -- HUD 프로필(Lv/EXP/전직 진행) 폴링 갱신 — @Sync 값 표시라 0.3s 간격이면 충분.
+        self.profileTick = self.profileTick + delta
+        if self.profileTick < 0.3 then return end
+        self.profileTick = 0
+        if not isvalid(self.profileText) or not self.rootPanel.Enable then return end
+        local player = _UserService.LocalPlayer
+        if not isvalid(player) then return end
+        ---@type PlayerGrowthComponent
+        local growth = player:GetComponent("script.PlayerGrowthComponent")
+        if growth == nil then return end
+        ---@type PlayerJobComponent
+        local jobComp = player:GetComponent("script.PlayerJobComponent")
+        local jobLabel = ""
+        if jobComp ~= nil then
+            jobLabel = jobComp.JobName .. " " .. tostring(jobComp.Tier) .. "차 · "
+        end
+        self.profileText.Text = jobLabel .. "Lv." .. tostring(growth.Level)
+            .. " · EXP " .. tostring(growth.Exp) .. "/" .. tostring(growth.NextExp)
+        if isvalid(self.expBarFill) and growth.NextExp > 0 then
+            self.expBarFill.FillAmount = math.min(1, growth.Exp / growth.NextExp)
+        end
+        -- 전직 진행/버튼은 선택지 카드로 이동 (2026-07-10 확정) — 진행 상황은 프로필 옆 축약 표기
+        if jobComp ~= nil and jobComp.Tier < 4 then
+            self.profileText.Text = self.profileText.Text
+                .. " · 전직 " .. tostring(math.min(jobComp.ChoiceExposure, jobComp.ExposureThreshold))
+                .. "/" .. tostring(jobComp.ExposureThreshold)
+                .. "·" .. tostring(math.min(jobComp.LootCount, jobComp.AdvanceLootCost))
+                .. "/" .. tostring(jobComp.AdvanceLootCost)
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnModeToggle()
+        -- 전투 방식 토글 (UI설계 ⑨): 수동 ↔ 자동. 자동은 젠 터치 즉시 자동 공격(방향 패드 숨김).
+        self.autoMode = not self.autoMode
+        _TurnFlowStubLogic:RequestSetBattleMode(self.autoMode)
+        self.btnMode.Entity.TextComponent.Text = self.autoMode and "전투: 자동" or "전투: 수동"
+        if self.autoMode then self.dirPanel.Enable = false end
+    end
+
+    @EventSender("Logic", "TurnFlowStubLogic")
+    handler OnPhaseChanged(PhaseChangedEvent event)
+        -- 페이즈 전환: 버튼 텍스트 젠↔공격, 방향 패드 노출/숨김, 진행도, 위험 아이콘 (UI설계 ③④⑨⑫).
+        self.curPhase = event.phase
+        if event.phase ~= "run_end" then
+            self.waveText.Text = "보스까지 " .. tostring(event.wave) .. " / 30 젠"
+        end
+        if isvalid(self.dangerText) then
+            self.dangerText.Enable = event.danger   -- 빈 칸 < 가용 10%일 때만 (규칙서 §7.1)
+        end
+        if event.phase == "run_start" then
+            self.rootPanel.Enable = true
+            self.dirPanel.Enable = false
+            self.btnMain.Entity.TextComponent.Text = "젠 (WAVE)"
+        elseif event.phase == "aim" then
+            self.dirPanel.Enable = true
+            self.btnMain.Entity.TextComponent.Text = "공격"
+        elseif event.phase == "resolving" then
+            -- 자동 공격 진행 중: 입력 없음 (버튼 전환 없이 젠 -> 즉시 발동, 규칙서 §2.2)
+            self.dirPanel.Enable = false
+            self.btnMain.Entity.TextComponent.Text = "공격 중…"
+        elseif event.phase == "idle" then
+            self.dirPanel.Enable = false
+            self.btnMain.Entity.TextComponent.Text = "젠 (WAVE)"
+        elseif event.phase == "run_end" then
+            self.rootPanel.Enable = false
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnMainClicked()
+        -- 메인 버튼: idle=젠 / aim=지정 방향으로 공격 (수동 2단 입력 — UI설계 ⑫).
+        if isvalid(self.choicePanel) and self.choicePanel.Enable then return end   -- 선택지 노출 중 사이클 정지
+        if self.curPhase == "idle" or self.curPhase == "run_start" then
+            _TurnFlowStubLogic:RequestZen()
+        elseif self.curPhase == "aim" then
+            _TurnFlowStubLogic:RequestAttack(self.facingDir)
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void SetFacing(string dir)
+        -- 공격 방향 지정 (방향 패드 ⑩) + 해당 방향의 전 스킬 공격 범위 프리뷰 요청.
+        self.facingDir = dir
+        _TurnFlowStubLogic:RequestRangePreview(dir)
+        log("[InGameHUD] 공격 방향: " .. dir)
+    end
+end
