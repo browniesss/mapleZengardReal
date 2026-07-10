@@ -14,6 +14,7 @@ script SkillCatalogLogic extends Logic
     property any growthCache = nil         -- level -> requiredExp
     property any jobCache = nil            -- job -> def
     property any statChoiceCache = nil     -- [스탯 선택지 def]
+    property any equipCache = nil          -- [장비 def]
 
     @ExecSpace("ServerOnly")
     method void OnBeginPlay()
@@ -427,6 +428,44 @@ script SkillCatalogLogic extends Logic
             end
         end
         return self:DeepCopy(self.statChoiceCache)
+    end
+
+    -- ===== EquipDef =====
+
+    @ExecSpace("ServerOnly")
+    method table GetEquipDefs()
+        -- 장비 목록(deep-copy). effect = Modifier 계약 배열 — "엄청난 효과" 아이템 (초안 §8 장비 10%).
+        if self.equipCache == nil then
+            self.equipCache = {}
+            local ds = _DataService:GetTable("EquipDef")
+            if ds == nil then
+                log_error("[SkillCatalog] EquipDef 데이터셋 없음")
+            else
+                for _, row in ipairs(ds:GetAllRow()) do
+                    local id = row:GetItem("equipId")
+                    if id ~= nil and id ~= "" then
+                        table.insert(self.equipCache, {
+                            equipId = id,
+                            name = row:GetItem("name"),
+                            iconRuid = row:GetItem("iconRuid"),
+                            desc = row:GetItem("desc"),
+                            effect = self:ParseJsonCell(row:GetItem("effect"), {}),
+                        })
+                    end
+                end
+            end
+        end
+        return self:DeepCopy(self.equipCache)
+    end
+
+    @ExecSpace("ServerOnly")
+    method any GetEquipDef(string equipId)
+        -- equipId -> def(deep-copy). 미존재 시 nil.
+        self:GetEquipDefs()
+        for _, def in ipairs(self.equipCache) do
+            if def.equipId == equipId then return self:DeepCopy(def) end
+        end
+        return nil
     end
 
     -- ===== 자가검증(임시) =====

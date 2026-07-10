@@ -43,7 +43,10 @@ script PlayerRunComponent extends Component
             return
         end
         -- 하위 컴포넌트 부착 실패(EnsureRunComponents 에러) 시 nil 역참조 방지
-        if self:JobComp() == nil or self:Stat() == nil or self:Loadout() == nil or self:Growth() == nil then
+        ---@type PlayerEquipComponent
+        local equipComp = self.Entity:GetComponent("script.PlayerEquipComponent")
+        if self:JobComp() == nil or self:Stat() == nil or self:Loadout() == nil
+            or self:Growth() == nil or equipComp == nil then
             log_error("[PlayerRun] 하위 컴포넌트 누락 — 런 시작 중단")
             return
         end
@@ -53,6 +56,7 @@ script PlayerRunComponent extends Component
         self:Stat():ResetForRun(jb.baseStats)
         self:Loadout():ResetForRun()
         self:Growth():ResetForRun()
+        equipComp:ResetForRun()
         self:SetFreeMoveEnabled(false)   -- 아바타 = 보드 말(I-3): WASD 자유 이동 잠금, 이동은 젠 재배치로만
         self:SetupFixedCamera()          -- 카메라 고정: 보드 전체 뷰 (재배치 시 카메라 이동 없음)
         self.RunActive = true

@@ -1,0 +1,6 @@
+@Event
+script EquipSyncedEvent extends EventType
+    -- 보유 장비 목록의 클라 동기화. 소유 클라에서 LocalPlayer 엔티티에 발행 — 보유 목록 UI 소비.
+    -- equipText = 한 줄 요약 (예: "혼테일의 목걸이 · 메이플 크라운", 빈 문자열 = 없음)
+    property string equipText = ""
+end

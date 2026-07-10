@@ -16,9 +16,11 @@ script InGameChoiceController extends Component
     property TextComponent descChoice2 = "64b1cee3-0899-48e5-ba0e-f210636c7cc0"
     property TextComponent descChoice3 = "949dd69a-5fb0-4440-9b63-13070f15bf87"
     property ButtonComponent btnReplaceCancel = "f891aa09-2b84-4ecc-8c0f-8fae449cea26"
+    property ButtonComponent btnAdvance = "2525300d-e250-45bc-95d2-4c74a285d619"
 
     property integer choiceCount = 0
     property boolean replaceMode = false   -- 선택지 패널이 교체 대상 선택 모드인지 (사양서 §3-4)
+    property integer advanceTimerId = 0    -- 전직 버튼 재판정 타이머 (OnEndPlay 정리 — 파괴 후 발화 방지)
     property any handlers = nil
 
     @ExecSpace("ClientOnly")
@@ -30,6 +32,7 @@ script InGameChoiceController extends Component
         self:Wire(self.btnChoice2, function() self:CommitChoice(2) end)
         self:Wire(self.btnChoice3, function() self:CommitChoice(3) end)
         self:Wire(self.btnReplaceCancel, self.OnReplaceCancelClicked)
+        self:Wire(self.btnAdvance, self.OnAdvanceClicked)
         if isvalid(self.btnReplaceCancel) then self.btnReplaceCancel.Entity.Enable = false end
     end
 
@@ -43,7 +46,11 @@ script InGameChoiceController extends Component
 
     @ExecSpace("ClientOnly")
     method void OnEndPlay()
-        -- 구독 해제(필수).
+        -- 구독/타이머 해제(필수).
+        if self.advanceTimerId ~= 0 then
+            _TimerService:ClearTimer(self.advanceTimerId)
+            self.advanceTimerId = 0
+        end
         if self.handlers ~= nil then
             for _, rec in ipairs(self.handlers) do
                 if isvalid(rec.entity) then
@@ -57,13 +64,31 @@ script InGameChoiceController extends Component
     @ExecSpace("ClientOnly")
     method Color RarityColor(string rarity)
         -- 선택지 카드 배경색 — 종류/레어도가 한눈에 구분되도록 (가독성).
-        if rarity == "전직" then return Color(0.55, 0.42, 0.05, 0.97) end
-        if rarity == "합성" then return Color(0.42, 0.24, 0.08, 0.97) end
-        if rarity == "능력치" then return Color(0.10, 0.30, 0.18, 0.97) end
-        if rarity == "R" then return Color(0.10, 0.22, 0.42, 0.97) end
-        if rarity == "E" then return Color(0.28, 0.14, 0.40, 0.97) end
-        if rarity == "U" then return Color(0.42, 0.32, 0.06, 0.97) end
-        return Color(0.16, 0.20, 0.28, 0.97)   -- N/기본
+        -- 종이 카드 스프라이트 위에 곱연산 틴트로 적용되므로 밝은 계열 사용 (v14 리스킨)
+        if rarity == "장비" then return Color(0.45, 0.95, 1.00, 1) end
+        if rarity == "합성" then return Color(1.00, 0.72, 0.45, 1) end
+        if rarity == "능력치" then return Color(0.62, 0.95, 0.68, 1) end
+        if rarity == "R" then return Color(0.62, 0.78, 1.00, 1) end
+        if rarity == "E" then return Color(0.80, 0.62, 1.00, 1) end
+        if rarity == "U" then return Color(1.00, 0.82, 0.42, 1) end
+        return Color(0.94, 0.93, 0.90, 1)   -- N/기본
+    end
+
+    @ExecSpace("ClientOnly")
+    method void LayoutCards(integer visibleCount)
+        -- 카드 개수에 따라 중앙 정렬 재배치 (시작 2중1은 2장, 평시 3장 — 2026-07-10 개선).
+        -- 보이는 카드 i의 x = (i - (n+1)/2) × 간격. 카드 슬롯 자체는 3개 고정, 위치만 유동.
+        local spacing = 300
+        local buttons = { self.btnChoice1, self.btnChoice2, self.btnChoice3 }
+        for i = 1, visibleCount do
+            local btn = buttons[i]
+            if btn ~= nil and isvalid(btn) then
+                local tf = btn.Entity.UITransformComponent
+                if isvalid(tf) then
+                    tf.anchoredPosition = Vector2((i - (visibleCount + 1) / 2) * spacing, -30)
+                end
+            end
+        end
     end
 
     @ExecSpace("ClientOnly")
@@ -103,7 +128,60 @@ script InGameChoiceController extends Component
                 self:RenderCard(i, false, "", "", Color(0, 0, 0, 0), "")
             end
         end
+        self:LayoutCards(self.choiceCount)
+        self:RefreshAdvanceButton()
+        -- 전직 직후 재노출은 Tier/전리품 @Sync가 이벤트보다 늦게 도착할 수 있어 잠시 후 재판정
+        if self.advanceTimerId ~= 0 then _TimerService:ClearTimer(self.advanceTimerId) end
+        self.advanceTimerId = _TimerService:SetTimerOnce(function() self:RefreshAdvanceButton() end, 0.4)
         self.choicePanel.Enable = true
+    end
+
+    @ExecSpace("ClientOnly")
+    method void RefreshAdvanceButton()
+        -- 선택지 카드 아래 전직 버튼 (2026-07-10 재확정 UX): 조건 충족 시 금색 활성,
+        -- 미달 시 진행 표시(회색, 클릭 무시). 4차/교체 모드에선 숨김.
+        -- 임계값은 non-sync 상수 — 클라 기본값이 서버와 동일하다는 전제 (서버가 최종 재검증).
+        if not isvalid(self.btnAdvance) then return end
+        local btnEntity = self.btnAdvance.Entity
+        local player = _UserService.LocalPlayer
+        ---@type PlayerJobComponent
+        local jobComp = isvalid(player) and player:GetComponent("script.PlayerJobComponent") or nil
+        if jobComp == nil or jobComp.Tier >= 4 or self.replaceMode then
+            btnEntity.Enable = false
+            return
+        end
+        btnEntity.Enable = true
+        local ready = jobComp.ChoiceExposure >= jobComp.ExposureThreshold
+            and jobComp.LootCount >= jobComp.AdvanceLootCost
+        local sr = btnEntity.SpriteGUIRendererComponent
+        if ready then
+            btnEntity.TextComponent.Text = tostring(jobComp.Tier + 1) .. "차 전직! (전리품 "
+                .. tostring(jobComp.AdvanceLootCost) .. " 소모)"
+            if isvalid(sr) then sr.Color = Color(1, 1, 1, 1) end
+        else
+            btnEntity.TextComponent.Text = "전직까지  선택지 "
+                .. tostring(math.min(jobComp.ChoiceExposure, jobComp.ExposureThreshold))
+                .. "/" .. tostring(jobComp.ExposureThreshold)
+                .. " · 전리품 " .. tostring(math.min(jobComp.LootCount, jobComp.AdvanceLootCost))
+                .. "/" .. tostring(jobComp.AdvanceLootCost)
+            if isvalid(sr) then sr.Color = Color(0.55, 0.55, 0.55, 0.9) end
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnAdvanceClicked()
+        -- 전직 버튼: 조건 충족 시에만 서버 요청 (최종 검증은 서버 Advance).
+        local player = _UserService.LocalPlayer
+        if not isvalid(player) then return end
+        ---@type PlayerJobComponent
+        local jobComp = player:GetComponent("script.PlayerJobComponent")
+        if jobComp == nil or jobComp.Tier >= 4 then return end
+        if jobComp.ChoiceExposure < jobComp.ExposureThreshold
+            or jobComp.LootCount < jobComp.AdvanceLootCost then return end
+        ---@type PlayerGrowthComponent
+        local growth = player:GetComponent("script.PlayerGrowthComponent")
+        if growth == nil then return end
+        growth:RequestAdvanceFromChoice()
     end
 
     @ExecSpace("ClientOnly")
@@ -142,10 +220,13 @@ script InGameChoiceController extends Component
 
     @ExecSpace("ClientOnly")
     method void SetReplaceMode(boolean on)
-        -- 선택지 패널의 교체 모드 전환 + 취소 버튼 노출 동기화.
+        -- 선택지 패널의 교체 모드 전환 + 취소/전직 버튼 노출 동기화 (교체 중엔 전직 숨김).
         self.replaceMode = on
         if isvalid(self.btnReplaceCancel) then
             self.btnReplaceCancel.Entity.Enable = on
+        end
+        if on and isvalid(self.btnAdvance) then
+            self.btnAdvance.Entity.Enable = false
         end
     end
 
@@ -160,11 +241,12 @@ script InGameChoiceController extends Component
             if slot ~= nil then
                 self:RenderCard(i, true, slot.name .. " Lv." .. tostring(slot.level),
                     slot.tagsText .. "\n(태그 1종을 " .. event.newSkillName .. "이(가) 계승)",
-                    Color(0.30, 0.12, 0.12, 0.97), slot.iconRuid)
+                    Color(1.00, 0.62, 0.55, 1), slot.iconRuid)
             else
                 self:RenderCard(i, false, "", "", Color(0, 0, 0, 0), "")
             end
         end
+        self:LayoutCards(self.choiceCount)
         self.choicePanel.Enable = true
     end
 

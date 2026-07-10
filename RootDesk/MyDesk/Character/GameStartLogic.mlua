@@ -43,12 +43,13 @@ script GameStartLogic extends Logic
 
     @ExecSpace("ServerOnly")
     method void EnsureRunComponents(Entity playerEntity)
-        -- 캐릭터 런 컴포넌트 5종 부착(미부착 시). 아바타 = 보드 말(I-3)이므로 플레이어 엔티티에 직접.
+        -- 캐릭터 런 컴포넌트 6종 부착(미부착 시). 아바타 = 보드 말(I-3)이므로 플레이어 엔티티에 직접.
         local names = {
             "PlayerStatComponent",
             "PlayerJobComponent",
             "SkillLoadoutComponent",
             "PlayerGrowthComponent",
+            "PlayerEquipComponent",
             "PlayerRunComponent",
         }
         for _, name in ipairs(names) do

@@ -2,7 +2,7 @@
 script PlayerGrowthComponent extends Component
     -- per-player 판 내 성장 (설계서 §4.2, 규칙서 §6): EXP -> 레벨업 -> 선택지.
     -- 판마다 Lv.1 초기화(계정 레벨 없음). 진입 즉시 2중1 강제(1차 스킬 — 데드락 차단, 규칙서 §6.1).
-    -- 장비 선택지(10%)는 장비 시스템 미구현으로 EquipChance=0 잠정 — 도입 시 값만 올리면 됨.
+    -- 장비 선택지는 EquipChance(0.1 = 초안 §8 스킬 90/장비 10)로 조절 — 보유/효과는 PlayerEquipComponent.
 
     @Sync property integer Level = 1
     @Sync property integer Exp = 0
@@ -11,11 +11,10 @@ script PlayerGrowthComponent extends Component
     property any pendingChoices = nil   -- 노출 중 선택지 [{kind,skillId,name,rarity,...}] (nil=없음)
     property any pendingReplace = nil   -- 만석 교체 대기 중인 신규 스킬 선택지 (nil=없음, 사양서 §3-4)
     property boolean levelUpHold = false -- 공격 해소 중 레벨업 보류 — 체인 종료 후 일괄 판정 (2026-07-05 사용자 확정)
-    property number EquipChance = 0     -- 장비 등장 확률 (기획 10% — 장비 시스템 도입 시 활성)
+    property number EquipChance = 0.1   -- 장비 카드 등장 확률 (초안 §8 "스킬 90/장비 10" — 값만 바꿔 조절)
     property integer ChoiceCount = 3    -- 기본 선택지 수 (전리품 확장 시 5)
     property number SynthesisChance = 1 -- 합성 선택지 등장 확률 (기획 "확률적" — 테스트 동안 100%)
-    property string AdvanceIconRuid = "e633af12dee44638a57989be5e9f543f"  -- 전직 카드 아이콘
-    property string AdvanceFxRuid = "46fc31761f6b4b26be2d66e4530ba941"    -- 전직 연출 (플레이어 칸)
+    property string AdvanceFxRuid = "46fc31761f6b4b26be2d66e4530ba941"   -- 전직 연출 (아바타 부착)
 
     @ExecSpace("ServerOnly")
     method void ResetForRun()
@@ -96,8 +95,9 @@ script PlayerGrowthComponent extends Component
         -- 선택지 롤링 위임 — 후보 구성 규칙은 전부 ChoiceRollerLogic(무상태), 여기는 정책 값만 공급.
         ---@type SkillLoadoutComponent
         local loadout = self.Entity:GetComponent("script.SkillLoadoutComponent")
-        return _ChoiceRollerLogic:RollChoices(self:GetJobComponent(), loadout,
-            self.ChoiceCount, self.SynthesisChance, self.AdvanceIconRuid)
+        local equipComp = self.Entity:GetComponent("script.PlayerEquipComponent")
+        return _ChoiceRollerLogic:RollChoices(self:GetJobComponent(), loadout, equipComp,
+            self.ChoiceCount, self.SynthesisChance, self.EquipChance)
     end
 
     @ExecSpace("ServerOnly")
@@ -148,9 +148,7 @@ script PlayerGrowthComponent extends Component
         ---@type SkillLoadoutComponent
         local loadout = self.Entity:GetComponent("script.SkillLoadoutComponent")
         local resultStatus
-        if choice.kind == "advance" then
-            return self:CommitAdvance(choice)
-        elseif choice.kind == "synthesis" then
+        if choice.kind == "synthesis" then
             local transferred = loadout:Synthesize(choice.targetIndex, choice.sourceIndex)
             resultStatus = transferred ~= nil and "synthesized" or "synthesisFailed"
             choice.skillId = choice.name   -- 커밋 로그/이벤트 표기용
@@ -160,6 +158,11 @@ script PlayerGrowthComponent extends Component
             statComp:ApplyModifiers({ { stat = choice.stat, type = choice.modType, value = choice.value,
                 source = "choice:" .. choice.choiceId .. ":lv" .. tostring(self.Level) } })
             resultStatus = "statApplied"
+            choice.skillId = choice.name
+        elseif choice.kind == "equip" then
+            ---@type PlayerEquipComponent
+            local equipComp = self.Entity:GetComponent("script.PlayerEquipComponent")
+            resultStatus = (equipComp ~= nil and equipComp:AcquireEquip(choice.equipId)) and "equipped" or "equipFailed"
             choice.skillId = choice.name
         elseif choice.kind == "skillTag" then
             resultStatus = loadout:AddTagToSlot(choice.slotIndex, choice.tagId) and "tagApplied" or "tagFailed"
@@ -186,28 +189,37 @@ script PlayerGrowthComponent extends Component
         return resultStatus
     end
 
+    @ExecSpace("Server")
+    method void RequestAdvanceFromChoice()
+        -- 클라(선택지 패널 하단 전직 버튼, 2026-07-10 재확정 UX) -> 전직 요청. 소유자 검증 후
+        -- 선택지 노출 중일 때만 허용 (버튼은 선택지 패널에만 존재).
+        if senderUserId ~= self.Entity.PlayerComponent.UserId then
+            log_warning("[PlayerGrowth] 비소유자 전직 요청 무시: " .. senderUserId)
+            return
+        end
+        if self.pendingChoices == nil or self.pendingReplace ~= nil then return end
+        self:CommitAdvance()
+    end
+
     @ExecSpace("ServerOnly")
-    method string CommitAdvance(any choice)
-        -- 전직 카드 확정 (2026-07-10 확정 UX): 전직 연출 재생 + 선택지를 즉시 재추첨해
-        -- 새 차수 스킬 1장을 보장하여 재노출 — 선택 기회를 소모하지 않는다.
+    method string CommitAdvance()
+        -- 전직 확정: 아바타에 전직 연출 재생 + 선택지를 즉시 재추첨해 새 차수 스킬 1장을
+        -- 보장하여 재노출 — 선택 기회를 소모하지 않는다.
         ---@type PlayerJobComponent
         local jobComp = self:GetJobComponent()
         if not jobComp:Advance() then
-            -- 카드 노출 후 조건이 깨진 극단 케이스 — 선택지 유지, 재선택 가능
+            -- 버튼 노출 후 조건이 깨진 극단 케이스 — 선택지 유지, 재선택 가능
             log_warning("[PlayerGrowth] 전직 실패 — 조건 미충족 (선택지 유지)")
             return "advanceFailed"
         end
-        ---@type PlayerRunComponent
-        local runComp = self.Entity:GetComponent("script.PlayerRunComponent")
-        if runComp ~= nil and runComp.run ~= nil and runComp.run.flow ~= nil then
-            _TurnFlowStubLogic:SpawnCellFx(runComp.run, runComp.run.flow.playerCell, self.AdvanceFxRuid)
-        end
+        self:PlayAdvanceFx()
         self.pendingChoices = nil
+        local advanceName = tostring(jobComp.Tier) .. "차 전직"
         local ev = ChoiceCommittedEvent()
-        ev.skillId = choice.name
+        ev.skillId = advanceName
         ev.resultStatus = "advanced"
         self.Entity:SendEvent(ev)
-        self:NotifyCommittedOnClient(choice.name, "advanced", self.Entity.PlayerComponent.UserId)
+        self:NotifyCommittedOnClient(advanceName, "advanced", self.Entity.PlayerComponent.UserId)
         log("[PlayerGrowth] 전직 확정 -> " .. tostring(jobComp.Tier) .. "차 — 선택지 갱신")
         -- 선택지 재추첨: 새 차수 스킬이 안 뽑혔으면 마지막 슬롯을 새 차수 후보로 교체(보장)
         local loadout = self.Entity:GetComponent("script.SkillLoadoutComponent")
@@ -229,6 +241,18 @@ script PlayerGrowthComponent extends Component
         -- 전직 직후 재노출은 "무료 갱신" — 다음 전직 게이트의 노출 3회에 세지 않는다
         jobComp.ChoiceExposure = 0
         return "advanced"
+    end
+
+    @ExecSpace("ServerOnly")
+    method void PlayAdvanceFx()
+        -- 전직 연출: 플레이어 아바타에 직접 부착 — 젠 전(보드 칸 미배정)에도 항상 보인다
+        -- (기존 칸 부착 방식은 flow.playerCell이 없는 초반 레벨업에서 조용히 생략되던 버그).
+        local fx = _SpawnService:SpawnByModelId("BoardCell", "advance_fx", Vector3(0, 0.6, -0.2), self.Entity)
+        if isvalid(fx) then
+            local sr = fx.SpriteRendererComponent
+            if isvalid(sr) then sr.SpriteRUID = self.AdvanceFxRuid end
+            fx:Destroy(1.2)
+        end
     end
 
     @ExecSpace("Client")

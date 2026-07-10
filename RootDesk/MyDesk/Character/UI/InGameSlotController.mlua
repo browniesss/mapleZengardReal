@@ -14,12 +14,15 @@ script InGameSlotController extends Component
     property ButtonComponent btnReroll = "72691e69-3bb6-422f-b3df-ca3f8e1840cc"
     property Entity tooltipPanel = "cab1dad2-856d-4633-9311-9d8babc10e29"
     property TextComponent tooltipText = "00e47582-8851-4915-b99e-699af661f063"
+    property TextComponent ownedText = "6a3cd40a-e3c0-4bba-89c8-89a17a316e02"   -- 좌하단 보유 스킬·장비 목록 (UI설계 좌하단 영역)
 
     property integer orderSwapFirst = 0    -- 순서 변경 1차 선택 슬롯 (0=없음)
     property integer firingIndex = 0       -- 지금 발동 중인 순서 리스트 위치 (0=없음 — 강조용)
     property integer slotCount = 0
     property any handlers = nil
     property any slotTooltips = nil        -- [i] = 슬롯 호버 툴팁 텍스트
+    property string ownedSkillLine = ""    -- 보유 목록 조합용 (스킬/서포트 줄)
+    property string ownedEquipLine = ""    -- 보유 목록 조합용 (장비 줄)
 
     @ExecSpace("ClientOnly")
     method void OnBeginPlay()
@@ -100,12 +103,13 @@ script InGameSlotController extends Component
         for i, btn in ipairs(buttons) do
             local sr = btn.Entity.SpriteGUIRendererComponent
             if isvalid(sr) then
+                -- 우드 리본 스프라이트 위 곱연산 틴트 — 밝은 계열 사용 (v14 리스킨)
                 if i == self.firingIndex then
-                    sr.Color = Color(0.85, 0.28, 0.08, 1.0)
+                    sr.Color = Color(1.00, 0.45, 0.25, 1.0)
                 elseif i == self.orderSwapFirst then
-                    sr.Color = Color(0.45, 0.35, 0.12, 0.95)
+                    sr.Color = Color(1.00, 0.85, 0.45, 1.0)
                 else
-                    sr.Color = Color(0.15, 0.2, 0.3, 0.95)
+                    sr.Color = Color(1, 1, 1, 1)
                 end
             end
         end
@@ -195,5 +199,32 @@ script InGameSlotController extends Component
         if isvalid(self.supportText) then
             self.supportText.Text = event.supportText ~= "" and ("버프·패시브: " .. event.supportText) or ""
         end
+        -- 좌하단 보유 목록: 공격 스킬(레벨) + 서포트 줄
+        local skillLine = ""
+        for _, slot in ipairs(event.slots) do
+            if skillLine ~= "" then skillLine = skillLine .. " · " end
+            skillLine = skillLine .. slot.name .. " Lv." .. tostring(slot.level)
+        end
+        self.ownedSkillLine = skillLine
+        if event.supportText ~= "" then
+            self.ownedSkillLine = self.ownedSkillLine .. "\n보조: " .. event.supportText
+        end
+        self:RefreshOwnedText()
+    end
+
+    @EventSender("LocalPlayer")
+    handler OnEquipSynced(EquipSyncedEvent event)
+        -- 보유 장비 목록 갱신 (장비 획득 시 서버 통지).
+        self.ownedEquipLine = event.equipText
+        self:RefreshOwnedText()
+    end
+
+    @ExecSpace("ClientOnly")
+    method void RefreshOwnedText()
+        -- 좌하단 보유 목록 패널 텍스트 조합: 스킬/보조/장비.
+        if not isvalid(self.ownedText) then return end
+        local text = self.ownedSkillLine ~= "" and ("스킬: " .. self.ownedSkillLine) or "스킬: 없음"
+        text = text .. "\n장비: " .. (self.ownedEquipLine ~= "" and self.ownedEquipLine or "없음")
+        self.ownedText.Text = text
     end
 end
