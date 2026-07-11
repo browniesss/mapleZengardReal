@@ -16,9 +16,13 @@ script LootInventoryLogic extends Logic
     property integer MaxSlots = 24                   -- LootService.MaxSlots와 동일(§5)
     property number MagnetDuration = 0.5             -- 자석 흡입 시간(초)
     property number ToastDuration = 2.0              -- 토스트 표시 시간(초)
+    property string ClickSoundRuid = "972843e759204d3e9ad84e7d3fa94f83"   -- 표준 UI 클릭음(ui-sound.md)
+    property string HoverSoundRuid = "159bf70a74634bfc8e91a29e527a4be5"   -- 표준 UI 호버음(ui-sound.md)
 
     property any bagBtnHandler = nil
     property any closeBtnHandler = nil
+    property any bagHoverHandler = nil
+    property any closeHoverHandler = nil
     property integer toastTimerId = 0
     property any lastSlots = nil                     -- 마지막 SyncBag 페이로드(클라 캐시)
     property any lastCurrency = nil
@@ -29,10 +33,19 @@ script LootInventoryLogic extends Logic
         self.window.Enable = false
         self.toastGroup.Enable = false
         self.bagBtnHandler = self.bagBtn.Entity:ConnectEvent(ButtonClickEvent, function()
+            _SoundService:PlaySound(self.ClickSoundRuid, 1)
             self:ToggleWindow()
         end)
         self.closeBtnHandler = self.closeBtn.Entity:ConnectEvent(ButtonClickEvent, function()
+            _SoundService:PlaySound(self.ClickSoundRuid, 1)
             self.window.Enable = false
+        end)
+        -- 호버음: UITouchReceiveComponent가 버튼 엔티티에 있어야 발화(ui-sound.md — .ui에 추가됨)
+        self.bagHoverHandler = self.bagBtn.Entity:ConnectEvent(UITouchEnterEvent, function()
+            _SoundService:PlaySound(self.HoverSoundRuid, 1)
+        end)
+        self.closeHoverHandler = self.closeBtn.Entity:ConnectEvent(UITouchEnterEvent, function()
+            _SoundService:PlaySound(self.HoverSoundRuid, 1)
         end)
         log("[LootInvUI] ready (client)")
     end
@@ -45,6 +58,12 @@ script LootInventoryLogic extends Logic
         end
         if self.closeBtnHandler ~= nil then
             self.closeBtn.Entity:DisconnectEvent(ButtonClickEvent, self.closeBtnHandler)
+        end
+        if self.bagHoverHandler ~= nil then
+            self.bagBtn.Entity:DisconnectEvent(UITouchEnterEvent, self.bagHoverHandler)
+        end
+        if self.closeHoverHandler ~= nil then
+            self.closeBtn.Entity:DisconnectEvent(UITouchEnterEvent, self.closeHoverHandler)
         end
         if self.toastTimerId ~= 0 then
             _TimerService:ClearTimer(self.toastTimerId)

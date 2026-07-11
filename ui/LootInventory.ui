@@ -115,7 +115,7 @@
       {
         "id": "4c0afed1-cd87-4c93-99fd-8c5dc09b9e8b",
         "path": "/ui/LootInventory/BagBtn",
-        "componentNames": "MOD.Core.UITransformComponent,MOD.Core.SpriteGUIRendererComponent,MOD.Core.ButtonComponent,MOD.Core.TextComponent",
+        "componentNames": "MOD.Core.UITransformComponent,MOD.Core.SpriteGUIRendererComponent,MOD.Core.ButtonComponent,MOD.Core.TextComponent,MOD.Core.UITouchReceiveComponent",
         "jsonString": {
           "name": "BagBtn",
           "path": "/ui/LootInventory/BagBtn",
@@ -359,6 +359,10 @@
               "UseConstraintX": false,
               "UseConstraintY": false,
               "UseOutLine": false,
+              "Enable": true
+            },
+            {
+              "@type": "MOD.Core.UITouchReceiveComponent",
               "Enable": true
             }
           ],
@@ -1094,7 +1098,7 @@
       {
         "id": "1fdd689f-2493-40b2-bcd9-3b7ffe5df325",
         "path": "/ui/LootInventory/Window/CloseBtn",
-        "componentNames": "MOD.Core.UITransformComponent,MOD.Core.SpriteGUIRendererComponent,MOD.Core.ButtonComponent,MOD.Core.TextComponent",
+        "componentNames": "MOD.Core.UITransformComponent,MOD.Core.SpriteGUIRendererComponent,MOD.Core.ButtonComponent,MOD.Core.TextComponent,MOD.Core.UITouchReceiveComponent",
         "jsonString": {
           "name": "CloseBtn",
           "path": "/ui/LootInventory/Window/CloseBtn",
@@ -1338,6 +1342,10 @@
               "UseConstraintX": false,
               "UseConstraintY": false,
               "UseOutLine": false,
+              "Enable": true
+            },
+            {
+              "@type": "MOD.Core.UITouchReceiveComponent",
               "Enable": true
             }
           ],
