@@ -103,7 +103,9 @@ CountLoot(run, lootId) → integer
 ```
 
 - **책임 경계:** 추첨(무엇이 몇 개)은 MonsterService.KillUnit 소유. LootService는 적립·연출·질의만. Result 정산(영구 보상 전환)은 보상 시스템 사양 확정 시 §6에 이음.
-- 동기화: 가방은 서버 진실. 클라 UI에는 `@ExecSpace("Client")` RPC로 슬롯 스냅샷 push(가방 변경 시마다) — 런 휘발이라 @Sync 테이블보다 단순 RPC가 적합(멀티 대비 대상 유저 지정 가능).
+- 동기화: 가방은 서버 진실. 클라 UI에는 `@ExecSpace("Client")` RPC로 슬롯 스냅샷 push(가방 변경 시마다) — 런 휘발이라 @Sync 테이블보다 단순 RPC가 적합.
+- **유저 타깃팅(2026-07-12 확정):** `SyncBag`/`NotifyGain`은 `run.ownerUserId`가 있으면 **호출부 마지막 인자로 UserId를 붙여 단일 클라 타깃**(msw-scripting §6 Client RPC 규약 — 선언에는 추가하지 않음). 멀티에서 남의 토스트/가방이 내 화면에 뜨는 표시 누수 차단. ownerUserId 없는 더미 run(SelfTest)은 연출 push 자체를 생략.
+- **런 시작 빈 가방 push:** BuildBoard 직후 `PushBag(run)` 1회 — 이전 런의 클라 캐시(lastSlots) 잔존 방지.
 
 ---
 

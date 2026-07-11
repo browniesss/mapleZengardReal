@@ -618,6 +618,30 @@ script BoardService extends Logic
     end
 
     @ExecSpace("ServerOnly")
+    method void DestroyBoard(any run)
+        -- 보드 전체 파괴(§7, 2026-07-12 구현): Board 루트 1개 Destroy로 slot/타일/레이어 비주얼/
+        -- 유닛 프리팹(slot 자식)까지 연쇄 제거. run 참조(slots/cells/units)도 비워 멱등·재호출 안전.
+        -- 동적맵 파괴가 뒤따르는 경로에서도 명시 호출 — run 핸들의 stale 참조를 남기지 않기 위함.
+        if run == nil or run.board == nil then return end
+        local board = run.board
+        if board.rootRef ~= nil and isvalid(board.rootRef) then
+            board.rootRef:Destroy()
+        end
+        board.rootRef = nil
+        board.slots = {}
+        board.cells = {}
+        if run.units ~= nil then
+            for _, unit in pairs(run.units) do
+                unit.alive = false
+                unit.entityRef = nil     -- 엔티티는 루트 연쇄로 파괴됨 — 핸들만 분리
+                unit.gaugeRef = nil
+                unit.gaugeComp = nil
+            end
+            run.units = {}
+        end
+    end
+
+    @ExecSpace("ServerOnly")
     method integer ApplyWavePlacements(any run, any def, any stageDef, integer wave)
         -- 스테이지 웨이브 배치(§3.6): stageDef.wavePlacements 중 wave 번호 일치분만 적용.
         -- WaveGen 페이즈(BoardFlowLogic)가 호출. stageDef 없거나 해당 웨이브 배치 없으면 0.

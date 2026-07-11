@@ -229,11 +229,17 @@ script BoardFlowLogic extends Logic
     end
 
     method void OnEnterResult(any run)
-        -- [스텁] 종료: 승/패 결과 처리(리워드/UI/런 정리).
-        -- 보드 말 이동모드 해제 — 일반(메이플 방식) 맵 복귀 시 점프/중력이 다시 동작해야 한다.
-        -- TODO: 결과 UI, 보드 DestroyBoard, 런 레지스트리 정리.
+        -- 종료: 이동모드 원복 → 정산 요약 → 런 정리(유저 복귀·보드 파괴·동적맵 파괴·레지스트리 제거).
+        -- 원복이 반드시 복귀 텔레포트보다 먼저 — 아니면 로비에서 컨트롤러 꺼진 채 잔존(2026-07-12 리뷰 #13).
+        -- TODO: 결과 UI(승/패 화면), 보상 정산 파이프(LOOT-SPEC §6 — 보상 시스템 사양 확정 시).
         local reverted = self:ApplyBoardMoveMode(run, false)
-        log("[BoardFlow] (Result) 런 종료 — 보드 이동모드 해제 " .. tostring(reverted) .. "명, 결과 처리 예정")
+        local gained = 0
+        if run.lootBag ~= nil and run.lootBag.totalGained ~= nil then
+            for _, n in pairs(run.lootBag.totalGained) do gained = gained + n end
+        end
+        log("[BoardFlow] (Result) 런 종료 — 이동모드 해제 " .. tostring(reverted) .. "명"
+            .. ", 전리품 누계 " .. tostring(gained) .. "개 (정산 파이프는 §6 예약)")
+        _BoardRenderProbe:TeardownRun(run)
     end
 
     -- ===== 자가검증(임시) =====

@@ -9,14 +9,21 @@ script BoardRenderProbe extends Logic
     property Vector3 BoardOrigin = Vector3(0, 1, 0) -- Board 루트 앵커 위치(=originOffset). 보드 전체 이동은 이 값만 조정
 
     property any userEnterHandler = nil
+    property any userLeaveHandler = nil
+    property any userDisconnectHandler = nil
     property integer runCounter = 0
     property any runs = nil                          -- runMapName -> run 핸들
+    property any runsByUser = nil                    -- userId -> runMapName (이탈 시 런 역참조 + 빌드 전 pending 추적)
 
     @ExecSpace("ServerOnly")
     method void OnBeginPlay()
         -- 입장 트리거 연결: 입장하는 플레이어마다 새 동적 보드를 만든다.
+        -- 이탈 트리거(2026-07-12 생명주기 리뷰): 퇴장/접속종료 시 런·동적맵 정리 — 미구독이면 좀비 런 누적.
         self.runs = {}
+        self.runsByUser = {}
         self.userEnterHandler = _UserService:ConnectEvent(UserEnterEvent, self.OnUserEnter)
+        self.userLeaveHandler = _UserService:ConnectEvent(UserLeaveEvent, self.OnUserLeave)
+        self.userDisconnectHandler = _UserService:ConnectEvent(UserDisconnectEvent, self.OnUserDisconnect)
         log("[BoardProbe] ready — source=" .. self.SourceMapName .. " stage=" .. self.StageId)
     end
 
@@ -26,6 +33,14 @@ script BoardRenderProbe extends Logic
         if self.userEnterHandler then
             _UserService:DisconnectEvent(UserEnterEvent, self.userEnterHandler)
             self.userEnterHandler = nil
+        end
+        if self.userLeaveHandler then
+            _UserService:DisconnectEvent(UserLeaveEvent, self.userLeaveHandler)
+            self.userLeaveHandler = nil
+        end
+        if self.userDisconnectHandler then
+            _UserService:DisconnectEvent(UserDisconnectEvent, self.userDisconnectHandler)
+            self.userDisconnectHandler = nil
         end
     end
 
@@ -41,10 +56,15 @@ script BoardRenderProbe extends Logic
             return
         end
         log("[BoardProbe] 동적맵 생성됨: " .. runMapName)
+        -- 생성 즉시 유저→맵 매핑 기록: 빌드 완료 전에 이탈해도 맵을 회수할 수 있게(생성-빌드 사이 누수 방지).
+        self.runsByUser[event.UserId] = runMapName
 
         local playerEntity = self:FindUserEntity(event.UserId)
         if not isvalid(playerEntity) then
+            -- 빌드 진입 실패: 방금 만든 맵을 즉시 회수(2026-07-12 생명주기 리뷰 — 실패 경로 누수).
             log_error("[BoardProbe] 플레이어 엔티티 못 찾음 userId=" .. tostring(event.UserId))
+            self.runsByUser[event.UserId] = nil
+            self:WaitAndDestroyMap(runMapName, 0)
             return
         end
 
@@ -76,14 +96,16 @@ script BoardRenderProbe extends Logic
         end
         local users = _UserService:GetUsersByMapName(runMapName)
         if users and #users > 0 and isvalid(users[1]) and isvalid(users[1].CurrentMap) then
-            self:BuildBoard(users[1].CurrentMap, runMapName)
+            local ownerUserId = ""
+            if isvalid(users[1].PlayerComponent) then ownerUserId = users[1].PlayerComponent.UserId end
+            self:BuildBoard(users[1].CurrentMap, runMapName, ownerUserId)
             return
         end
         _TimerService:SetTimerOnce(function() self:WaitAndBuild(runMapName, attempt + 1) end, 0.2)
     end
 
     @ExecSpace("ServerOnly")
-    method void BuildBoard(Entity mapEntity, string runMapName)
+    method void BuildBoard(Entity mapEntity, string runMapName, string ownerUserId)
         -- 데이터구동 빌드: StageDef(스테이지 관리 데이터) -> BoardDef -> run 셋업 -> BoardService:BuildBoard.
         -- run.def/run.stageDef를 run 핸들에 실어 이후 페이즈(WaveGen 등)가 데이터 재조회 없이 소비.
         local stageDef = _BoardCatalogLogic:GetStageDef(self.StageId)
@@ -99,6 +121,8 @@ script BoardRenderProbe extends Logic
         local run = {
             stageDef = stageDef,
             def = def,
+            runMapName = runMapName,       -- 파괴 대상 동적맵 이름(TeardownRun이 소비, 2026-07-12)
+            ownerUserId = ownerUserId,     -- 런 소유 유저(Loot RPC 타깃팅 — 멀티 대비 선반영)
             units = {},                    -- 유닛 인스턴스 레지스트리(MONSTER-SPEC §3, MonsterService 소유)
             lootBag = { slots = {}, currency = {}, totalGained = {} },   -- 런 인벤(LOOT-SPEC §3, LootService 소유 — 빈 가방 시작)
             maxWave = stageDef.maxWave,    -- 웨이브 소진 판정(MONSTER-SPEC §6 DecideNext)
@@ -121,5 +145,85 @@ script BoardRenderProbe extends Logic
 
         -- 보드 빌드 완료 → 게임 사이클 FSM 시작(Init 진입). 이후 전이는 BoardFlowLogic 소유.
         _BoardFlowLogic:StartRun(run)
+        -- 런 시작 시 빈 가방 스냅샷 push: 이전 런의 클라 캐시(lastSlots) 잔존 방지(2026-07-12 리뷰).
+        _LootService:PushBag(run)
+    end
+
+    -- ===== 런 정리 (2026-07-12 생명주기 리뷰 — 동적맵은 생성됐다 사라져야 한다) =====
+
+    @ExecSpace("ServerOnly")
+    method void TeardownRun(any run)
+        -- 정상 종료(Result) 경로: 유저 복귀 → 보드 파괴 → 맵 파괴 → 레지스트리 제거.
+        -- DestroyDynamicMap은 유저가 남아 있으면 실패(UserExistsInDynamicMap=7)하므로 이 순서가 강제된다.
+        if run == nil or run.runMapName == nil then return end
+        local mapName = run.runMapName
+        -- 1) 남은 유저를 소스맵(정적)으로 텔레포트. 동적맵은 같은 정적 룸 소속이라
+        --    MoveUserToStaticRoom은 no-op(2026-07-12 실측: UserExistsInDynamicMap 타임아웃) —
+        --    룸 이동이 아니라 맵 이동(MoveToMapPosition)이어야 맵이 빈다.
+        local users = _UserService:GetUsersByMapName(mapName)
+        if users ~= nil then
+            for _, u in ipairs(users) do
+                if isvalid(u) and isvalid(u.PlayerComponent) then
+                    u.PlayerComponent:MoveToMapPosition(self.SourceMapName, Vector2(0, 0))
+                end
+            end
+        end
+        -- 2) 보드/런 상태 파괴(맵 파괴로도 연쇄되지만 run 참조 정리를 명시적으로)
+        _BoardService:DestroyBoard(run)
+        -- 3) 유저 이탈 완료를 기다리며 맵 파괴 재시도
+        self:ClearUserMappings(mapName)
+        self:WaitAndDestroyMap(mapName, 0)
+    end
+
+    @ExecSpace("ServerOnly")
+    method void WaitAndDestroyMap(string mapName, integer attempt)
+        -- 동적맵 파괴 재시도 루프: 유저가 남아 있으면(code 7) 0.2s 간격 재시도.
+        -- DynamicMapNotFound(4)는 멱등 성공으로 취급. 타임아웃 시 레지스트리만 정리(맵은 목록 API로 회수 가능).
+        local code = _DynamicMapService:DestroyDynamicMap(mapName)
+        if code == DynamicMapResultCode.Success or code == DynamicMapResultCode.DynamicMapNotFound then
+            self.runs[mapName] = nil
+            log("[BoardProbe] 동적맵 파괴: " .. mapName .. " code=" .. tostring(code))
+            return
+        end
+        if code == DynamicMapResultCode.UserExistsInDynamicMap and attempt < 25 then
+            _TimerService:SetTimerOnce(function() self:WaitAndDestroyMap(mapName, attempt + 1) end, 0.2)
+            return
+        end
+        log_error("[BoardProbe] 동적맵 파괴 실패: " .. mapName .. " code=" .. tostring(code) .. " attempt=" .. tostring(attempt))
+        self.runs[mapName] = nil
+    end
+
+    @ExecSpace("ServerOnly")
+    method void ClearUserMappings(string mapName)
+        -- runsByUser에서 해당 맵을 가리키는 항목 제거.
+        for userId, m in pairs(self.runsByUser) do
+            if m == mapName then self.runsByUser[userId] = nil end
+        end
+    end
+
+    @ExecSpace("ServerOnly")
+    method void OnUserLeave(UserLeaveEvent event)
+        -- 월드 퇴장: 유저는 이미 빠졌으므로 즉시 정리 가능(1인 1런 전제 — 멀티 시 멤버 감소 처리로 확장).
+        self:TeardownRunOfUser(event.UserId, "leave")
+    end
+
+    @ExecSpace("ServerOnly")
+    method void OnUserDisconnect(UserDisconnectEvent event)
+        -- 접속 종료: 1차(솔로)는 Leave와 동일하게 즉시 정리. 멀티 확장 시 유예(grace) + Reconnect 복귀로 대체 예정.
+        self:TeardownRunOfUser(event.UserId, "disconnect")
+    end
+
+    @ExecSpace("ServerOnly")
+    method void TeardownRunOfUser(string userId, string reason)
+        -- 이탈 유저의 런 역참조 → 보드 파괴 + 맵 파괴. 보드 밖(로비) 이탈이면 무시.
+        local mapName = self.runsByUser[userId]
+        if mapName == nil then return end
+        self.runsByUser[userId] = nil
+        log("[BoardProbe] 유저 이탈(" .. reason .. ") → 런 정리: " .. mapName)
+        local run = self.runs[mapName]
+        if run ~= nil then
+            _BoardService:DestroyBoard(run)
+        end
+        self:WaitAndDestroyMap(mapName, 0)
     end
 end

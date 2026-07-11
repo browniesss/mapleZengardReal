@@ -329,10 +329,18 @@ OnUnitExit(def, board, col, row) → string[]
 
 -- 생명주기 (ServerOnly) — 런타임 스폰(§1.5) + initialPlacements 시딩
 BuildBoard(run, def)   -- 비-void 칸 셀 스폰 + 배경 + 점유 초기화 + initialPlacements 적용
-ResetBoard(run, def)
-SetBoardVisible(run, visible)
-DestroyBoard(run)
+ResetBoard(run, def)   -- (예약 — 맵 유지·보드만 리셋 경로용)
+SetBoardVisible(run, visible)   -- (예약)
+DestroyBoard(run)      -- ✅ 구현(2026-07-12): Board 루트 1개 Destroy로 slot/타일/레이어 비주얼/유닛 연쇄
+                       --   + run 참조(slots/cells/units) 정리. 멱등(재호출 안전).
 ```
+
+**런 정리 파이프 (2026-07-12 확정 — 소유: BoardRenderProbe):** 동적맵은 생성됐다 반드시 사라진다.
+
+- `run.runMapName`/`run.ownerUserId`를 run 셋업에 기록(파괴 대상·RPC 타깃 역참조).
+- **정상 종료(Result):** `이동모드 원복 → 정산 요약 → TeardownRun(run)` = 유저를 `MoveUserToStaticRoom`으로 복귀 → `DestroyBoard(run)` → `WaitAndDestroyMap`(0.2s 재시도 루프). 순서는 엔진 제약이 강제 — **`DestroyDynamicMap`은 유저가 맵에 남아 있으면 실패(`UserExistsInDynamicMap=7`)**. `DynamicMapNotFound(4)`는 멱등 성공 취급, 타임아웃(25회) 시 레지스트리만 정리(고아 맵은 `GetDynamicMapNameList`로 회수 가능).
+- **비정상 이탈:** `UserLeaveEvent`/`UserDisconnectEvent` 구독 → `runsByUser`(userId→runMapName, 맵 생성 즉시 기록 — 빌드 전 이탈 누수 방지) 역참조 → 즉시 DestroyBoard+맵 파괴. 1차(솔로)는 Disconnect=Leave 동일 처리, 멀티 확장 시 유예(grace)+`UserReconnectEvent` 복귀로 대체 예정.
+- 빌드 진입 실패(유저 엔티티 미해석 등) 경로에서도 방금 만든 맵을 즉시 회수.
 
 ---
 

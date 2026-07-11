@@ -70,7 +70,13 @@ script LootService extends Logic
             local josa = "개를"
             if def.currency then josa = "을(를)" end
             local toastMsg = tostring(def.name) .. " " .. tostring(count) .. josa .. " 얻었습니다."
-            _LootInventoryLogic:NotifyGain(toastMsg, tostring(def.iconRuid or ""), tostring(def.pickupSound or ""), pos.x, pos.y)
+            -- 런 소유 유저에게만 연출(멀티 표시 격리, 2026-07-12): Client RPC는 호출부 마지막 인자로
+            -- UserId를 붙이면 단일 클라 타깃(msw-scripting §6 — 선언에는 추가하지 않는다).
+            if run.ownerUserId ~= nil and run.ownerUserId ~= "" then
+                _LootInventoryLogic:NotifyGain(toastMsg, tostring(def.iconRuid or ""), tostring(def.pickupSound or ""), pos.x, pos.y, run.ownerUserId)
+            else
+                _LootInventoryLogic:NotifyGain(toastMsg, tostring(def.iconRuid or ""), tostring(def.pickupSound or ""), pos.x, pos.y)
+            end
             self:PushBag(run)
         end
         return true
@@ -79,7 +85,7 @@ script LootService extends Logic
     @ExecSpace("ServerOnly")
     method void PushBag(any run)
         -- 가방 스냅샷을 클라 UI에 push(LOOT-SPEC §4 동기화). 클라는 serveronly 데이터셋을 못 읽으므로
-        -- 표시 데이터(icon)를 서버가 채워 보낸다. 1차 싱글 = 브로드캐스트(멀티 시 유저별 타깃 확장).
+        -- 표시 데이터(icon)를 서버가 채워 보낸다. run.ownerUserId 있으면 그 유저에게만 타깃(2026-07-12).
         local bag = self:EnsureBag(run)
         local slots = {}
         for i, slot in ipairs(bag.slots) do
@@ -90,7 +96,11 @@ script LootService extends Logic
         end
         local currency = {}
         for k, v in pairs(bag.currency) do currency[k] = v end
-        _LootInventoryLogic:SyncBag(slots, currency)
+        if run.ownerUserId ~= nil and run.ownerUserId ~= "" then
+            _LootInventoryLogic:SyncBag(slots, currency, run.ownerUserId)
+        else
+            _LootInventoryLogic:SyncBag(slots, currency)
+        end
     end
 
     -- ===== 질의 (UI·Result가 소비) =====
