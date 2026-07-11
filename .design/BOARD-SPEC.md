@@ -24,7 +24,8 @@
 - **0-기반 좌표**: `col ∈ [0, cols-1]`, `row ∈ [0, rows-1]`.
 - **NxM 가변 격자**: `cols`/`rows`는 레이아웃 데이터로 결정 (정사각 NxN 아님, 확장성 위해 NxM).
 - 셀↔월드 변환은 **단일 출처**(`CellToWorld`/`WorldToCell`)만 사용. `cols`/`rows`/`cellSize`/`center`는 상수가 아니라 **`BoardDef`(데이터)** 에서 읽는다 (현행 `_BoardConfig.GRID_COLS` 상수 → `def.cols`로 대체).
-- 유사 깊이(아래 행이 앞), `originOffset`(co-located 보드 월드충돌 회피)는 현행 구조 유지.
+- 유사 깊이(아래 행이 앞), `originOffset`(co-located 보드 월드충돌 회피 + 보드 전체 화면 오프셋)는 현행 구조 유지. **2026-07-09부터 originOffset은 슬롯별 가산이 아니라 `Board` 루트 앵커의 위치로 적용**(§1.5 하이어라키) — 보드 전체 이동 = 루트 1개 이동. 기본값은 `BoardRenderProbe.BoardOrigin = (0, 1, 0)`.
+- 셀→루트-로컬 변환은 `CellToLocal`(slot 스폰용), 셀→월드는 `CellToWorld = CellToLocal + originOffset`(질의용). `WorldToCell`은 originOffset 차감으로 대칭.
 
 ---
 
@@ -44,7 +45,39 @@
 
 - **단일 `BoardMap`** → 보드 추가 = 데이터 1행 (맵 에셋 추가 불필요).
 - `void` = 그냥 스폰 안 함. 비정형·NxM·레이아웃별 cellSize 전부 런타임 계산.
-- 스폰된 셀은 복제맵의 자식 → `mapEntityRef`로 접근, `SetBoardVisible`/`GetChildByName` 계약 유지.
+- **하이어라키 규약(2026-07-09 확정 — 가독성 + 보드 전체 이동 지점):**
+  ```
+  BoardMap_runN (동적맵 루트)
+  └── Board                  ← BoardRoot.model 앵커. 위치 = originOffset(BoardRenderProbe.BoardOrigin). board.rootRef
+      └── Slot_c_r × 비-void 칸수   ← BoardSlot 앵커, 루트-로컬 CellToLocal 좌표. board.slots[key]
+          ├── Tile_c_r              ← Ground 비주얼 (local 원점)
+          ├── object/aura/item_c_r  ← 레이어 비주얼 (local z-0.05)
+          └── unit_instN            ← 유닛 프리팹 루트 (local z-0.05, MonsterService 소유, 2026-07-10 개편)
+              ├── Body              ← 클립 스프라이트(연출 대상)
+              └── Gauge             ← HP/마나 게이지 (local y+0.45)
+  ```
+  맵 루트에 슬롯이 평면으로 깔리지 않고 `Board` 노드 하나로 묶인다. 보드 파괴(Result)도 루트 1개 Destroy로 연쇄 예정.
+- 스폰된 셀은 `Board` 루트 경유 복제맵의 자식 → `board.rootRef`/`mapEntityRef`로 접근, `SetBoardVisible`/`GetChildByName` 계약 유지.
+- **비주얼 뎁스 체계(2026-07-11 전면 확정 — OrderInLayer 단독 관리 폐기):** 뎁스는 3단 원칙으로 관리한다 — **SortingLayer = 밴드 간 구분(전역) · OrderInLayer = 밴드 안 종류별 서열 · Z = 같은 서열 안 행 기반 유사 깊이**(`CellToLocal`의 `z = row * 0.01`, 작은 row = 화면 아래 = 작은 z = 앞 — 코드 검증 2026-07-11). **밴드 계약은 "레이어 이름 + 상대 순서"다 — `LayerSortOrder` 절대값은 Maker 소유**(패널 조작·저장 시 연속 정수 0..N으로 강제 재부여됨을 실측, 2026-07-11: 10/20/30/40 → 1/2/3/4). 렌더러는 레이어를 이름으로 참조하므로 재번호에 영향 없음. OrderInLayer 서열(10 단위)은 우리 소유라 그대로 유지:
+
+  | 상대 순서(뒤→앞) | 레이어 | 소속 비주얼 | 밴드 내 OrderInLayer 서열 |
+  |:--:|---|---|---|
+  | 0 | `Layer1` (엔진 기본) | 맵 배경/장식 | — (엔진 소유, 커스텀 배정 금지) |
+  | 1 | `BoardGround` | Ground 타일(BoardCell/BlockCell) | 기본 0, 특수 타일 강조 1~9 |
+  | 2 | `BoardProp` | 칸 위 정적물 | **오라(RageAura) 0 < 오브젝트(Rock) 10 < 아이템(AtkPotionItem.Icon) 20** — 같은 칸 공존(오라+아이템 등) 시 서열 보장 |
+  | 3 | `BoardUnit` | 유닛 프리팹 Body(몬스터 클립) + 착석 플레이어(편입 예정 ⚠️) | Body 0 통일. 행 정렬은 slot z가 담당 |
+  | (BoardUnit↑ 삽입 예약) | `BoardFx` *(미박제)* | 피격/스킬 이펙트, 데미지 텍스트, 드랍 팝 | 연출 확장 시 아래 정본 절차로 삽입 |
+  | 4 | `BoardOverlay` | 월드 부착 오버레이 | 게이지 10 < 상태이상 아이콘 20(예약) < 타겟/선택 마커 30(예약) |
+
+  **레이어 박제 정본 구조(2026-07-11 재구성 — Map Layer 패널 붉은 표시 이슈로 확정):** 커스텀 레이어는 Maker 패널 [+]가 만드는 구조 그대로 박제해야 패널에 정식(검정) 등록된다 — ① `MapleMapLayer_N` 엔티티(`nameEditable:false`, `origin.root_entity_id:null`, `MapLayerComponent.MapLayerName`=밴드 이름) + ② **짝 `RectTileMap_N` 엔티티**(`SortingLayer:"MapLayer{N}"`, 빈 tileMap) 쌍. 과거처럼 MapLayer 엔티티만 단독 주입하면 렌더링은 되지만 패널에 붉은(미등록) 표시가 뜬다. 새 밴드 추가는 패널 [+] 또는 이 정본 복제 절차만 사용.
+
+  운영 규칙:
+  - 각 `.model`의 렌더러 `SortingLayer`+`OrderInLayer` 값으로 **정적 배정** — 신규 비주얼 모델은 반드시 밴드 하나 + 밴드 내 서열을 명시(무명시 = Default 혼용 금지). 런타임 SortingLayer 변경 금지, 예외는 연출 코드에서 명시적으로만.
+  - `MapLayer{N}`(짝 타일맵 SortingLayer 키)·`Layer1`은 엔진 소유 — 렌더러가 직접 참조하지 않는다(밴드 이름만 사용).
+  - 화면 HUD/팝업(.ui)은 UI 캔버스 소관 — 이 체계 밖. **"월드에 부착되는 오버레이"(게이지 등)만 `BoardOverlay` 소속**이라는 경계를 유지한다.
+  - ⚠️ 플레이어 편입 검증 대기: 착석(Init) 구현 시 아바타 렌더러를 `BoardUnit` 밴드로 배정 가능한지 인엔진 실측 필요. 불가하면 Default 잔류 + 보드 밴드와의 상대 순서를 실측으로 박제.
+
+  근거 실측: OrderInLayer 단독으론 animationclip 재생 스프라이트에 밀림(2026-07-10), 레이어 혼용(Default vs MapLayer)은 우선순위가 암묵적(2026-07-09), 파일 단독 주입 레이어는 패널 미등록(붉은 표시)·SortOrder 절대값은 저장 시 재번호(2026-07-11).
 
 > ✅ **인엔진 검증 게이트 — 해소(2026-06-30)**: `BoardRenderProbe.mlua` PoC로 검증 완료. `CreateDynamicMap('BoardMap')` → 텔레포트 → 동적맵 안에서 `SpawnByModelId`로 셀 25/25 + 몬스터자리 3/3 런타임 스폰 → **클라 play 카메라에 격자 정상 렌더 확인**(스크린샷). 박제 복제와 다른 "런타임 스폰" 경로가 정상 렌더됨이 입증됨 → 폴백(레이아웃별 박제맵, B안) 불필요. 본 구현 진행 가능.
 
@@ -126,6 +159,7 @@ finalValue *= Π(1 + PercentMult)      # 곱연산 % (강버프, 개별 곱)
 | `objectId` | `rock` / `totem` / `switch` | |
 | `blocksMove` | `true` | 유닛 진입 차단 |
 | `blocksSkill` | `true` | **스킬 범위/투사체 차단** (combat이 조회) |
+| `blocksPlacement` | `true` | **칸 독점(2026-07-11 신설)** — 이 오브젝트가 있는 칸에는 유닛/아이템/오라를 배치할 수 없고, 역방향으로 aura/item/unit이 이미 점유한 칸에는 이 오브젝트를 배치할 수 없다(배치 순서 무관 불변식, §5 술어). 여러 블럭형 오브젝트가 재사용하는 데이터 플래그 |
 | `gimmickId` | `null` / `pressurePlate` (JSON/스칼라) | 기믹 동작 참조(옵션) — 동작 정의는 §9 deferred |
 | `model` | `Rock` | |
 
@@ -175,7 +209,8 @@ BoardDef = {
 ```lua
 run.board = {
   defId        = "classic_7x7",     -- 정적 정의 참조(복사 아님)
-  mapEntityRef, originOffset,
+  mapEntityRef, originOffset,       -- originOffset = Board 루트 위치(§1.5 하이어라키)
+  rootRef, slots,                   -- Board 루트 앵커 / 칸별 slot 엔티티 핸들(비주얼 생명주기)
   cells = {
     ["3_4"] = {                     -- 레이어별 점유. nil = 비어있음
       aura   = { auraId,     instanceId } | nil,            -- 칸당 1개 (중첩 없음)
@@ -206,20 +241,22 @@ run.board = {
 |---|---|---|---|---|---|
 | **Ground** | 정적(BoardDef) | 1 | 바닥/지형. `occupiable`·`blocksMove`·기본 모디파이어 | `blocksMove`면 차단 | (항상 깔림) |
 | **AuraArea** | 동적(+정적 시드) | **1 (중첩 없음)** | 서 있으면 버프/디버프 | 차단 안 함 | 효과 적용(떠나면 해제) |
-| **Object** | 동적(+정적 시드) | 1 | **다용도**: 이동차단 장애물 / 스킬범위 차단 / 기믹 트리거. 데이터 플래그로 용도 결정 | `blocksMove`면 차단 | 기믹 트리거(옵션) |
+| **Object** | 동적(+정적 시드) | 1 | **다용도**: 이동차단 장애물 / 스킬범위 차단 / 칸 독점(`blocksPlacement`) / 기믹 트리거. 데이터 플래그로 용도 결정 | `blocksMove`면 차단 | 기믹 트리거(옵션) |
 | **Item** | 동적(+정적 시드) | 1 | N턴 버프 픽업(공격력업 물약 등) | 차단 안 함 | 픽업 → 버프 부여 후 제거 |
 | **Unit** | 동적(+정적 시드) | **1 (배타)** | 몬스터/플레이어. 같은 칸에 둘 불가 | — | — |
 
 > **명칭 주의:** "AuraArea"는 **칸당 1개**(반경/영역 개념 없음). 넓은 오라(예: 3×3)는 `initialPlacements`로 9칸을 각각 시드해야 한다. "Area"는 레이어 이름일 뿐 다중 칸을 뜻하지 않음.
 
-**레이어별 배치 가능 술어** — §6 `ResolvePlacement`/§7 `GetEmptyCells`의 "배치가능"은 layer에 따라 아래 `CanPlace[Layer]`를 가리킨다. 공통 전제: `IsInside(def,c,r)`(= void 칸 false). 각 술어는 해당 **layer가 비어있음**을 포함:
+**레이어별 배치 가능 술어** — §6 `ResolvePlacement`/§7 `GetEmptyCells`의 "배치가능"은 layer에 따라 아래 `CanPlace[Layer]`를 가리킨다. 각 술어는 해당 **layer가 비어있음**을 포함.
+
+공통 술어 **`CanUnitStand`** = `IsInside(= void 칸 false) ∧ Ground.occupiable ∧ ¬Ground.blocksMove ∧ ¬(Object ∧ (Object.blocksMove ∨ Object.blocksPlacement))` — "유닛이 진입 가능한 칸". unit/item/aura 술어가 공유(2026-07-11 도입).
 
 | layer | 술어 |
 |---|---|
-| **unit** (`CanPlaceUnit`) | `IsInside ∧ Ground.occupiable ∧ ¬Ground.blocksMove ∧ ¬(Object ∧ Object.blocksMove) ∧ unit 빈칸` |
-| **object** (`CanPlaceObject`) | `IsInside ∧ ¬Ground.blocksMove ∧ object 빈칸` (벽 셀엔 오브젝트 안 둠; blocksMove 오브젝트는 허용) |
-| **aura** (`CanPlaceAura`) | `IsInside ∧ aura 빈칸` (지형 무관 — 벽 위에도 표식 가능) |
-| **item** (`CanPlaceItem`) | `IsInside ∧ Ground.occupiable ∧ item 빈칸` (유닛이 주울 수 있어야 하므로 occupiable 요구) |
+| **unit** (`CanPlaceUnit`) | `CanUnitStand ∧ unit 빈칸` |
+| **object** (`CanPlaceObject`) | `IsInside ∧ ¬Ground.blocksMove ∧ object 빈칸` (벽 셀엔 오브젝트 안 둠). **`blocksPlacement` 오브젝트는 추가로 `aura/item/unit 전부 빈칸` 필요** — 칸 독점의 역방향(배치 순서 무관 불변식, 2026-07-11). 판정을 위해 `CanPlace`/`GetEmptyCells`에 payload(objectId)가 스레딩됨(§7) |
+| **aura** (`CanPlaceAura`) | `CanUnitStand ∧ aura 빈칸` — **2026-07-11 개정: '지형 무관(벽 위에도 표식 가능)' 폐기.** 블럭 지형/바위 칸 위에 마법진이 그려지던 겹침 실측 → 오라는 유닛이 서야 발동하므로 유닛 진입 가능 칸 전용 |
+| **item** (`CanPlaceItem`) | `CanUnitStand ∧ item 빈칸` — 아이템은 유닛이 밟아야 픽업되므로 유닛 진입 가능 칸(2026-07-10 수정: object 레이어 미검사로 바위 칸에 물약이 배치되던 버그) |
 
 - **레이어 점유 충돌 일반 규칙**: 모든 `place` 모드는 위 술어로 후보를 거른다. `fixed`가 이미 점유된 칸/술어 불충족 칸을 가리키면 **스킵+경고**(§6). 두 시드가 같은 칸·같은 레이어를 노리면 둘째가 스킵된다(예: 오라 중첩 금지가 여기서 강제됨).
 
@@ -270,9 +307,10 @@ ReplaceOccupant(def, board, col, row, layer, oldInstanceId, payload) → instanc
    -- oldInstanceId 불일치 시 nil(무시). 새 점유는 CanPlace[layer] 검증(그래서 def 필요), 불충족 시 nil
 
 -- 질의 (ServerOnly)
-CanPlace(def, board, col, row, layer)          -- §5 레이어별 술어 (CanPlaceUnit/Object/Aura/Item 통합 진입점)
+CanPlace(def, board, col, row, layer, payload) -- §5 레이어별 술어 통합 진입점. payload는 object 레이어만
+                                               -- 소비(objectId → blocksPlacement 판정), 그 외 nil 허용
 BlocksSkill(def, board, col, row)              -- Object.blocksSkill (combat 조회)
-GetEmptyCells(def, board, layer[, zone])       -- CanPlace[layer] 만족 칸 목록
+GetEmptyCells(def, board, layer, zone, payload)-- CanPlace[layer] 만족 칸 목록(zone/payload nil 허용)
 GetOccupantCount(board, layer, kind)           -- kind ∈ {monster|player|boss} (§4.2 용어사전)
 
 -- 배치 해석
