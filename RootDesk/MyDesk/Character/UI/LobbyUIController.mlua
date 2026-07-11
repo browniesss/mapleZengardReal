@@ -16,6 +16,8 @@ script LobbyUIController extends Component
     property ButtonComponent btnShopBuy = "b037ad4a-e87b-4dfd-bb05-46e21eca0ec6"
     property ButtonComponent btnShopClose = "038d9e7b-09f3-42a5-84eb-d016dc383c43"
     property string shopProductId = "UY9VR4EH3"
+    property TextComponent currencyText = "22b5abdf-7dba-4841-8596-6ec96ecc71c4"
+    property integer displayedCurrencySyncVersion = -1
     property any handlers = nil
 
     @ExecSpace("ClientOnly")
@@ -33,6 +35,7 @@ script LobbyUIController extends Component
         self:Wire(self.btnShopClose, self.OnShopCloseClicked)
         if isvalid(self.shopPanel) then self.shopPanel.Enable = false end
         if isvalid(self.jobPanel) then self.jobPanel.Enable = false end
+        self:RefreshCurrencyDisplay()
     end
 
     @ExecSpace("ClientOnly")
@@ -42,6 +45,55 @@ script LobbyUIController extends Component
         local h = btn.Entity:ConnectEvent(ButtonClickEvent, callback)
         table.insert(self.handlers, { entity = btn.Entity, eventType = ButtonClickEvent, eventHandler = h })
     end
+    @ExecSpace("ClientOnly")
+    method void OnUpdate(number delta)
+        -- 보상 캐시의 새 스냅샷이 도착했을 때만 로비 상단 재화 문구를 갱신한다.
+        self:RefreshCurrencyDisplay()
+    end
+
+    @ExecSpace("ClientOnly")
+    method void RefreshCurrencyDisplay()
+        -- 초기 동기화가 끝난 로컬 플레이어 보상 캐시에서 유상 1차 재화를 표시한다.
+        if not isvalid(self.currencyText) then
+            return
+        end
+
+        local player = _UserService.LocalPlayer
+        if not isvalid(player) then
+            return
+        end
+
+        ---@type RewardClientCacheComponent
+        local cache = player:GetComponent("script.RewardClientCacheComponent")
+        if cache == nil or not cache.hasInitialSync then
+            return
+        end
+        if self.displayedCurrencySyncVersion == cache.syncVersion then
+            return
+        end
+
+        local amount = cache:GetCachedAmount("iap_paid_coin", "")
+        self.currencyText.Text = "유상 1차 재화: " .. tostring(amount)
+        self.displayedCurrencySyncVersion = cache.syncVersion
+        log("[LobbyCurrency] displayed amount=" .. tostring(amount)
+            .. " version=" .. tostring(cache.syncVersion))
+    end
+
+    @ExecSpace("ClientOnly")
+    method void RequestCurrencyRefresh()
+        -- 로비 상점 진입·종료 시 유상 1차 재화의 서버 기준 스냅샷을 다시 요청한다.
+        local player = _UserService.LocalPlayer
+        if not isvalid(player) then
+            return
+        end
+
+        ---@type RewardClientCacheComponent
+        local cache = player:GetComponent("script.RewardClientCacheComponent")
+        if cache ~= nil then
+            cache:RequestPartialSync({ "iap_paid_coin" })
+        end
+    end
+
 
     @ExecSpace("ClientOnly")
     method void OnStartClicked()
@@ -74,12 +126,14 @@ script LobbyUIController extends Component
     method void OnShopOpenClicked()
         -- 로비에서 상점 모달을 열어 게임 시작 전 결제 테스트를 제공한다.
         if isvalid(self.shopPanel) then self.shopPanel.Enable = true end
+        self:RequestCurrencyRefresh()
     end
 
     @ExecSpace("ClientOnly")
     method void OnShopCloseClicked()
         -- 로비 상점 모달을 닫는다.
         if isvalid(self.shopPanel) then self.shopPanel.Enable = false end
+        self:RequestCurrencyRefresh()
     end
 
     @ExecSpace("ClientOnly")

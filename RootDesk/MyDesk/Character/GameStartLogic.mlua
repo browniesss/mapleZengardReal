@@ -6,12 +6,49 @@ script GameStartLogic extends Logic
     -- '게임 시작' 버튼으로 진입한다 (2026-07-05 사용자 결정).
 
     property any pendingJobs = nil   -- userId -> 선택 직업 (직업 선택 UI 도입 전엔 기본 ARC)
+    property any userEnterHandler = nil
 
     @ExecSpace("ServerOnly")
     method void OnBeginPlay()
         -- 상태 초기화.
         self.pendingJobs = {}
         log("[GameStart] ready")
+        self.userEnterHandler = _UserService:ConnectEvent(UserEnterEvent, self.OnUserEnter)
+        for _, playerEntity in ipairs(_UserService.UserEntities.Values) do
+            self:EnsureRewardClientCache(playerEntity)
+        end
+    end
+
+    @ExecSpace("ServerOnly")
+    method void OnUserEnter(UserEnterEvent event)
+        -- 새 입장 플레이어에 로컬 보상 캐시 컴포넌트를 부착한다.
+        local playerEntity = _UserService:GetUserEntityByUserId(event.UserId)
+        self:EnsureRewardClientCache(playerEntity)
+    end
+
+    @ExecSpace("ServerOnly")
+    method void EnsureRewardClientCache(Entity playerEntity)
+        -- 플레이어당 하나의 보상 캐시 컴포넌트를 보장해 로비 UI가 서버 스냅샷을 읽게 한다.
+        if not isvalid(playerEntity) then
+            return
+        end
+        if playerEntity:GetComponent("script.RewardClientCacheComponent") ~= nil then
+            return
+        end
+
+        playerEntity:AddComponent("script.RewardClientCacheComponent")
+        if playerEntity:GetComponent("script.RewardClientCacheComponent") == nil then
+            log_error("[GameStart] RewardClientCacheComponent 부착 실패")
+        end
+    end
+
+    @ExecSpace("ServerOnly")
+    method void OnEndPlay()
+        -- 월드 종료 시 UserService 구독을 해제한다.
+        if self.userEnterHandler ~= nil then
+            _UserService:DisconnectEvent(UserEnterEvent, self.userEnterHandler)
+            self.userEnterHandler = nil
+        end
     end
 
     @ExecSpace("Server")
