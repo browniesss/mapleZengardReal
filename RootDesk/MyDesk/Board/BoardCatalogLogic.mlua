@@ -12,6 +12,8 @@ script BoardCatalogLogic extends Logic
     property any objectTypeCache = nil   -- objectId -> def
     property any auraTypeCache = nil     -- auraId -> def
     property any itemTypeCache = nil     -- itemId -> def
+    property any monsterTypeCache = nil  -- monsterId -> def (MONSTER-SPEC §2)
+    property any dropTableCache = nil    -- dropTableId -> def (MONSTER-SPEC §2.5)
 
     @ExecSpace("ServerOnly")
     method void OnBeginPlay()
@@ -119,6 +121,7 @@ script BoardCatalogLogic extends Logic
                             objectId = id,
                             blocksMove = self:ToBool(row:GetItem("blocksMove"), false),
                             blocksSkill = self:ToBool(row:GetItem("blocksSkill"), false),
+                            blocksPlacement = self:ToBool(row:GetItem("blocksPlacement"), false),
                             gimmickId = row:GetItem("gimmickId"),
                             model = row:GetItem("model"),
                         }
@@ -172,6 +175,108 @@ script BoardCatalogLogic extends Logic
             end
         end
         return self:DeepCopy(self.itemTypeCache[itemId])
+    end
+
+    -- ===== MonsterTypes / DropTables (MONSTER-SPEC §2 / §2.5) =====
+
+    @ExecSpace("ServerOnly")
+    method any GetMonsterTypes()
+        -- 모든 MonsterTypes 행 적재(monsterId -> def). 1회 캐시. 내부 캐시 참조 반환 —
+        -- 소비측은 GetMonsterType(deep-copy) 사용, 이건 적재 검증·존재 확인 전용.
+        if self.monsterTypeCache ~= nil then
+            return self.monsterTypeCache
+        end
+        local result = {}
+        local ds = _DataService:GetTable("MonsterTypes")
+        if ds == nil then
+            log_error("[BoardCatalog] MonsterTypes 데이터셋 없음")
+            self.monsterTypeCache = result
+            return result
+        end
+        for _, row in ipairs(ds:GetAllRow()) do
+            local id = row:GetItem("monsterId")
+            if id ~= nil and id ~= "" then
+                local def = {
+                    monsterId = id,
+                    name = row:GetItem("name"),
+                    maxHp = tonumber(row:GetItem("maxHp")) or 1,
+                    model = row:GetItem("model"),
+                    packId = row:GetItem("packId"),
+                    clips = self:ParseJsonCell(row:GetItem("clips"), {}),
+                    sounds = self:ParseJsonCell(row:GetItem("sounds"), {}),
+                    dropTableId = row:GetItem("dropTableId"),
+                    -- 이하 예약 컬럼(§2 정책: 파싱만, 소비 코드 없음 — §8.1/§8.2)
+                    atk = tonumber(row:GetItem("atk")) or 0,
+                    turnEvents = self:ParseJsonCell(row:GetItem("turnEvents"), {}),
+                    tags = self:ParseJsonCell(row:GetItem("tags"), {}),
+                    resists = self:ParseJsonCell(row:GetItem("resists"), {}),
+                    statusImmune = self:ParseJsonCell(row:GetItem("statusImmune"), {}),
+                }
+                -- 비주얼 폴리시: clips.stand 필수(빈값 = "보이지 않는 몬스터" 무증상 실패)
+                if def.clips.stand == nil or def.clips.stand == "" then
+                    log_warning("[BoardCatalog] MonsterTypes '" .. id .. "' clips.stand 누락 — 스폰 시 보이지 않음")
+                end
+                -- dropTableId 참조 검증(§2.5)
+                if def.dropTableId ~= nil and def.dropTableId ~= "" then
+                    if self:GetDropTable(def.dropTableId) == nil then
+                        log_error("[BoardCatalog] MonsterTypes '" .. id .. "' 알수없는 dropTableId: " .. def.dropTableId)
+                    end
+                end
+                result[id] = def
+            end
+        end
+        self.monsterTypeCache = result
+        log("[BoardCatalog] MonsterTypes 적재: " .. tostring(self:CountKeys(result)) .. "종")
+        return result
+    end
+
+    @ExecSpace("ServerOnly")
+    method any GetMonsterType(string monsterId)
+        -- monsterId -> MonsterDef(deep-copy). 미존재 시 nil.
+        return self:DeepCopy(self:GetMonsterTypes()[monsterId])
+    end
+
+    @ExecSpace("ServerOnly")
+    method any GetDropTable(string dropTableId)
+        -- dropTableId -> DropTableDef(deep-copy). entries = {kind?,id?,weight,min?,max?}[]
+        -- 가중치 추첨 리스트(§2.5). kind/id 없는 엔트리 = "꽝". 미존재 시 nil.
+        if self.dropTableCache == nil then
+            self.dropTableCache = {}
+            local ds = _DataService:GetTable("DropTables")
+            if ds == nil then
+                log_error("[BoardCatalog] DropTables 데이터셋 없음")
+            else
+                for _, row in ipairs(ds:GetAllRow()) do
+                    local id = row:GetItem("dropTableId")
+                    if id ~= nil and id ~= "" then
+                        local entries = self:ParseJsonCell(row:GetItem("entries"), {})
+                        local cleaned = {}
+                        for _, e in ipairs(entries) do
+                            local w = tonumber(e.weight) or 0
+                            if w <= 0 then
+                                log_warning("[BoardCatalog] DropTable '" .. id .. "' weight 무효(>0 필요) — 엔트리 제외")
+                            elseif e.kind == nil then
+                                table.insert(cleaned, { weight = w })
+                            elseif e.kind == "boardItem" then
+                                if self:GetItemType(e.id) == nil then
+                                    log_error("[BoardCatalog] DropTable '" .. id .. "' 알수없는 boardItem id: " .. tostring(e.id) .. " — 엔트리 제외")
+                                else
+                                    table.insert(cleaned, { kind = e.kind, id = e.id, weight = w })
+                                end
+                            elseif e.kind == "loot" or e.kind == "equip" then
+                                -- §8.7: 카탈로그(LootTypes/EquipTypes) 미신설 — 적재는 허용, 당첨 시 소비측이 log-skip
+                                log_warning("[BoardCatalog] DropTable '" .. id .. "' kind '" .. e.kind .. "' 카탈로그 미신설(§8.7) — 당첨 시 skip")
+                                table.insert(cleaned, { kind = e.kind, id = e.id, weight = w, min = e.min, max = e.max })
+                            else
+                                log_error("[BoardCatalog] DropTable '" .. id .. "' 알수없는 kind: " .. tostring(e.kind) .. " — 엔트리 제외")
+                            end
+                        end
+                        self.dropTableCache[id] = { dropTableId = id, entries = cleaned }
+                    end
+                end
+            end
+        end
+        return self:DeepCopy(self.dropTableCache[dropTableId])
     end
 
     -- ===== BoardDef =====
@@ -266,11 +371,16 @@ script BoardCatalogLogic extends Logic
             def.zones[zoneName] = cleaned
         end
 
-        -- initialPlacements zone 참조 검증
+        -- initialPlacements zone 참조 검증 + unit occupantId 검증(MONSTER-SPEC §5)
         for _, p in ipairs(initialPlacements) do
             if p.place == "zone" then
                 if p.zone == nil or def.zones[p.zone] == nil then
                     log_error("[BoardCatalog] initialPlacement 알수없는 zone 참조: " .. tostring(p.zone) .. " layout=" .. layoutId)
+                end
+            end
+            if p.layer == "unit" and (p.occupantKind == "monster" or p.occupantKind == "boss") then
+                if self:GetMonsterTypes()[tostring(p.occupantId)] == nil then
+                    log_error("[BoardCatalog] initialPlacement 알수없는 occupantId: " .. tostring(p.occupantId) .. " layout=" .. layoutId)
                 end
             end
         end
@@ -323,8 +433,9 @@ script BoardCatalogLogic extends Logic
             return nil
         end
 
-        -- wavePlacements 검증: wave 번호(정수 ≥1) + zone 참조
+        -- wavePlacements 검증: wave 번호(정수 ≥1) + zone 참조 + unit occupantId(MONSTER-SPEC §5)
         local cleaned = {}
+        local maxWave = 0
         for _, p in ipairs(wavePlacements) do
             local wave = math.floor(tonumber(p.wave) or 0)
             if wave < 1 then
@@ -335,7 +446,13 @@ script BoardCatalogLogic extends Logic
                 if p.place == "zone" and (p.zone == nil or boardDef.zones[p.zone] == nil) then
                     log_error("[BoardCatalog] wavePlacement 알수없는 zone 참조: " .. tostring(p.zone) .. " stage=" .. stageId)
                 end
+                if p.layer == "unit" and (p.occupantKind == "monster" or p.occupantKind == "boss") then
+                    if self:GetMonsterTypes()[tostring(p.occupantId)] == nil then
+                        log_error("[BoardCatalog] wavePlacement 알수없는 occupantId: " .. tostring(p.occupantId) .. " stage=" .. stageId)
+                    end
+                end
                 p.wave = wave
+                if wave > maxWave then maxWave = wave end
                 table.insert(cleaned, p)
             end
         end
@@ -344,9 +461,10 @@ script BoardCatalogLogic extends Logic
             stageId = stageId,
             layoutId = layoutId,
             wavePlacements = cleaned,
+            maxWave = maxWave,   -- 웨이브 소진 판정용(MONSTER-SPEC §6 DecideNext)
         }
         log("[BoardCatalog] StageDef 빌드: " .. stageId .. " layout=" .. tostring(layoutId)
-            .. " wavePlacements=" .. tostring(#cleaned))
+            .. " wavePlacements=" .. tostring(#cleaned) .. " maxWave=" .. tostring(maxWave))
         return def
     end
 
@@ -372,12 +490,32 @@ script BoardCatalogLogic extends Logic
         local obj = self:GetObjectType("rock")
         log("[BoardCatalog][SelfTest] aura.rage.effect[1].stat=" .. tostring(aura and aura.effect[1] and aura.effect[1].stat or "nil")
             .. " item.atkPotion.turns=" .. tostring(item and item.turns or "nil")
-            .. " object.rock.blocksSkill=" .. tostring(obj and obj.blocksSkill or "nil"))
+            .. " object.rock.blocksSkill=" .. tostring(obj and obj.blocksSkill or "nil")
+            .. " object.rock.blocksPlacement=" .. tostring(obj and obj.blocksPlacement or "nil"))
 
         -- 게터 격리 검증: 반환본 변형이 캐시 원본에 영향 없어야 함(deep-copy).
         local a = self:GetBoardDef("classic_7x7")
         a.cols = -999
         local b = self:GetBoardDef("classic_7x7")
         log("[BoardCatalog][SelfTest] deep-copy 격리 OK=" .. tostring(b.cols == 7))
+
+        -- MonsterTypes / DropTables (MONSTER-SPEC §7.1)
+        local mon = self:GetMonsterType("orangemushroom")
+        local drop = self:GetDropTable("mushroomTier")
+        log("[BoardCatalog][SelfTest] monster.orangemushroom maxHp=" .. tostring(mon and mon.maxHp or "nil")
+            .. " clips.stand=" .. tostring(mon and mon.clips.stand or "nil")
+            .. " sounds.die=" .. tostring(mon and mon.sounds.die or "nil")
+            .. " dropTableId=" .. tostring(mon and mon.dropTableId or "nil")
+            .. " dropEntries=" .. tostring(drop and #drop.entries or "nil")
+            .. " 미존재몬스터=nil OK=" .. tostring(self:GetMonsterType("no_such_monster") == nil)
+            .. " 미존재테이블=nil OK=" .. tostring(self:GetDropTable("no_such_table") == nil))
+        local m1 = self:GetMonsterType("orangemushroom")
+        m1.maxHp = -1
+        m1.clips.stand = "tampered"
+        local m2 = self:GetMonsterType("orangemushroom")
+        log("[BoardCatalog][SelfTest] monster deep-copy 격리 OK="
+            .. tostring(m2 ~= nil and m2.maxHp == 100 and m2.clips.stand ~= "tampered"))
+        local st = self:GetStageDef("stage01")
+        log("[BoardCatalog][SelfTest] stage01 maxWave=" .. tostring(st and st.maxWave or "nil"))
     end
 end

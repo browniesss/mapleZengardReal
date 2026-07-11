@@ -1,0 +1,2 @@
+monsterId,name,maxHp,model,packId,clips,sounds,dropTableId,atk,turnEvents,tags,resists,statusImmune
+orangemushroom,주황버섯,100,,mob/1210102.img,"{""stand"":""a95cfed2c8fe4d2cb64cbb62db051f92"",""move"":""8257566e41aa4234929e81c6c2dab2e4"",""hit"":""5ebbdaf503964f3e87de155d16650805"",""die"":""dddbe2f162184ec89add7440da56eb75""}","{""hit"":""6eb2ef8a783c4393bd7ee6a2c199bda7"",""die"":""c49646f7299e4c6e81e953c96e20b294""}",mushroomTier,10,"[{""when"":{""every"":7},""skillId"":""spore_burst""}]",,,

@@ -1,0 +1,99 @@
+@Component
+script UnitGauge extends Component
+    -- 유닛 머리 위 HP/마나 게이지(MONSTER-SPEC §8.3 소비 착수).
+    -- PixelRendererComponent 한 장(16x5)에 두 바를 그린다: 위 2줄=HP, 가운데 1줄=투명 간격, 아래 2줄=마나.
+    -- 서버(MonsterService)가 @Sync 값만 갱신 → 클라가 OnSyncProperty에서 다시 칠한다(hp-gauge 패턴).
+    -- 마나 = 턴이벤트 충전량: ManaMax = turnEvents의 N(N턴마다/N턴째), 1턴당 1씩 참. ManaMax=0이면 마나바 숨김.
+
+    @Sync property number Hp = 1
+    @Sync property number MaxHp = 1
+    @Sync property number Mana = 0
+    @Sync property number ManaMax = 0
+
+    @ExecSpace("ClientOnly")
+    method void InitBars()
+        -- 픽셀 버퍼 지연 초기화(Lazy Init): 동적 스폰 직후엔 클라에서 PixelRenderer가 준비 전일 수 있어
+        -- OnBeginPlay가 아닌 OnUpdate 반복 체크로 진입한다.
+        local pixel = self.Entity.PixelRendererComponent
+        if pixel == nil then return end
+        pixel:ResetWithColor(16, 5, Color(0, 0, 0, 0))
+        -- 뎁스는 SortingLayer 체계로 관리(BOARD-SPEC 레이어 규약): BoardGround < BoardProp <
+        -- BoardUnit < BoardOverlay. 게이지는 최상위 BoardOverlay — OrderInLayer는 레이어 내 정렬용.
+        -- (OrderInLayer만으론 animationclip 재생 스프라이트에 밀리는 실측이 있어 레이어로 분리)
+        pixel.SortingLayer = "BoardOverlay"
+        pixel.OrderInLayer = 10
+        self._T.gaugePixel = pixel
+        self._T.gaugeInited = true
+        log("[UnitGauge] init " .. self.Entity.Name .. " hp=" .. tostring(self.Hp) .. "/" .. tostring(self.MaxHp)
+            .. " mana=" .. tostring(self.Mana) .. "/" .. tostring(self.ManaMax))
+        self:UpdateBars()
+    end
+
+    @ExecSpace("ClientOnly")
+    method void UpdateBars()
+        -- HP(위 2줄) + 마나(아래 2줄) 채움 픽셀 계산 후 일괄 페인트.
+        if not self._T.gaugeInited then return end
+        local pixel = self._T.gaugePixel
+        if pixel == nil then return end
+
+        local hpRatio = 0
+        if self.MaxHp > 0 then
+            hpRatio = math.max(0, math.min(1, self.Hp / self.MaxHp))
+        end
+        local hpFill = math.floor(hpRatio * 16 + 0.5)
+
+        -- HP 색: >60% 초록, 31~60% 노랑, 0~30% 빨강
+        local hpColor
+        if hpRatio <= 0.3 then
+            hpColor = Color(1, 0.15, 0.15, 1)
+        elseif hpRatio <= 0.6 then
+            hpColor = Color(1, 0.85, 0.1, 1)
+        else
+            hpColor = Color(0.2, 0.9, 0.2, 1)
+        end
+
+        local manaRatio = 0
+        if self.ManaMax > 0 then
+            manaRatio = math.max(0, math.min(1, self.Mana / self.ManaMax))
+        end
+        local manaFill = math.floor(manaRatio * 16 + 0.5)
+        local manaColor = Color(0.25, 0.55, 1, 1)
+        local backColor = Color(0.12, 0.12, 0.12, 0.85)
+        local clearColor = Color(0, 0, 0, 0)
+
+        for x = 1, 16 do
+            -- HP 바: y=4,5 (좌하단 원점이라 위쪽 줄)
+            local hpC = backColor
+            if x <= hpFill then hpC = hpColor end
+            pixel:SetPixel(x, 4, hpC)
+            pixel:SetPixel(x, 5, hpC)
+            -- 간격 줄: y=3
+            pixel:SetPixel(x, 3, clearColor)
+            -- 마나 바: y=1,2. 턴이벤트 없는 몬스터(ManaMax=0)는 숨김(투명).
+            local mpC = clearColor
+            if self.ManaMax > 0 then
+                mpC = backColor
+                if x <= manaFill then mpC = manaColor end
+            end
+            pixel:SetPixel(x, 1, mpC)
+            pixel:SetPixel(x, 2, mpC)
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnSyncProperty(string name, any value)
+        -- 서버 @Sync 값 변경 감지 → 다시 칠하기.
+        if name == "Hp" or name == "MaxHp" or name == "Mana" or name == "ManaMax" then
+            self:UpdateBars()
+        end
+    end
+
+    method void OnUpdate(number delta)
+        -- 클라: 픽셀 버퍼 준비 전이면 초기화 재시도(Lazy Init). 서버 로직 없음.
+        if self:IsClient() then
+            if not self._T.gaugeInited then
+                self:InitBars()
+            end
+        end
+    end
+end

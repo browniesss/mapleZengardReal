@@ -6,6 +6,7 @@ script BoardFlowLogic extends Logic
     -- 각 OnEnter*/DispatchExit는 로그 + 전이점만 있는 스텁. 상세 구현(착석/스폰/입력/데미지)은 후속 단계.
 
     property boolean RunSelfTest = false   -- OnBeginPlay 자가검증(전 페이즈 전이 로그). 본배선 후 off.
+    property boolean AutoGen = true         -- [임시] 젠 버튼(드래프트 UI) 미배선 — SkillSelect에서 자동 RequestGen. UI 배선 시 제거.
     property any Phase = nil                -- 페이즈 상수 테이블(OnBeginPlay 초기화; mlua는 global 금지)
 
     @ExecSpace("ServerOnly")
@@ -90,16 +91,89 @@ script BoardFlowLogic extends Logic
     -- ===== 페이즈 진입 스텁 (뼈대) =====
 
     method void OnEnterInit(any run)
-        -- [스텁] 씬 Init: 보드는 오케스트레이터가 이미 빌드. 여기서 플레이어 랜덤 착석.
+        -- 씬 Init: 보드는 오케스트레이터가 이미 빌드. 플레이어를 보드 말 이동모드로 전환.
         -- TODO: ResolvePlacement(run,def,{place="random"},"unit") → TryOccupy(...,"unit",{player}) → 텔레포트.
-        log("[BoardFlow] (Init) 플레이어 랜덤 착석 예정")
+        local applied = self:ApplyBoardMoveMode(run, true)
+        log("[BoardFlow] (Init) 보드 이동모드(KinematicMove) 적용: " .. tostring(applied) .. "명 — 랜덤 착석 예정")
         self:EnterPhase(run, self.Phase.SkillSelect)   -- 셋업 완료 → 자동 전이
+    end
+
+    @ExecSpace("ServerOnly")
+    method integer ApplyBoardMoveMode(any run, boolean enabled)
+        -- 보드 말 이동모드: MapleTile 맵 위에서 Rigidbody.KinematicMove=true로 탑다운 전환.
+        -- 발판 없는 보드 격자에서 중력 낙하·영구 JUMP 상태를 차단(공식 지원 — platform-maple §6).
+        -- 점프도 함께 금지(EnableKinematicMoveJump=false), 해제(enabled=false) 시 기본값 원복.
+        -- RectTile 맵에서는 Rigidbody가 비활성 Body라 설정해도 무해(no-op).
+        -- 대상: 런 맵의 플레이어 전원 — 추후 동료/소환수 등 Rigidbody 유닛도 이 진입점 재사용.
+        if run.board == nil then return 0 end
+        local mapEntity = run.board.mapEntityRef
+        if mapEntity == nil or not isvalid(mapEntity) then return 0 end
+        local mapComp = mapEntity.MapComponent
+        if not isvalid(mapComp) then return 0 end
+        local users = _UserService:GetUsersByMapComponent(mapComp)
+        if users == nil then return 0 end
+        local applied = 0
+        for _, user in ipairs(users) do
+            if isvalid(user) then
+                local rb = user.RigidbodyComponent
+                if isvalid(rb) then
+                    rb.KinematicMove = enabled
+                    rb.EnableKinematicMoveJump = not enabled
+                    -- 보드 말은 자유 보행하지 않는다(이동 = 착석/재배치 소유) — 컨트롤러를 꺼서
+                    -- 입력 이동과 상태머신의 FALL 강제(발판 기준 판정, 실측: 켜두면 IDLE 전환이
+                    -- 매 틱 FALL로 되돌아감)를 함께 차단. 해제 시 원복.
+                    local pc = user.PlayerControllerComponent
+                    if isvalid(pc) then pc.Enable = not enabled end
+                    -- KinematicMove는 물리 낙하만 멈춘다 — 낙하 포즈가 남지 않게 IDLE로 명시 전환.
+                    if enabled then
+                        local sc = user.StateComponent
+                        if isvalid(sc) and sc.CurrentStateName ~= "IDLE" then
+                            sc:ChangeState("IDLE")
+                        end
+                    end
+                    -- 클라 미러 필수: KinematicMove/EnableKinematicMoveJump는 @Sync가 아니라서
+                    -- 서버 설정만으로는 LocalPlayer의 클라 물리 시뮬레이션에 반영되지 않는다(실측).
+                    self:ApplyBoardMoveModeClient(user, enabled)
+                    applied = applied + 1
+                end
+            end
+        end
+        return applied
+    end
+
+    @ExecSpace("Client")
+    method void ApplyBoardMoveModeClient(Entity unitEntity, boolean enabled)
+        -- 서버 ApplyBoardMoveMode의 클라 미러 — 같은 설정을 클라 물리에도 적용(전 클라 브로드캐스트).
+        if unitEntity == nil or not isvalid(unitEntity) then return end
+        local rb = unitEntity.RigidbodyComponent
+        if isvalid(rb) then
+            rb.KinematicMove = enabled
+            rb.EnableKinematicMoveJump = not enabled
+        end
+        local pc = unitEntity.PlayerControllerComponent
+        if isvalid(pc) then pc.Enable = not enabled end
+        -- 상태 전환은 본인(LocalPlayer) 엔티티에만 — 타인 엔티티엔 권한 없음.
+        if enabled then
+            local lp = _UserService.LocalPlayer
+            if isvalid(lp) and isvalid(lp.PlayerComponent) and isvalid(unitEntity.PlayerComponent)
+                and lp.PlayerComponent.UserId == unitEntity.PlayerComponent.UserId then
+                local sc = unitEntity.StateComponent
+                if isvalid(sc) and sc.CurrentStateName ~= "IDLE" then
+                    sc:ChangeState("IDLE")
+                end
+            end
+        end
+        log("[BoardFlow] 보드 이동모드(클라) enabled=" .. tostring(enabled) .. " → " .. tostring(unitEntity.Name))
     end
 
     method void OnEnterSkillSelect(any run)
         -- [스텁] 스킬 선택(드래프트). 대기 페이즈 — RequestGen까지 멈춤.
         -- TODO: 레어도(§3-2) 가중 추첨으로 후보 N개 산출 → 클라 선택 UI 오픈.
         log("[BoardFlow] (SkillSelect) 스킬 드래프트 대기 — RequestGen 대기중")
+        if self.AutoGen then
+            -- [임시] 드래프트 UI 배선 전까지 자동 젠 진행(웨이브 스폰 인엔진 확인용, MONSTER-SPEC §7.3).
+            self:RequestGen(run)
+        end
     end
 
     method void OnEnterWaveGen(any run)
@@ -128,17 +202,25 @@ script BoardFlowLogic extends Logic
     end
 
     method void OnEnterPostAttack(any run)
-        -- [스텁] 후처리: 사망 정리 / 아이템 픽업 / 버프 턴 감소·만료 / 승패 판정. 처리 페이즈 — 분기.
+        -- 후처리: 턴 경과(마나/턴이벤트 충전) → 사망 정리(sweep, MONSTER-SPEC §6) → 승패 분기. 처리 페이즈.
         run.round = run.round + 1
-        -- TODO: 몬스터 사망 Release / 웨이브 클리어·플레이어 사망 판정.
-        log("[BoardFlow] (PostAttack) round=" .. tostring(run.round) .. " 후처리 예정")
+        local manaTicked = _MonsterService:TickTurn(run)   -- 1라운드 = 1턴: 몬스터 마나 +1
+        local swept = _MonsterService:SweepDead(run)
+        -- TODO: 아이템 픽업 / 버프 턴 감소·만료 / 플레이어 사망 판정(전투 사양 확정 후).
+        log("[BoardFlow] (PostAttack) round=" .. tostring(run.round)
+            .. " manaTick=" .. tostring(manaTicked) .. " sweep=" .. tostring(swept))
         self:DecideNext(run)
     end
 
     method void DecideNext(any run)
-        -- [스텁] PostAttack 이후 분기: 종료 조건이면 Result, 아니면 다음 라운드(SkillSelect).
-        -- TODO: run.board 유닛 카운트/웨이브 소진/플레이어 생존으로 승·패·계속 결정.
-        local ended = false   -- 스텁: 항상 계속(루프)
+        -- PostAttack 이후 분기(MONSTER-SPEC §6): 승리 = 웨이브 소진 ∧ 몬스터 전멸 → Result.
+        -- 패배(플레이어 사망)는 전투 사양 확정 후. maxWave 없는 런(더미/테스트)은 항상 계속.
+        local maxWave = 0
+        if run.maxWave ~= nil then maxWave = run.maxWave end
+        local aliveMonsters = _MonsterService:CountAlive(run, "monster") + _MonsterService:CountAlive(run, "boss")
+        local ended = maxWave > 0 and run.wave >= maxWave and aliveMonsters == 0
+        log("[BoardFlow] (DecideNext) wave=" .. tostring(run.wave) .. "/" .. tostring(maxWave)
+            .. " aliveMonsters=" .. tostring(aliveMonsters) .. " ended=" .. tostring(ended))
         if ended then
             self:EnterPhase(run, self.Phase.Result)
         else
@@ -148,8 +230,10 @@ script BoardFlowLogic extends Logic
 
     method void OnEnterResult(any run)
         -- [스텁] 종료: 승/패 결과 처리(리워드/UI/런 정리).
+        -- 보드 말 이동모드 해제 — 일반(메이플 방식) 맵 복귀 시 점프/중력이 다시 동작해야 한다.
         -- TODO: 결과 UI, 보드 DestroyBoard, 런 레지스트리 정리.
-        log("[BoardFlow] (Result) 런 종료 — 결과 처리 예정")
+        local reverted = self:ApplyBoardMoveMode(run, false)
+        log("[BoardFlow] (Result) 런 종료 — 보드 이동모드 해제 " .. tostring(reverted) .. "명, 결과 처리 예정")
     end
 
     -- ===== 자가검증(임시) =====
@@ -157,6 +241,8 @@ script BoardFlowLogic extends Logic
     @ExecSpace("ServerOnly")
     method void SelfTest()
         -- 더미 run으로 전 페이즈 전이 로그 확인. 입력 트리거를 순서대로 흉내낸다.
+        local prevAutoGen = self.AutoGen
+        self.AutoGen = false   -- 수동 트리거 검증이므로 [임시] 자동 젠은 끄고 진행
         local run = { board = { cells = {} } }
         log("[BoardFlow][SelfTest] --- StartRun (Init→SkillSelect 기대) ---")
         self:StartRun(run)
@@ -173,5 +259,6 @@ script BoardFlowLogic extends Logic
         log("[BoardFlow][SelfTest] --- 잘못된 트리거 무시 확인 (RequestAttack@SkillSelect) ---")
         self:RequestAttack(run)   -- 현재 SkillSelect라 무시+경고 기대
         log("[BoardFlow][SelfTest] phase=" .. tostring(run.phase) .. " (변화 없어야 함)")
+        self.AutoGen = prevAutoGen
     end
 end

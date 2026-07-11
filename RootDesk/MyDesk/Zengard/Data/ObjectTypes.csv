@@ -1,2 +1,2 @@
-﻿objectId,blocksMove,blocksSkill,gimmickId,model
-rock,true,true,,RockObject
+﻿objectId,blocksMove,blocksSkill,blocksPlacement,gimmickId,model
+rock,true,true,true,,RockObject

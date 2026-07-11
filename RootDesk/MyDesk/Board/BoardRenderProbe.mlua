@@ -6,6 +6,7 @@ script BoardRenderProbe extends Logic
 
     property string SourceMapName = "BoardMap"     -- Maker static RectTile 소스맵
     property string StageId = "stage01"             -- StageDefs 데이터셋 스테이지 id(레이아웃+웨이브 스케줄 소유)
+    property Vector3 BoardOrigin = Vector3(0, 1, 0) -- Board 루트 앵커 위치(=originOffset). 보드 전체 이동은 이 값만 조정
 
     property any userEnterHandler = nil
     property integer runCounter = 0
@@ -98,10 +99,12 @@ script BoardRenderProbe extends Logic
         local run = {
             stageDef = stageDef,
             def = def,
+            units = {},                    -- 유닛 인스턴스 레지스트리(MONSTER-SPEC §3, MonsterService 소유)
+            maxWave = stageDef.maxWave,    -- 웨이브 소진 판정(MONSTER-SPEC §6 DecideNext)
             board = {
                 defId = stageDef.layoutId,
                 mapEntityRef = mapEntity,
-                originOffset = nil,
+                originOffset = self.BoardOrigin,   -- Board 루트 위치로 적용(BuildBoard). WorldToCell도 이 값 기준
                 cells = {},
                 instanceSeq = 0,
             },

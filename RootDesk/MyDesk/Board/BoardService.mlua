@@ -35,18 +35,25 @@ script BoardService extends Logic
         return true
     end
 
-    method Vector3 CellToWorld(any def, any board, integer col, integer row)
-        -- 셀(col,row) -> 월드 좌표(중심 기준). 아래 행(작은 row)이 앞(작은 z). originOffset 가산.
+    method Vector3 CellToLocal(any def, integer col, integer row)
+        -- 셀(col,row) -> Board 루트 기준 로컬 좌표(중심 기준). 아래 행(작은 row)이 앞(작은 z).
+        -- slot은 Board 루트의 자식이라 이 값을 그대로 스폰 좌표로 쓴다(originOffset은 루트가 소유).
         local halfC = (def.cols - 1) * 0.5
         local halfR = (def.rows - 1) * 0.5
         local x = (col - halfC) * def.cellSize
         local y = (row - halfR) * def.cellSize
         local z = row * 0.01
+        return Vector3(x, y, z)
+    end
+
+    method Vector3 CellToWorld(any def, any board, integer col, integer row)
+        -- 셀(col,row) -> 월드 좌표. 로컬 좌표 + originOffset(=Board 루트 위치) 가산.
+        local p = self:CellToLocal(def, col, row)
         local off = board.originOffset
         if off ~= nil then
-            return Vector3(x + off.x, y + off.y, z + off.z)
+            return Vector3(p.x + off.x, p.y + off.y, p.z + off.z)
         end
-        return Vector3(x, y, z)
+        return p
     end
 
     method any WorldToCell(any def, any board, Vector3 pos)
@@ -83,55 +90,71 @@ script BoardService extends Logic
         return board.cells[col .. "_" .. row]
     end
 
-    method boolean CanPlaceUnit(any def, any board, integer col, integer row)
-        -- IsInside ∧ occupiable ∧ ¬blocksMove ∧ ¬(Object.blocksMove) ∧ unit 빈칸.
+    method boolean CanUnitStand(any def, any board, integer col, integer row)
+        -- 유닛 진입 가능 칸 공통 전제: IsInside ∧ Ground.occupiable ∧ ¬Ground.blocksMove
+        -- ∧ ¬(Object.blocksMove ∨ Object.blocksPlacement). unit/item/aura 술어가 공유.
         if not self:IsInside(def, col, row) then return false end
         local g = self:GetGround(def, col, row)
         if g == nil or not g.occupiable or g.blocksMove then return false end
         local rec = self:GetCellRecord(board, col, row)
-        if rec ~= nil then
-            if rec.unit ~= nil then return false end
-            if rec.object ~= nil then
-                local ot = _BoardCatalogLogic:GetObjectType(rec.object.objectId)
-                if ot ~= nil and ot.blocksMove then return false end
-            end
+        if rec ~= nil and rec.object ~= nil then
+            local ot = _BoardCatalogLogic:GetObjectType(rec.object.objectId)
+            if ot ~= nil and (ot.blocksMove or ot.blocksPlacement) then return false end
         end
         return true
     end
 
-    method boolean CanPlaceObject(any def, any board, integer col, integer row)
+    method boolean CanPlaceUnit(any def, any board, integer col, integer row)
+        -- CanUnitStand ∧ unit 빈칸.
+        if not self:CanUnitStand(def, board, col, row) then return false end
+        local rec = self:GetCellRecord(board, col, row)
+        return rec == nil or rec.unit == nil
+    end
+
+    method boolean CanPlaceObject(any def, any board, integer col, integer row, any objectId)
         -- IsInside ∧ ¬Ground.blocksMove ∧ object 빈칸.
+        -- blocksPlacement 오브젝트는 추가로 aura/item/unit 전부 빈칸 필요(칸 독점 —
+        -- 배치 순서와 무관하게 "블럭 오브젝트 칸엔 아무것도 없다" 불변식 보장, 2026-07-11).
         if not self:IsInside(def, col, row) then return false end
         local g = self:GetGround(def, col, row)
         if g == nil or g.blocksMove then return false end
         local rec = self:GetCellRecord(board, col, row)
         if rec ~= nil and rec.object ~= nil then return false end
+        if objectId ~= nil and rec ~= nil then
+            local ot = _BoardCatalogLogic:GetObjectType(objectId)
+            if ot ~= nil and ot.blocksPlacement then
+                if rec.aura ~= nil or rec.item ~= nil or rec.unit ~= nil then return false end
+            end
+        end
         return true
     end
 
     method boolean CanPlaceAura(any def, any board, integer col, integer row)
-        -- IsInside ∧ aura 빈칸 (지형 무관).
-        if not self:IsInside(def, col, row) then return false end
+        -- CanUnitStand ∧ aura 빈칸.
+        -- (2026-07-11 개정: '지형 무관 — 벽 위에도 표식 가능' 폐기. 블럭 지형/blocksPlacement
+        --  오브젝트 위에 마법진이 그려지던 겹침 — 오라는 유닛이 서야 발동하므로 진입 가능 칸 전용.)
+        if not self:CanUnitStand(def, board, col, row) then return false end
         local rec = self:GetCellRecord(board, col, row)
-        if rec ~= nil and rec.aura ~= nil then return false end
-        return true
+        return rec == nil or rec.aura == nil
     end
 
     method boolean CanPlaceItem(any def, any board, integer col, integer row)
-        -- IsInside ∧ occupiable ∧ item 빈칸.
-        if not self:IsInside(def, col, row) then return false end
-        local g = self:GetGround(def, col, row)
-        if g == nil or not g.occupiable then return false end
+        -- CanUnitStand ∧ item 빈칸. 아이템은 유닛이 밟아야 픽업되므로 유닛 진입 가능 칸 전용
+        -- (2026-07-10 수정: 바위 칸에 물약이 배치되던 구멍 — object 레이어 미검사).
+        if not self:CanUnitStand(def, board, col, row) then return false end
         local rec = self:GetCellRecord(board, col, row)
-        if rec ~= nil and rec.item ~= nil then return false end
-        return true
+        return rec == nil or rec.item == nil
     end
 
     @ExecSpace("ServerOnly")
-    method boolean CanPlace(any def, any board, integer col, integer row, string layer)
-        -- §5 레이어별 술어 통합 진입점.
+    method boolean CanPlace(any def, any board, integer col, integer row, string layer, any payload)
+        -- §5 레이어별 술어 통합 진입점. payload는 object 레이어만 소비(objectId → blocksPlacement 판정).
         if layer == "unit" then return self:CanPlaceUnit(def, board, col, row) end
-        if layer == "object" then return self:CanPlaceObject(def, board, col, row) end
+        if layer == "object" then
+            local objectId = nil
+            if payload ~= nil then objectId = payload.objectId end
+            return self:CanPlaceObject(def, board, col, row, objectId)
+        end
         if layer == "aura" then return self:CanPlaceAura(def, board, col, row) end
         if layer == "item" then return self:CanPlaceItem(def, board, col, row) end
         log_error("[BoardService] CanPlace 알수없는 layer: " .. tostring(layer))
@@ -157,7 +180,7 @@ script BoardService extends Logic
     @ExecSpace("ServerOnly")
     method string TryOccupy(any def, any board, integer col, integer row, string layer, any payload)
         -- CanPlace 통과 시 instanceId 발급·점유기록 후 반환, 실패 시 nil.
-        if not self:CanPlace(def, board, col, row, layer) then
+        if not self:CanPlace(def, board, col, row, layer, payload) then
             return nil
         end
         local instanceId = self:NextInstanceId(board)
@@ -225,21 +248,22 @@ script BoardService extends Logic
     end
 
     @ExecSpace("ServerOnly")
-    method table GetEmptyCells(any def, any board, string layer, any zone)
+    method table GetEmptyCells(any def, any board, string layer, any zone, any payload)
         -- CanPlace[layer] 만족 칸 목록(zone 지정 시 그 안만). 반환=[{col,row},...].
+        -- payload는 object 레이어 blocksPlacement 판정용(그 외 레이어는 nil 허용).
         local result = {}
         if zone ~= nil then
             local coords = def.zones[zone]
             if coords == nil then return result end
             for _, cell in ipairs(coords) do
-                if self:CanPlace(def, board, cell[1], cell[2], layer) then
+                if self:CanPlace(def, board, cell[1], cell[2], layer, payload) then
                     table.insert(result, { cell[1], cell[2] })
                 end
             end
         else
             for r = 0, def.rows - 1 do
                 for c = 0, def.cols - 1 do
-                    if self:CanPlace(def, board, c, r, layer) then
+                    if self:CanPlace(def, board, c, r, layer, payload) then
                         table.insert(result, { c, r })
                     end
                 end
@@ -288,7 +312,9 @@ script BoardService extends Logic
     @ExecSpace("ServerOnly")
     method table ResolvePlacement(any run, any def, any spec, string layer)
         -- §6: 항상 (col,row) 배열 반환(0=빈칸없음). count(생략=1)는 random/zone만.
+        -- 후보 필터에 spec의 payload를 스레딩(object blocksPlacement가 점유 칸을 후보에서 제외).
         local board = run.board
+        local payload = self:PayloadFromSpec(spec)
         local place = spec.place
         if place == nil then place = "random" end
         local count = spec.count
@@ -296,26 +322,26 @@ script BoardService extends Logic
 
         if place == "fixed" then
             local pos = spec.pos
-            if pos ~= nil and self:CanPlace(def, board, pos[1], pos[2], layer) then
+            if pos ~= nil and self:CanPlace(def, board, pos[1], pos[2], layer, payload) then
                 return { { pos[1], pos[2] } }
             end
             log_warning("[BoardService] fixed 배치 스킵(불충족) layer=" .. tostring(layer))
             return {}
         elseif place == "center" then
-            return self:NearestCenter(def, board, layer)
+            return self:NearestCenter(def, board, layer, payload)
         elseif place == "zone" then
-            local cands = self:GetEmptyCells(def, board, layer, spec.zone)
+            local cands = self:GetEmptyCells(def, board, layer, spec.zone, payload)
             return self:ShuffleTake(cands, count)
         else
             -- random (기본)
-            local cands = self:GetEmptyCells(def, board, layer, nil)
+            local cands = self:GetEmptyCells(def, board, layer, nil, payload)
             return self:ShuffleTake(cands, count)
         end
     end
 
-    method table NearestCenter(any def, any board, string layer)
+    method table NearestCenter(any def, any board, string layer, any payload)
         -- 보드중심 최근접 1칸(동률 랜덤). 0~1개.
-        local cands = self:GetEmptyCells(def, board, layer, nil)
+        local cands = self:GetEmptyCells(def, board, layer, nil, payload)
         if #cands == 0 then return {} end
         local cx = (def.cols - 1) * 0.5
         local cy = (def.rows - 1) * 0.5
@@ -452,12 +478,22 @@ script BoardService extends Logic
 
     @ExecSpace("ServerOnly")
     method table BuildBoard(any run, any def)
-        -- 칸마다 BoardSlot 앵커(scale1, 비가시)를 셀 월드좌표에 스폰 -> 그 자식으로 Ground 타일을
-        -- local 원점(0,0)에 배치. 자식은 부모 slot 기준 local 좌표라 자동 중앙 정렬(좌표 재계산 불필요).
-        -- 점유/오브젝트/아이템/유닛도 같은 slot의 자식이 되어 정확히 칸 중앙에 놓인다. 점유는 run.board(휘발).
+        -- 하이어라키: map > Board(루트 앵커, originOffset 위치) > Slot_c_r(칸 앵커, 루트-로컬 좌표)
+        --   > [Tile/object/aura/item/unit/gauge] (slot-로컬 원점 자식 — 자동 중앙 정렬).
+        -- Board 루트 하나로 보드 전체 이동(originOffset)과 하이어라키 그룹핑을 동시에 해결.
+        -- 점유는 run.board(휘발), 비주얼 생명주기 루트는 board.rootRef.
         local board = run.board
         local mapEntity = board.mapEntityRef
         self:ResolveRandomCellOverrides(def)   -- 타일 스폰 전에 랜덤 지형 확정(블록 등)
+        -- 0) Board 루트 앵커: originOffset 위치에 스폰(맵의 자식). 이후 보드 전체 이동은 이 엔티티만 옮긴다.
+        local rootPos = Vector3(0, 0, 0)
+        if board.originOffset ~= nil then rootPos = board.originOffset end
+        local boardRoot = _SpawnService:SpawnByModelId("BoardRoot", "Board", rootPos, mapEntity)
+        if not isvalid(boardRoot) then
+            log_error("[BoardService] Board 루트 스폰 실패 — 빌드 중단")
+            return { cellsSpawned = 0, cellsTotal = 0, placementsApplied = 0 }
+        end
+        board.rootRef = boardRoot
         board.slots = {}
         local cellsSpawned = 0
         local cellsTotal = 0
@@ -465,8 +501,8 @@ script BoardService extends Logic
             for c = 0, def.cols - 1 do
                 if self:IsInside(def, c, r) then
                     cellsTotal = cellsTotal + 1
-                    -- 1) 칸 앵커 slot: 셀 월드좌표에 배치(맵의 자식)
-                    local slot = _SpawnService:SpawnByModelId("BoardSlot", "Slot_" .. c .. "_" .. r, self:CellToWorld(def, board, c, r), mapEntity)
+                    -- 1) 칸 앵커 slot: Board 루트의 자식, 루트-로컬 셀 좌표
+                    local slot = _SpawnService:SpawnByModelId("BoardSlot", "Slot_" .. c .. "_" .. r, self:CellToLocal(def, c, r), boardRoot)
                     if not isvalid(slot) then
                         log_error("[BoardService] slot 스폰 실패 (" .. c .. "," .. r .. ")")
                     else
@@ -521,7 +557,8 @@ script BoardService extends Logic
             local t = _BoardCatalogLogic:GetItemType(payload.itemId)
             if t ~= nil then model = t.model end
         elseif layer == "unit" then
-            model = "BoardCell"   -- 임시 placeholder(유닛 비주얼은 웨이브/몬스터 시스템 소유)
+            -- 몬스터 비주얼은 MonsterService:SpawnMonster 소유(MONSTER-SPEC §4). player 비주얼은 착석 구현 시.
+            return
         end
         if model == nil or model == "" then return end
         local visual = _SpawnService:SpawnByModelId(model, layer .. "_" .. col .. "_" .. row, Vector3(0, 0, -0.05), slot)
@@ -547,11 +584,20 @@ script BoardService extends Logic
                 local cells = self:ResolvePlacement(run, def, spec, layer)
                 for _, cell in ipairs(cells) do
                     local payload = self:PayloadFromSpec(spec)
-                    local id = self:TryOccupy(def, board, cell[1], cell[2], layer, payload)
-                    if id ~= nil then
-                        applied = applied + 1
-                        log("[BoardService] " .. tag .. ": " .. layer .. " @ " .. self:CellKey(cell[1], cell[2]))
-                        self:SpawnLayerVisual(run, def, cell[1], cell[2], layer, payload)
+                    if layer == "unit" and (payload.occupantKind == "monster" or payload.occupantKind == "boss") then
+                        -- 몬스터 유닛: 점유+비주얼+run.units 등록을 MonsterService가 원자 처리(MONSTER-SPEC §5)
+                        local id = _MonsterService:SpawnMonster(run, def, cell[1], cell[2], payload.occupantId, payload.occupantKind)
+                        if id ~= nil then
+                            applied = applied + 1
+                            log("[BoardService] " .. tag .. ": monster " .. tostring(payload.occupantId) .. " @ " .. self:CellKey(cell[1], cell[2]))
+                        end
+                    else
+                        local id = self:TryOccupy(def, board, cell[1], cell[2], layer, payload)
+                        if id ~= nil then
+                            applied = applied + 1
+                            log("[BoardService] " .. tag .. ": " .. layer .. " @ " .. self:CellKey(cell[1], cell[2]))
+                            self:SpawnLayerVisual(run, def, cell[1], cell[2], layer, payload)
+                        end
                     end
                 end
             end
@@ -612,6 +658,41 @@ script BoardService extends Logic
         log("[BoardService][SelfTest] object(3,3)=" .. tostring(o1)
             .. " CanPlaceUnit(3,3) after rock=" .. tostring(self:CanPlaceUnit(def, board, 3, 3))
             .. " BlocksSkill(3,3)=" .. tostring(self:BlocksSkill(def, board, 3, 3)))
+
+        -- blocksPlacement: 블럭 오브젝트 칸 독점(오라/아이템 금지 + 역방향 + 블럭 지형 위 오라 금지)
+        local auraOnRock = self:TryOccupy(def, board, 3, 3, "aura", { auraId = "rage" })
+        local itemOnRock = self:TryOccupy(def, board, 3, 3, "item", { itemId = "atkPotion" })
+        -- 빈 평지 칸을 동적으로 찾아 역방향(선점 칸에 블럭 오브젝트 배치 거부) 검증
+        local pc = -1
+        local pr = -1
+        for r = 0, def.rows - 1 do
+            if pc >= 0 then break end
+            for c = 0, def.cols - 1 do
+                if def.cells[c .. "_" .. r] == nil and self:GetCellRecord(board, c, r) == nil then
+                    pc = c
+                    pr = r
+                    break
+                end
+            end
+        end
+        local auraFirst = self:TryOccupy(def, board, pc, pr, "aura", { auraId = "rage" })
+        local rockOnAura = self:TryOccupy(def, board, pc, pr, "object", { objectId = "rock" })
+        -- 랜덤 블럭 지형 칸 하나 찾아 CanPlaceAura=false 확인
+        local auraOnBlockBlocked = "skip(블럭없음)"
+        for key, cell in pairs(def.cells) do
+            if cell.typeId == "block" then
+                local sep, sepEnd = string.find(key, "_")
+                local bc = math.floor(tonumber(string.sub(key, 1, sep - 1)) or -1)
+                local br = math.floor(tonumber(string.sub(key, sepEnd + 1)) or -1)
+                auraOnBlockBlocked = tostring(self:CanPlaceAura(def, board, bc, br) == false)
+                break
+            end
+        end
+        log("[BoardService][SelfTest] blocksPlacement: auraOnRock=nil OK=" .. tostring(auraOnRock == nil)
+            .. " itemOnRock=nil OK=" .. tostring(itemOnRock == nil)
+            .. " auraFirst(" .. tostring(pc) .. "," .. tostring(pr) .. ")=" .. tostring(auraFirst)
+            .. " rockOnAura=nil OK=" .. tostring(rockOnAura == nil)
+            .. " auraOnBlock 차단 OK=" .. auraOnBlockBlocked)
 
         -- 효과 훅: aura + item 한 칸에 두고 진입
         self:TryOccupy(def, board, 4, 4, "aura", { auraId = "rage" })
