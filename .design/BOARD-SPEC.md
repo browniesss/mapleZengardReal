@@ -301,7 +301,9 @@ CellKey(col,row) · IsInside(def,col,row) · CellToWorld(def,board,col,row) · W
 TryOccupy(def, board, col, row, layer, payload) → instanceId | nil
    -- payload = 레이어별 테이블: {auraId=} / {objectId=} / {itemId=} / {occupantId=, occupantKind=}
    -- CanPlace[layer] 검증 통과 시 instanceId 발급·점유 기록 후 반환, 실패 시 nil
-Release(board, col, row, layer, instanceId)    -- instanceId 불일치 무시(late-kill 보호) 계약 유지
+Release(board, col, row, layer, instanceId)    -- instanceId 불일치 무시(late-kill 보호) 계약 유지.
+   -- 레이어 비주얼(rec의 entity 핸들 — object/aura/item)이 있으면 함께 파괴(2026-07-11 확정).
+   -- unit 비주얼은 MonsterService 소유(연출 후 파괴) — rec.unit에는 entity를 부착하지 않는다.
 GetCellLayer(board, col, row, layer)
 ReplaceOccupant(def, board, col, row, layer, oldInstanceId, payload) → instanceId | nil
    -- oldInstanceId 불일치 시 nil(무시). 새 점유는 CanPlace[layer] 검증(그래서 def 필요), 불충족 시 nil

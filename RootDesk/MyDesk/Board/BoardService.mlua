@@ -203,11 +203,17 @@ script BoardService extends Logic
     @ExecSpace("ServerOnly")
     method void Release(any board, integer col, integer row, string layer, string instanceId)
         -- instanceId 일치 시에만 해제. 불일치 무시(late-kill 보호).
+        -- 레이어 비주얼도 함께 파괴(2026-07-11 리뷰 H1): object/aura/item은 SpawnLayerVisual이
+        -- rec에 entity 핸들을 붙인다 — 점유만 지우면 픽업/제거 시 유령 아이콘이 남는다.
+        -- unit 비주얼은 MonsterService가 연출 후 파괴 소유(rec.unit에 entity 미부착 — 영향 없음).
         local rec = self:GetCellRecord(board, col, row)
         if rec == nil then return end
         local cur = rec[layer]
         if cur == nil then return end
         if cur.instanceId ~= instanceId then return end
+        if cur.entity ~= nil and isvalid(cur.entity) then
+            cur.entity:Destroy()
+        end
         rec[layer] = nil
     end
 
