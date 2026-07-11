@@ -54,7 +54,10 @@ UI(④)는 클라 전용: `ui/LootInventory.ui` + `script.LootInventoryControlle
 lootId,name,iconRuid,rarity,currency,maxStack,pickupSound
 mushroomCap,주황버섯의 갓,b871877a7c394eafb176a9fed9b7c415,common,false,99,f399837e702843abb2c8196829101982
 meso,메소,02a489cccff24a139a6c3582a5871f58,common,true,0,25e9b2779bd540fd9c8bb931d8363439
+blackOrb,검은 구슬,12f9f1f63c754667aff43127b7988daf,rare,false,99,f399837e702843abb2c8196829101982
 ```
+
+- `blackOrb`(검은 구슬, 2026-07-12): 드랍 테이블 경유가 아니라 **몬스터 사망 시 독립 롤**(MONSTER-SPEC §5.5 — 맵별 확률, 엘리트 확정). 적립·연출은 이 문서의 파이프 그대로.
 
 (아이콘/사운드 RUID는 2026-07-11 msw-search 실물 확보: 주황버섯 아이템 스프라이트 40×48, 금색 메소 동전 28×24, 아이템 획득음 0.52s, 동전 짤랑음 0.89s)
 

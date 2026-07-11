@@ -1,2 +1,2 @@
-stageId,layoutId,wavePlacements
-stage01,classic_7x7,"[{""wave"":1,""layer"":""unit"",""occupantId"":""orangemushroom"",""occupantKind"":""monster"",""place"":""zone"",""zone"":""spawnTop"",""count"":3},{""wave"":2,""layer"":""item"",""itemId"":""atkPotion"",""place"":""random"",""count"":1},{""wave"":3,""layer"":""aura"",""auraId"":""rage"",""place"":""random"",""count"":1}]"
+stageId,layoutId,eliteCount,blackOrbRate,wavePlacements
+stage01,classic_7x7,1,0.2,"[{""wave"":1,""layer"":""unit"",""occupantId"":""orangemushroom"",""occupantKind"":""monster"",""place"":""zone"",""zone"":""spawnTop"",""count"":3},{""wave"":2,""layer"":""item"",""itemId"":""atkPotion"",""place"":""random"",""count"":1},{""wave"":3,""layer"":""aura"",""auraId"":""rage"",""place"":""random"",""count"":1}]"

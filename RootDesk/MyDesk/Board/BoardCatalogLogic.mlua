@@ -506,14 +506,45 @@ script BoardCatalogLogic extends Logic
             end
         end
 
+        -- 엘리트 설정(MONSTER-SPEC §5.5, 2026-07-12): eliteCount = 이 스테이지에서 엘리트로
+        -- 승격되는 몬스터 상한, blackOrbRate = 일반 몬스터의 검은 구슬 드랍률(엘리트는 확정 1.0).
+        local eliteCount = math.floor(tonumber(row:GetItem("eliteCount")) or 0)
+        if eliteCount < 0 then eliteCount = 0 end
+        local blackOrbRate = tonumber(row:GetItem("blackOrbRate")) or 0
+        if blackOrbRate < 0 or blackOrbRate > 1 then
+            log_warning("[BoardCatalog] StageDef '" .. stageId .. "' blackOrbRate " .. tostring(blackOrbRate) .. " 무효 — 0~1 클램프")
+            blackOrbRate = math.max(0, math.min(1, blackOrbRate))
+        end
+        -- 승격 모수: 이 스테이지에서 스폰되는 monster kind 총수(initial + wave). boss는 승격 제외.
+        local totalMonsters = 0
+        for _, p in ipairs(boardDef.initialPlacements) do
+            if p.layer == "unit" and p.occupantKind == "monster" then
+                totalMonsters = totalMonsters + math.floor(tonumber(p.count) or 1)
+            end
+        end
+        for _, p in ipairs(cleaned) do
+            if p.layer == "unit" and p.occupantKind == "monster" then
+                totalMonsters = totalMonsters + math.floor(tonumber(p.count) or 1)
+            end
+        end
+        if eliteCount > totalMonsters then
+            log_warning("[BoardCatalog] StageDef '" .. stageId .. "' eliteCount(" .. tostring(eliteCount)
+                .. ") > 총 몬스터(" .. tostring(totalMonsters) .. ") — 미달 승격 가능")
+        end
+
         local def = {
             stageId = stageId,
             layoutId = layoutId,
             wavePlacements = cleaned,
             maxWave = maxWave,   -- 웨이브 소진 판정용(MONSTER-SPEC §6 DecideNext)
+            eliteCount = eliteCount,
+            blackOrbRate = blackOrbRate,
+            totalMonsters = totalMonsters,   -- 엘리트 균등 배정 모수(남은엘리트/남은몬스터)
         }
         log("[BoardCatalog] StageDef 빌드: " .. stageId .. " layout=" .. tostring(layoutId)
-            .. " wavePlacements=" .. tostring(#cleaned) .. " maxWave=" .. tostring(maxWave))
+            .. " wavePlacements=" .. tostring(#cleaned) .. " maxWave=" .. tostring(maxWave)
+            .. " elite=" .. tostring(eliteCount) .. "/" .. tostring(totalMonsters)
+            .. " orbRate=" .. tostring(blackOrbRate))
         return def
     end
 

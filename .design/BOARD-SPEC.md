@@ -185,6 +185,8 @@ finalValue *= Π(1 + PercentMult)      # 곱연산 % (강버프, 개별 곱)
 |---|---|---|
 | `stageId` | `stage01` | 스테이지 식별자. `BoardRenderProbe.StageId`가 이걸 참조해 런을 시작 |
 | `layoutId` | `classic_7x7` | 이 스테이지가 쓰는 보드 레이아웃(§3.1 참조). 스테이지 교체로 보드 구조 교체 가능 |
+| `eliteCount` | `1` | 엘리트 승격 상한(MONSTER-SPEC §5.5 소유 — 여기는 스키마만). 0=없음 |
+| `blackOrbRate` | `0.2` | 일반 몬스터 검은 구슬 드랍률 0~1(엘리트 확정 1.0 — MONSTER-SPEC §5.5) |
 | `wavePlacements` | `[{"wave":1,"layer":"unit","occupantId":"orangemushroom","occupantKind":"monster","place":"zone","zone":"spawnTop","count":3},{"wave":2,"layer":"item","itemId":"atkPotion","place":"random","count":1}]` | JSON. **"몇 젠(웨이브)에서 무엇이 몇 개 등장"** 스케줄. 각 항목 = `wave`(정수 ≥1, 일치하는 WaveGen에서만 적용) + `initialPlacements`와 동일한 레이어별 id 필드/`place` 문법(§6). `BoardCatalogLogic:GetStageDef`가 적재·검증(layoutId 존재·wave 번호·zone 참조), `BoardService:ApplyWavePlacements(run, def, stageDef, wave)`가 WaveGen 페이즈(BoardFlowLogic)에서 소비 |
 
 > `run.stageDef`/`run.def`는 `BoardRenderProbe.BuildBoard`가 런 시작 시 deep-copy로 실어 두고, 이후 페이즈는 데이터셋 재조회 없이 run 핸들만 소비한다.

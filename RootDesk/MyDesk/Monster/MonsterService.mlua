@@ -131,10 +131,36 @@ script MonsterService extends Logic
         else
             log_warning("[MonsterService] Gauge 자식 없음(유닛은 유지) — 프리팹 규약 확인 model=" .. model)
         end
+        self:TryPromoteElite(run, unit)
         log("[MonsterService] 스폰: " .. occupantId .. " @ " .. col .. "_" .. row
             .. " hp=" .. tostring(monsterDef.maxHp)
-            .. " manaMax=" .. tostring(unit.manaMax) .. " id=" .. instanceId)
+            .. " manaMax=" .. tostring(unit.manaMax) .. " id=" .. instanceId
+            .. (unit.elite and " [엘리트]" or ""))
         return instanceId
+    end
+
+    @ExecSpace("ServerOnly")
+    method void TryPromoteElite(any run, any unit)
+        -- 엘리트 승격(MONSTER-SPEC §5.5): 스테이지 상한(eliteCount) 내에서
+        -- "남은 엘리트 / 남은 몬스터" 확률로 균등 배정 — 스폰 순서와 무관하게 상한을 정확히 채운다.
+        -- monster kind만(boss 제외). 승격 = unit.elite 플래그 + 바닥 오라 이펙트(유닛 루트 자식 — 연쇄 파괴).
+        if unit.kind ~= "monster" then return end
+        if run.eliteRemaining == nil or run.monsterRemaining == nil then return end
+        if run.monsterRemaining <= 0 then return end
+        local chance = 0
+        if run.eliteRemaining > 0 then chance = run.eliteRemaining / run.monsterRemaining end
+        run.monsterRemaining = run.monsterRemaining - 1
+        if chance <= 0 or _UtilLogic:RandomDouble() >= chance then return end
+        run.eliteRemaining = run.eliteRemaining - 1
+        unit.elite = true
+        if unit.entityRef ~= nil and isvalid(unit.entityRef) then
+            local fx = _SpawnService:SpawnByModelId("eliteaura", "EliteAura_" .. unit.instanceId, Vector3(0, 0, 0.02), unit.entityRef)
+            if not isvalid(fx) then
+                log_warning("[MonsterService] 엘리트 오라 스폰 실패 id=" .. unit.instanceId)
+            end
+        end
+        log("[MonsterService] 엘리트 승격: " .. unit.occupantId .. " id=" .. unit.instanceId
+            .. " (남은 엘리트 " .. tostring(run.eliteRemaining) .. ")")
     end
 
     @ExecSpace("ServerOnly")
@@ -204,6 +230,7 @@ script MonsterService extends Logic
         unit.alive = false
         _BoardService:Release(run.board, unit.col, unit.row, "unit", instanceId)
         self:RollDrop(run, unit)
+        self:RollBlackOrb(run, unit)
         -- 게이지 자식은 즉시 제거(사망 유닛 위에 바를 남기지 않음 — 루트 파괴는 연출 뒤라 별도 파괴)
         if unit.gaugeRef ~= nil and isvalid(unit.gaugeRef) then
             unit.gaugeRef:Destroy()
@@ -286,6 +313,19 @@ script MonsterService extends Logic
         else
             -- equip: 보상 풀 미확정(§8.7) — 기록만 남기고 skip
             log("[MonsterService] 드랍 skip(kind=" .. tostring(picked.kind) .. ", §8.7 미구현): " .. tostring(picked.id))
+        end
+    end
+
+    @ExecSpace("ServerOnly")
+    method void RollBlackOrb(any run, any unit)
+        -- 검은 구슬(MONSTER-SPEC §5.5): 모든 몬스터가 드랍테이블과 **독립**으로 굴리는 추가 드랍.
+        -- 확률은 스테이지 소유(run.blackOrbRate), 엘리트는 확정(1.0). 획득은 LootService 파이프 재사용.
+        if unit.kind ~= "monster" and unit.kind ~= "boss" then return end
+        local rate = run.blackOrbRate or 0
+        if unit.elite then rate = 1 end
+        if rate <= 0 then return end
+        if rate >= 1 or _UtilLogic:RandomDouble() < rate then
+            _LootService:GainLoot(run, unit.col, unit.row, "blackOrb", 1)
         end
     end
 

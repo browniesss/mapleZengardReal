@@ -177,6 +177,26 @@ CountAlive(run, kind) → integer                 -- DecideNext 승패 판정용
 - **책임 경계:** 몇 데미지인지(ATK×계수, Modifier 집계, 크리)는 스킬/효과 시스템이 계산해서 `amount`로 넘긴다. MonsterService는 HP 차감·사망·정리만 소유. — BOARD-SPEC §8이 효과 엔진에 그은 선과 동일한 패턴.
 - **적재 시 검증(카탈로그 쪽):** `BuildStageDef`/`BuildBoardDef`가 unit 배치 스펙을 검증할 때 `occupantId`가 MonsterTypes에 존재하는지 확인(미존재 → `log_error`, 해당 스펙 제외). 현재 `orangemushroom` 문자열이 무검증 통과하는 구멍을 막는다.
 
+### 5.5 엘리트 몬스터 + 검은 구슬 (2026-07-12 확정)
+
+**설정은 스테이지(맵) 데이터 소유** — StageDefs 컬럼 2개(BOARD-SPEC §3.6):
+
+| 컬럼 | 예시 | 설명 |
+|---|---|---|
+| `eliteCount` | `1` | 이 스테이지에서 엘리트로 승격되는 몬스터 **상한**(개수 제한). 0 = 엘리트 없음 |
+| `blackOrbRate` | `0.2` | **일반 몬스터**의 검은 구슬 드랍률(0~1, 적재 시 클램프). **엘리트는 확정(1.0)** |
+
+- **승격 규칙(`TryPromoteElite`):** 스폰 시점에 "남은 엘리트 수 ÷ 남은 몬스터 수" 확률로 판정 —
+  스폰 순서와 무관한 균등 배정이며 몬스터 총수 ≥ eliteCount면 상한을 정확히 채운다.
+  모수(`totalMonsters`)는 BuildStageDef가 initial+wave 배치의 `monster` kind 수를 합산해 계산(**boss 제외** — 보스는 승격 대상 아님).
+  런 상태는 `run.eliteRemaining`/`run.monsterRemaining`(BoardRenderProbe 셋업), 유닛 마킹은 `run.units[].elite`.
+- **엘리트 비주얼:** 승격 시 `EliteAura.model`(스킬 이펙트 animationclip 루프, `BoardProp`/Order 25 —
+  아이템 위·유닛 밴드 아래 바닥 오라)을 **유닛 루트 자식**으로 스폰 — 사망/파괴 시 연쇄 정리(별도 관리 불필요).
+- **검은 구슬 드랍(`RollBlackOrb`):** KillUnit에서 **드랍 테이블과 독립**으로 굴리는 추가 롤(둘 다 나올 수 있음) —
+  "모든 몬스터(monster/boss)가 드랍 가능, 확률은 맵 소유, 엘리트는 확정"을 DropTables 스키마 왜곡 없이 표현.
+  획득물 `blackOrb`는 LootTypes 일반 전리품(rare) — 자석 연출/인벤 파이프 그대로 재사용.
+- **스탯 변화 없음(1차):** 엘리트는 비주얼+확정 드랍만. HP/ATK 배율 등 강화는 기획 확정 시 확장(§8.2와 함께).
+
 ---
 
 ## 6. FSM 연동 (BoardFlowLogic — 기존 페이즈에 꽂기, 신규 페이즈 없음)
