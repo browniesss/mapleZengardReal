@@ -11,6 +11,11 @@ script LobbyUIController extends Component
     property ButtonComponent btnJobArc = "e6b5b38b-6db8-4d9f-b852-72d3f58594c1"
     property ButtonComponent btnJobThf = "2c37efe0-a5c3-4b53-9273-409f01147221"
     property ButtonComponent btnJobBack = "2f6d9d9d-4c11-4535-b913-1a3976824127"
+    property ButtonComponent btnShop = "760583f8-e113-4c2e-b5f4-bdf85b8b7c7d"
+    property Entity shopPanel = "fef7b34f-621a-4a11-887c-ed1a140a527d"
+    property ButtonComponent btnShopBuy = "b037ad4a-e87b-4dfd-bb05-46e21eca0ec6"
+    property ButtonComponent btnShopClose = "038d9e7b-09f3-42a5-84eb-d016dc383c43"
+    property string shopProductId = "UY9VR4EH3"
     property any handlers = nil
 
     @ExecSpace("ClientOnly")
@@ -23,6 +28,10 @@ script LobbyUIController extends Component
         self:Wire(self.btnJobArc, function() self:OnJobPicked("ARC") end)
         self:Wire(self.btnJobThf, function() self:OnJobPicked("THF") end)
         self:Wire(self.btnJobBack, self.OnJobBackClicked)
+        self:Wire(self.btnShop, self.OnShopOpenClicked)
+        self:Wire(self.btnShopBuy, self.OnShopBuyClicked)
+        self:Wire(self.btnShopClose, self.OnShopCloseClicked)
+        if isvalid(self.shopPanel) then self.shopPanel.Enable = false end
         if isvalid(self.jobPanel) then self.jobPanel.Enable = false end
     end
 
@@ -59,6 +68,29 @@ script LobbyUIController extends Component
     method void OnJobBackClicked()
         -- 직업 선택 취소 -> 로비로 복귀.
         self.jobPanel.Enable = false
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnShopOpenClicked()
+        -- 로비에서 상점 모달을 열어 게임 시작 전 결제 테스트를 제공한다.
+        if isvalid(self.shopPanel) then self.shopPanel.Enable = true end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnShopCloseClicked()
+        -- 로비 상점 모달을 닫는다.
+        if isvalid(self.shopPanel) then self.shopPanel.Enable = false end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnShopBuyClicked()
+        -- 선택한 네이티브 WorldShop 상품의 엔진 결제창만 연다.
+        if self.shopProductId == "" then
+            log_warning("[CurrencyShop] productId is empty")
+            return
+        end
+        log("[CurrencyShop] prompt productId=" .. self.shopProductId)
+        _WorldShopService:PromptPurchase(self.shopProductId)
     end
 
     @ExecSpace("ClientOnly")
