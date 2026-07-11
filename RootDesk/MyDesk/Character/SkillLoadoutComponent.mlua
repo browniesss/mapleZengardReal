@@ -94,6 +94,7 @@ script SkillLoadoutComponent extends Component
                 orderIndex = orderIndex,
                 cooldownLeft = inst.cooldownLeft or 0,
                 desc = def ~= nil and def.desc or "",   -- 슬롯 호버 툴팁용
+                autoFire = inst.autoFire ~= false,      -- 반자동 토글 (nil = 자동 — 회의 §3)
             })
         end
         return summary
@@ -126,6 +127,21 @@ script SkillLoadoutComponent extends Component
         self.order[posA], self.order[posB] = b, a
         self:NotifyChanged("order")
         return true
+    end
+
+    @ExecSpace("Server")
+    method void RequestSetAutoFireByOrder(integer orderPos, boolean auto)
+        -- 반자동 토글 (회의 §3): OFF 스킬은 공격 체인이 그 차례에 멈추고 유저의 방향 지정·발사를 기다린다.
+        -- AI 자동 모드에서는 무시되고 전부 자동 발동.
+        if senderUserId ~= self.Entity.PlayerComponent.UserId then
+            log_warning("[SkillLoadout] 비소유자 자동 토글 요청 무시: " .. senderUserId)
+            return
+        end
+        local inst = self.order[orderPos]
+        if inst == nil then return end
+        inst.autoFire = auto
+        self:NotifyChanged("autoFire")
+        log("[SkillLoadout] 자동 발동 " .. (auto and "ON" or "OFF") .. ": " .. inst.skillId)
     end
 
     @ExecSpace("Server")

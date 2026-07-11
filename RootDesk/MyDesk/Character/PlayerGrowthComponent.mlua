@@ -213,6 +213,13 @@ script PlayerGrowthComponent extends Component
             return "advanceFailed"
         end
         self:PlayAdvanceFx()
+        -- 이동기 자동 습득 (회의 §2: 마2 텔레포트/궁·도3 플래시 점프/전4 돌진 — 선택지 미출현)
+        local moveDef = _SkillCatalogLogic:GetMoveSkillForJobTier(jobComp.Job, jobComp.Tier)
+        if moveDef ~= nil then
+            ---@type PlayerRunComponent
+            local runComp = self.Entity:GetComponent("script.PlayerRunComponent")
+            if runComp ~= nil then runComp:GrantMoveSkill(moveDef) end
+        end
         self.pendingChoices = nil
         local advanceName = tostring(jobComp.Tier) .. "차 전직"
         local ev = ChoiceCommittedEvent()

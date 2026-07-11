@@ -15,6 +15,9 @@ script InGameSlotController extends Component
     property Entity tooltipPanel = "cab1dad2-856d-4633-9311-9d8babc10e29"
     property TextComponent tooltipText = "00e47582-8851-4915-b99e-699af661f063"
     property TextComponent ownedText = "6a3cd40a-e3c0-4bba-89c8-89a17a316e02"   -- 좌하단 보유 스킬·장비 목록 (UI설계 좌하단 영역)
+    property ButtonComponent btnAuto1 = "d8c1390b-f66e-47ae-a166-fae1d91061e7"   -- 슬롯별 자동 발동 토글 (회의 §3 — UUID는 빌더 bind 주입)
+    property ButtonComponent btnAuto2 = "73c8a157-0e07-48a7-bdbe-9598f23be121"
+    property ButtonComponent btnAuto3 = "8e4f9ae9-9249-45be-9055-5cebfaee86fe"
 
     property integer orderSwapFirst = 0    -- 순서 변경 1차 선택 슬롯 (0=없음)
     property integer firingIndex = 0       -- 지금 발동 중인 순서 리스트 위치 (0=없음 — 강조용)
@@ -38,8 +41,28 @@ script InGameSlotController extends Component
         self:WireState(self.btnSlot1, function(ev) self:OnSlotState(1, ev.state) end)
         self:WireState(self.btnSlot2, function(ev) self:OnSlotState(2, ev.state) end)
         self:WireState(self.btnSlot3, function(ev) self:OnSlotState(3, ev.state) end)
+        -- 슬롯별 자동 발동 토글 (회의 §3 반자동): OFF 스킬은 체인이 멈추고 수동 발사 대기
+        self:Wire(self.btnAuto1, function() self:OnAutoToggleClicked(1) end)
+        self:Wire(self.btnAuto2, function() self:OnAutoToggleClicked(2) end)
+        self:Wire(self.btnAuto3, function() self:OnAutoToggleClicked(3) end)
         if isvalid(self.tooltipPanel) then self.tooltipPanel.Enable = false end
         if isvalid(self.btnReroll) then self.btnReroll.Entity.Enable = false end
+    end
+
+    property any slotAutoFire = nil   -- [i] = 자동 발동 여부 (LoadoutSynced 수신 값 — 토글 시 반전 요청)
+
+    @ExecSpace("ClientOnly")
+    method void OnAutoToggleClicked(integer index)
+        -- 자동 토글: 현재 값 반전 요청 — 확정 표시는 LoadoutSyncedEvent 회신이 수행.
+        if index > self.slotCount then return end
+        local cur = self.slotAutoFire ~= nil and self.slotAutoFire[index]
+        local player = _UserService.LocalPlayer
+        if not isvalid(player) then return end
+        ---@type SkillLoadoutComponent
+        local loadout = player:GetComponent("script.SkillLoadoutComponent")
+        if loadout ~= nil then
+            loadout:RequestSetAutoFireByOrder(index, cur == false)
+        end
     end
 
     @ExecSpace("ClientOnly")
@@ -168,11 +191,22 @@ script InGameSlotController extends Component
         self.slotCount = #event.slots
         self.orderSwapFirst = 0
         self:RefreshSwapMark()
+        if self.slotAutoFire == nil then self.slotAutoFire = {} end
         local marks = { "①", "②", "③" }
         local buttons = { self.btnSlot1, self.btnSlot2, self.btnSlot3 }
         local icons = { self.iconSlot1, self.iconSlot2, self.iconSlot3 }
+        local autoBtns = { self.btnAuto1, self.btnAuto2, self.btnAuto3 }
         for i, btn in ipairs(buttons) do
             local slot = event.slots[i]
+            -- 자동 토글 버튼: 스킬 있는 슬롯만 노출, 상태 표기 (회의 §3)
+            local autoBtn = autoBtns[i]
+            if isvalid(autoBtn) then
+                autoBtn.Entity.Enable = slot ~= nil
+                if slot ~= nil then
+                    self.slotAutoFire[i] = slot.autoFire ~= false
+                    autoBtn.Entity.TextComponent.Text = self.slotAutoFire[i] and "자동" or "수동"
+                end
+            end
             if slot ~= nil then
                 local line = marks[i] .. " " .. self:TruncateName(slot.name, 10) .. " Lv." .. tostring(slot.level)
                 if slot.cooldownLeft ~= nil and slot.cooldownLeft > 0 then

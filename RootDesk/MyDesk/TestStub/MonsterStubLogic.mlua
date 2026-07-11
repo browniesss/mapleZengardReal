@@ -14,9 +14,80 @@ script MonsterStubLogic extends Logic
 
     @ExecSpace("ServerOnly")
     method void EnsureFlow(any run)
-        -- run.flow(스텁 상태) 보장: monsterHp[instanceId->hp].
+        -- run.flow(스텁 상태) 보장: monsterHp[instanceId->hp] + monsterStun[instanceId->남은 턴].
         if run.flow == nil then run.flow = {} end
         if run.flow.monsterHp == nil then run.flow.monsterHp = {} end
+        if run.flow.monsterStun == nil then run.flow.monsterStun = {} end
+    end
+
+    @ExecSpace("ServerOnly")
+    method void ApplyStun(any run, string instanceId, integer turns, Entity visual)
+        -- 스턴 표기 (회의 §2 벽궁): 스텁 몬스터는 자체 행동이 없어 실효과는 정식 몬스터/보스 도입 시
+        -- 이 상태값(run.flow.monsterStun)을 소비하는 계약만 남긴다. 비주얼은 회색 틴트.
+        self:EnsureFlow(run)
+        run.flow.monsterStun[instanceId] = turns
+        if isvalid(visual) then
+            local sr = visual.SpriteRendererComponent
+            if isvalid(sr) then sr.Color = Color(0.55, 0.55, 0.62, 1) end
+        end
+        log("[MonsterStub] 스턴: " .. tostring(instanceId) .. " (" .. tostring(turns) .. "턴)")
+    end
+
+    @ExecSpace("ServerOnly")
+    method void PushMonster(any run, any def, any fromCell, string facing, Entity playerEntity, number slamCoef)
+        -- 돌진 밀침 (회의 §2): 밀 곳이 비었으면 1칸 이동, 막혔으면(경계/블록/점유) 벽궁 —
+        -- 추가 데미지(ATK×slamCoef) + 스턴 1턴. 스텁 이동은 비주얼 재스폰으로 처리.
+        self:EnsureFlow(run)
+        local board = run.board
+        local rec = _BoardService:GetCellLayer(board, fromCell.col, fromCell.row, "unit")
+        if rec == nil or rec.payload == nil or rec.payload.occupantKind ~= "monster" then return end
+        local dc = 0
+        local dr = 0
+        if facing == "UP" then dr = 1 elseif facing == "DOWN" then dr = -1
+        elseif facing == "RIGHT" then dc = 1 else dc = -1 end
+        local toCol = fromCell.col + dc
+        local toRow = fromCell.row + dr
+        if _BoardService:CanPlaceUnit(def, board, toCol, toRow) then
+            local hp = run.flow.monsterHp[rec.instanceId] or self.StubHp   -- HP 미추적 몬스터 폴백 (검수 반영)
+            local stun = run.flow.monsterStun[rec.instanceId]
+            if isvalid(rec.entity) then rec.entity:Destroy() end
+            _BoardService:Release(board, fromCell.col, fromCell.row, "unit", rec.instanceId)
+            run.flow.monsterHp[rec.instanceId] = nil
+            run.flow.monsterStun[rec.instanceId] = nil
+            local payload = { occupantId = "stubmon", occupantKind = "monster" }
+            local newId = _BoardService:TryOccupy(def, board, toCol, toRow, "unit", payload)
+            if newId == nil then
+                log_error("[MonsterStub] 밀침 점유 실패 — 몬스터 소실 방지 위해 원 칸 복구")
+                newId = _BoardService:TryOccupy(def, board, fromCell.col, fromCell.row, "unit", payload)
+                toCol = fromCell.col
+                toRow = fromCell.row
+            end
+            if newId ~= nil then
+                _BoardService:SpawnLayerVisual(run, def, toCol, toRow, "unit", payload)
+                local newRec = _BoardService:GetCellLayer(board, toCol, toRow, "unit")
+                if newRec ~= nil and isvalid(newRec.entity) then
+                    local sr = newRec.entity.SpriteRendererComponent
+                    if isvalid(sr) then sr.SpriteRUID = self.StandRuid end
+                end
+                run.flow.monsterHp[newId] = hp
+                run.flow.monsterStun[newId] = stun
+            end
+            log("[MonsterStub] 밀침: (" .. fromCell.col .. "," .. fromCell.row .. ") -> ("
+                .. toCol .. "," .. toRow .. ")")
+        else
+            -- 벽궁(Wall-Slam): 이동 없음 — 추가 데미지 + 스턴
+            ---@type PlayerStatComponent
+            local statComp = playerEntity:GetComponent("script.PlayerStatComponent")
+            local atk = statComp ~= nil and statComp:GetStatsSnapshot().atk or 10
+            local hit = { skillId = "WAR_RUSH", cell = { col = fromCell.col, row = fromCell.row },
+                occupantId = rec.payload.occupantId, instanceId = rec.instanceId,
+                hitCount = 1, damagePerHit = atk * (slamCoef or 1.5), isCrit = false,
+                element = "none", elementStacks = 0, defPen = 0, onHitStatus = "stun" }
+            self:ApplyStun(run, rec.instanceId, 1, rec.entity)
+            self:ApplyHitPlan(run, def, { hit }, playerEntity)
+            log("[MonsterStub] 벽궁! (" .. fromCell.col .. "," .. fromCell.row .. ") 추가 데미지 "
+                .. tostring(hit.damagePerHit))
+        end
     end
 
     @ExecSpace("ServerOnly")
@@ -69,6 +140,7 @@ script MonsterStubLogic extends Logic
                     end
                     _BoardService:Release(board, h.cell.col, h.cell.row, "unit", h.instanceId)
                     run.flow.monsterHp[h.instanceId] = nil
+                    run.flow.monsterStun[h.instanceId] = nil
                     kills = kills + 1
                 else
                     run.flow.monsterHp[h.instanceId] = hp

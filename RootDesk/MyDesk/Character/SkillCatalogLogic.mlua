@@ -277,6 +277,17 @@ script SkillCatalogLogic extends Logic
     end
 
     @ExecSpace("ServerOnly")
+    method any GetMoveSkillForJobTier(string job, integer tier)
+        -- 해당 직업·차수의 이동기 def (전직 자동 습득용 — 회의 §2). 없으면 nil.
+        -- 이동기는 선택지에 나오지 않고 전직 시 지급된다 (ChoiceRollerLogic이 movement 제외).
+        for _, skillId in ipairs(self:GetSkillIdsByJobTier(job, tier)) do
+            local def = self:GetSkillRO(skillId)
+            if def ~= nil and def.attackType == "movement" then return def end
+        end
+        return nil
+    end
+
+    @ExecSpace("ServerOnly")
     method void ValidateSkill(any def)
         -- 적재 시 참조 무결성 검증: rangeId/baseTags/onHitStatus 존재 확인 (경고만, 차단 안 함).
         -- 서포트 스킬(버프/패시브)은 범위 패턴이 없으므로 rangeId 검증을 건너뛴다.

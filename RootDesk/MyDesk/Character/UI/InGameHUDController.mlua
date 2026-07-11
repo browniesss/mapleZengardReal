@@ -15,12 +15,16 @@ script InGameHUDController extends Component
     property TextComponent profileText = "fab702df-78f2-468a-bf55-be0bd2621d5d"
     property Entity dangerText = "64dd5bfe-5f66-4b52-aed5-9b830c17fa36"
     property ButtonComponent btnMode = "f76490bf-e94d-4a4e-a378-32787878513c"
+    property ButtonComponent btnSpeed = "b129701b-2437-4794-8736-ad8a5ade30bd"     -- 배속 토글 (회의 §1 — UUID는 빌더 bind 주입)
+    property ButtonComponent btnMove = "394e463a-da9f-456e-8b9f-74cede469b28"      -- 이동기 사용/확정 (회의 §2 — UUID는 빌더 bind 주입)
     property SpriteGUIRendererComponent expBarFill = "24828e11-1a92-4a13-b0f2-fdf2386cc3f0"
     property Entity choicePanel = "fe8835d2-00c8-4ac1-a468-ce8d41ef7df3"   -- 읽기 전용 — 소유자는 InGameChoiceController (노출 중 사이클 정지 판정)
 
     property string curPhase = "none"
     property string facingDir = "UP"
     property boolean autoMode = false      -- 전투 방식 (규칙서 §5.2) — 서버 flow와 동기 유지
+    property integer speedMult = 1         -- 배속 (1x/2x — 서버 flow와 동기 유지)
+    property boolean moveAiming = false    -- 이동기 조준 모드 (방향 선택 -> 잔상 -> 확정)
     property number profileTick = 0
     property any handlers = nil
 
@@ -36,7 +40,10 @@ script InGameHUDController extends Component
         self:Wire(self.btnLeft, function() self:SetFacing("LEFT") end)
         self:Wire(self.btnRight, function() self:SetFacing("RIGHT") end)
         self:Wire(self.btnMode, self.OnModeToggle)
+        self:Wire(self.btnSpeed, self.OnSpeedToggle)
+        self:Wire(self.btnMove, self.OnMoveClicked)
         if isvalid(self.dangerText) then self.dangerText.Enable = false end
+        if isvalid(self.btnMove) then self.btnMove.Entity.Enable = false end   -- 이동기 습득 전 숨김
         if isvalid(self.expBarFill) then
             self.expBarFill.Type = ImageType.Filled   -- FillAmount 기반 가로 게이지 (FillMethod 기본 Horizontal)
             self.expBarFill.FillAmount = 0
@@ -95,15 +102,63 @@ script InGameHUDController extends Component
                 .. "·" .. tostring(math.min(jobComp.LootCount, jobComp.AdvanceLootCost))
                 .. "/" .. tostring(jobComp.AdvanceLootCost)
         end
+        -- 이동기 버튼: 습득 시 노출, 이름+남은 회수 표기 (@Sync 폴링 — 조준 중엔 "이동 확정" 유지)
+        if isvalid(self.btnMove) then
+            ---@type PlayerRunComponent
+            local runComp = player:GetComponent("script.PlayerRunComponent")
+            local has = runComp ~= nil and runComp.MoveSkillId ~= ""
+            self.btnMove.Entity.Enable = has
+            if has and not self.moveAiming then
+                self.btnMove.Entity.TextComponent.Text = runComp.MoveSkillName
+                    .. " " .. tostring(runComp.MoveCharges) .. "/" .. tostring(runComp.MoveChargesPerRun)
+            end
+        end
     end
 
     @ExecSpace("ClientOnly")
     method void OnModeToggle()
         -- 전투 방식 토글 (UI설계 ⑨): 수동 ↔ 자동. 자동은 젠 터치 즉시 자동 공격(방향 패드 숨김).
+        -- 자동은 효율 60% (회의 §3) — 라벨에 명시해 패널티를 인지시킨다.
         self.autoMode = not self.autoMode
         _TurnFlowStubLogic:RequestSetBattleMode(self.autoMode)
-        self.btnMode.Entity.TextComponent.Text = self.autoMode and "전투: 자동" or "전투: 수동"
+        self.btnMode.Entity.TextComponent.Text = self.autoMode and "전투: 자동 (60%)" or "전투: 수동"
         if self.autoMode then self.dirPanel.Enable = false end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnSpeedToggle()
+        -- 배속 토글 (회의 §1): 기준 1배속 ↔ 2배속.
+        self.speedMult = self.speedMult == 1 and 2 or 1
+        _TurnFlowStubLogic:RequestSetSpeedMultiplier(self.speedMult)
+        self.btnSpeed.Entity.TextComponent.Text = "배속 " .. tostring(self.speedMult) .. "x"
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnMoveClicked()
+        -- 이동기 버튼 (회의 §2·§3): 1탭 = 조준 모드(방향 선택 -> 잔상), 2탭 = 확정 실행.
+        if isvalid(self.choicePanel) and self.choicePanel.Enable then return end
+        local player = _UserService.LocalPlayer
+        if not isvalid(player) then return end
+        ---@type PlayerRunComponent
+        local runComp = player:GetComponent("script.PlayerRunComponent")
+        if runComp == nil or runComp.MoveSkillId == "" or runComp.MoveCharges <= 0 then return end
+        if self.curPhase ~= "idle" and self.curPhase ~= "run_start" then return end
+        if self.moveAiming then
+            _TurnFlowStubLogic:RequestMoveCommit()
+            self:ExitMoveAiming()
+        else
+            self.moveAiming = true
+            self.dirPanel.Enable = true
+            self.btnMove.Entity.TextComponent.Text = "이동 확정"
+            _TurnFlowStubLogic:RequestMovePreview(self.facingDir)   -- 현재 방향 기준 잔상 즉시 표시
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void ExitMoveAiming()
+        -- 이동기 조준 종료: 방향 패드 숨김(공격 조준 중이 아닐 때만) + 버튼 라벨 복구(폴링이 갱신).
+        self.moveAiming = false
+        if self.curPhase ~= "aim" then self.dirPanel.Enable = false end
     end
 
     @EventSender("Logic", "TurnFlowStubLogic")
@@ -116,6 +171,7 @@ script InGameHUDController extends Component
         if isvalid(self.dangerText) then
             self.dangerText.Enable = event.danger   -- 빈 칸 < 가용 10%일 때만 (규칙서 §7.1)
         end
+        if event.phase ~= "idle" then self.moveAiming = false end   -- 젠/공격 진입 시 이동기 조준 해제
         if event.phase == "run_start" then
             self.rootPanel.Enable = true
             self.dirPanel.Enable = false
@@ -135,22 +191,37 @@ script InGameHUDController extends Component
         end
     end
 
+    @EventSender("Logic", "TurnFlowStubLogic")
+    handler OnManualFire(ManualFireEvent event)
+        -- 반자동 발사 대기 (회의 §3): 방향 패드 + 메인 버튼이 발사 버튼으로 전환.
+        self.curPhase = "manual"
+        self.dirPanel.Enable = true
+        self.btnMain.Entity.TextComponent.Text = event.skillName .. " 발사!"
+    end
+
     @ExecSpace("ClientOnly")
     method void OnMainClicked()
         -- 메인 버튼: idle=젠 / aim=지정 방향으로 공격 (수동 2단 입력 — UI설계 ⑫).
         if isvalid(self.choicePanel) and self.choicePanel.Enable then return end   -- 선택지 노출 중 사이클 정지
         if self.curPhase == "idle" or self.curPhase == "run_start" then
+            if self.moveAiming then return end   -- 이동기 조준 중 젠 오발 방지
             _TurnFlowStubLogic:RequestZen()
         elseif self.curPhase == "aim" then
             _TurnFlowStubLogic:RequestAttack(self.facingDir)
+        elseif self.curPhase == "manual" then
+            _TurnFlowStubLogic:RequestManualFire(self.facingDir)   -- 반자동 수동 발사 (회의 §3)
         end
     end
 
     @ExecSpace("ClientOnly")
     method void SetFacing(string dir)
-        -- 공격 방향 지정 (방향 패드 ⑩) + 해당 방향의 전 스킬 공격 범위 프리뷰 요청.
+        -- 방향 지정 (방향 패드 ⑩): 공격 조준 = 타격 프리뷰 / 이동기 조준 = 잔상 프리뷰 (회의 §3).
         self.facingDir = dir
-        _TurnFlowStubLogic:RequestRangePreview(dir)
-        log("[InGameHUD] 공격 방향: " .. dir)
+        if self.moveAiming then
+            _TurnFlowStubLogic:RequestMovePreview(dir)
+        else
+            _TurnFlowStubLogic:RequestRangePreview(dir)
+        end
+        log("[InGameHUD] 방향: " .. dir .. (self.moveAiming and " (이동기)" or ""))
     end
 end

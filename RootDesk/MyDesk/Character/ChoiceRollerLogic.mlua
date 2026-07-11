@@ -82,7 +82,7 @@ script ChoiceRollerLogic extends Logic
         local cands = {}
         for _, skillId in ipairs(_SkillCatalogLogic:GetSkillIdsByJobTier(jobComp.Job, tier)) do
             local def = _SkillCatalogLogic:GetSkillRO(skillId)
-            if def.tier == tier then
+            if def.tier == tier and def.attackType ~= "movement" then   -- 이동기는 전직 자동 습득 — 선택지 미출현 (회의 §2)
                 if _SkillCatalogLogic:IsSupportSkill(def) then
                     if loadout:FindSupportIndex(skillId) == 0 and not isSupportFull then
                         table.insert(cands, def)

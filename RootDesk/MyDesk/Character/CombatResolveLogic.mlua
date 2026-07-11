@@ -219,6 +219,7 @@ script CombatResolveLogic extends Logic
                         local totalHits = skillDef.hitCount
                         if totalHits < 1 then totalHits = 1 end
                         local perHit = ctx.stats.atk * skillDef.perHitCoefLv3 * _SkillCatalogLogic:LevelFactor(inst.level)
+                            * (ctx.dmgMult or 1)   -- AI 자동 조작 효율 패널티 (회의 §3: 수동 대비 60%)
                         local isCrit = _UtilLogic:RandomDouble() < ctx.stats.critRate
                         if isCrit then
                             perHit = perHit * (1 + ctx.stats.critDmg)

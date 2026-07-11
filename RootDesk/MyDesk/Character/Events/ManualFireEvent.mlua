@@ -1,0 +1,6 @@
+@Event
+script ManualFireEvent extends EventType
+    -- 반자동(회의 §3) 수동 발사 대기 진입 통지. 소유 클라 LocalPlayer가 아닌 Logic 발신 —
+    -- HUD가 방향패드+발사 버튼을 노출하고 RequestManualFire로 응답한다.
+    property string skillName = ""
+end

@@ -31,3 +31,7 @@ THF_TRIPLETHROW,트리플 스로우,THF,3,target,1,1,LINE_6,none,"[""target"",""
 THF_SPREADTHROW,스프레드 스로우,THF,4,area,1,8,FRONT_WIDE,none,"[""area""]",3.6,,1,1c254cece58942c4aeaee10a71f97041,ccbc8c01c2374662876ab3f66ad28604,전방 넓은 범위에 표창을 난사한다 (4차),,
 THF_SHADOWPARTNER,섀도 파트너,THF,1,buff,0,0,,none,,0,,5,8beb3f439fd247fb8ed2a9ee2009ef7a,d80b30cdb38c48019ae0a69cf2abf9fd,[버프] 공격 시 자동 시전: 3턴간 공격력 +30% (분신),"[{""stat"":""atk"",""type"":""percentAdd"",""value"":0.3}]",3
 THF_CRITICALTHROW,크리티컬 스로우,THF,1,passive,0,0,,none,,0,,0,3bd1836bbb0240638e2df28afb88c200,,[패시브] 장착 중 크리 확률 +10%p,"[{""stat"":""critRate"",""type"":""flat"",""value"":0.1}]",0
+MAG_TELEPORT,텔레포트,MAG,2,movement,0,4,LINE_4,none,,0,,0,2aa7ba4a1f394b319c435332548ad100,d80b30cdb38c48019ae0a69cf2abf9fd,[이동기] 방향 최대 4칸 내 빈 칸으로 순간이동 (판당 3회 · 2차 자동 습득),,
+ARC_FLASHJUMP,플래시 점프,ARC,3,movement,0,3,LINE_4,none,,0,,0,9ae4aa7a50984738a3488b04c91ac1f7,d80b30cdb38c48019ae0a69cf2abf9fd,[이동기] 방향으로 최대 3칸 도약 — 장애물 무시 (판당 3회 · 3차 자동 습득),,
+THF_FLASHJUMP,플래시 점프,THF,3,movement,0,3,LINE_4,none,,0,,0,8beb3f439fd247fb8ed2a9ee2009ef7a,d80b30cdb38c48019ae0a69cf2abf9fd,[이동기] 방향으로 최대 3칸 도약 — 장애물 무시 (판당 3회 · 3차 자동 습득),,
+WAR_RUSH,돌진,WAR,4,movement,0,3,LINE_4,none,,0,,0,5154fd369db24171aa138953d9ab575e,acd1da86405943ca91081294fadc7268,[이동기] 직선 돌진 — 적을 밀치고 벽에 충돌시키면 강타+스턴 (판당 3회 · 4차 자동 습득),,
