@@ -91,8 +91,17 @@ script LootService extends Logic
         for i, slot in ipairs(bag.slots) do
             local def = _BoardCatalogLogic:GetLootType(slot.lootId)
             local icon = ""
-            if def ~= nil and def.iconRuid ~= nil then icon = def.iconRuid end
-            slots[i] = { lootId = slot.lootId, count = slot.count, icon = icon }
+            local dispName = slot.lootId
+            local grade = ""
+            local job = false
+            if def ~= nil then
+                if def.iconRuid ~= nil then icon = def.iconRuid end
+                if def.name ~= nil then dispName = def.name end
+                if def.grade ~= nil then grade = def.grade end
+                job = def.jobMaterial == true
+            end
+            -- 표시 데이터 동봉(클라는 serveronly 데이터셋 미접근): 이름/등급/전직 플래그(인벤 v0.2 분류용)
+            slots[i] = { lootId = slot.lootId, count = slot.count, icon = icon, name = dispName, grade = grade, job = job }
         end
         local currency = {}
         for k, v in pairs(bag.currency) do currency[k] = v end

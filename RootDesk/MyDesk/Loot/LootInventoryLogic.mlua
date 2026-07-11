@@ -1,69 +1,97 @@
 @Logic
 script LootInventoryLogic extends Logic
-    -- 런 인벤토리 UI 컨트롤러 + 획득 연출(LOOT-SPEC §4/§5): 옛메식 24슬롯 창·메소 줄·토스트·자석 흡입.
-    -- UI 엔티티는 클라 전용(runtime-patterns Caveat 1/2) — 서버 LootService가 이 Logic의
-    -- Client RPC(SyncBag/NotifyGain)로 푸시하고, 페인트·연출·입력은 전부 ClientOnly로 처리한다.
+    -- 런 인벤토리 UI 컨트롤러(인게임 인벤토리 UI 기획서 v0.2 구조 — 2026-07-12 재작업):
+    -- [장비]/[전리품] 토글 다크 오버레이 + 전직 재료 고정 카드(런 한정) + 등급 탭(브론즈/실버/골드)
+    -- + 획득 연출(자석/토스트/사운드). 옛메 슬롯 그리드 폐기.
+    -- UI 엔티티는 클라 전용 — 서버 LootService가 Client RPC(SyncBag/NotifyGain)로 푸시.
     -- 바인딩 UUID는 ui/LootInventory.ui 빌더의 bind 주입으로 채워진다.
 
-    property Entity window = "3231ba26-b6bd-42ed-8390-892d14c0aace"                      -- 인벤 창 루트(토글 대상)
-    property ButtonComponent bagBtn = "4c0afed1-cd87-4c93-99fd-8c5dc09b9e8b"             -- HUD 가방 버튼
-    property ButtonComponent closeBtn = "1fdd689f-2493-40b2-bcd9-3b7ffe5df325"           -- 창 닫기 버튼
-    property Entity slotGrid = "59f167c1-ab7a-4e78-8724-c992f0e3e824"                    -- Slot_1..Slot_24 컨테이너
-    property TextComponent mesoText = "576bc7f5-075f-4ccf-a867-357fe6d39582"             -- 하단 메소 줄 수치
-    property Entity toastGroup = "866353e6-4f11-43bc-8824-184db36150b4"                  -- 획득 토스트 컨테이너
-    property TextComponent toastText = "a1dc4fcf-2636-4814-bc89-eb6c4072d7fa"            -- 토스트 문구
+    property ButtonComponent invBtn = "e85367f0-e785-4ffa-b48d-83235515a35c"             -- 좌하단 인벤토리 진입 버튼(우하단은 젠 버튼 자리)
+    property Entity overlay = "706a3743-1333-4e08-bfae-2ee08655a3ff"                     -- 오버레이 컨테이너(Backdrop+Panel, 토글 대상)
+    property Entity backdrop = "bae488e2-6d44-47f0-9b33-78db4ccf63c3"                    -- 바깥 탭 닫기용 반투명 배경
+    property ButtonComponent closeBtn = "5ad94aa3-0410-401a-a72f-ab8f7a86965b"           -- 패널 X
+    property ButtonComponent tabEquipBtn = "50572d08-cfd6-465a-8a14-296e8ea06d6b"        -- [장비] 탭
+    property ButtonComponent tabLootBtn = "35df3e3a-d00d-4580-8735-70a284db7464"         -- [전리품] 탭
+    property TextComponent scopeNote = "22e11bfa-caba-46c4-aa68-b2c3f2304f39"            -- 탭별 스코프 캡션
+    property Entity panelEq = "e9b64e61-0f44-493b-b74b-04dc21707613"                     -- 장비 탭 내용(1차 빈 상태)
+    property Entity panelLoot = "67cd8916-b11e-4825-b5a0-15b1882999ad"                   -- 전리품 탭 내용(고정 카드+등급 탭+소재 목록)
+    property Entity toastGroup = "2a2d0ae4-b817-4065-9baf-f22d8d150ec2"                  -- 획득 토스트 컨테이너
+    property TextComponent toastText = "4b3c038b-1036-43f2-8364-17b044fe954b"            -- 토스트 문구
 
-    property integer MaxSlots = 24                   -- LootService.MaxSlots와 동일(§5)
+    property integer MatRows = 5                     -- 소재 목록 표시 행 수
     property number MagnetDuration = 0.5             -- 자석 흡입 시간(초)
     property number ToastDuration = 2.0              -- 토스트 표시 시간(초)
-    property string ClickSoundRuid = "972843e759204d3e9ad84e7d3fa94f83"   -- 표준 UI 클릭음(ui-sound.md)
-    property string HoverSoundRuid = "159bf70a74634bfc8e91a29e527a4be5"   -- 표준 UI 호버음(ui-sound.md)
+    property string ClickSoundRuid = "972843e759204d3e9ad84e7d3fa94f83"   -- 표준 UI 클릭음
+    property string HoverSoundRuid = "159bf70a74634bfc8e91a29e527a4be5"   -- 표준 UI 호버음
 
-    property any bagBtnHandler = nil
-    property any closeBtnHandler = nil
-    property any bagHoverHandler = nil
-    property any closeHoverHandler = nil
+    property any handlers = nil                      -- {entity, event, handler} 목록(일괄 해제)
     property integer toastTimerId = 0
+    property string activeTab = "equip"              -- 마지막 본 탭 유지(기획서 3-1)
+    property integer activeGrade = 1                 -- 1=bronze, 2=silver, 3=gold
     property any lastSlots = nil                     -- 마지막 SyncBag 페이로드(클라 캐시)
     property any lastCurrency = nil
 
     @ExecSpace("ClientOnly")
     method void OnBeginPlay()
-        -- 초기 상태: 창/토스트 숨김 + 버튼 배선. 가방은 빈 상태로 시작(LOOT-SPEC §3).
-        self.window.Enable = false
+        -- 초기 상태: 오버레이/토스트 숨김 + 버튼 배선(클릭음 포함).
+        self.handlers = {}
+        self.overlay.Enable = false
         self.toastGroup.Enable = false
-        self.bagBtnHandler = self.bagBtn.Entity:ConnectEvent(ButtonClickEvent, function()
+        self:Wire(self.invBtn.Entity, ButtonClickEvent, function()
             _SoundService:PlaySound(self.ClickSoundRuid, 1)
-            self:ToggleWindow()
+            self:ToggleOverlay()
         end)
-        self.closeBtnHandler = self.closeBtn.Entity:ConnectEvent(ButtonClickEvent, function()
-            _SoundService:PlaySound(self.ClickSoundRuid, 1)
-            self.window.Enable = false
-        end)
-        -- 호버음: UITouchReceiveComponent가 버튼 엔티티에 있어야 발화(ui-sound.md — .ui에 추가됨)
-        self.bagHoverHandler = self.bagBtn.Entity:ConnectEvent(UITouchEnterEvent, function()
+        self:Wire(self.invBtn.Entity, UITouchEnterEvent, function()
             _SoundService:PlaySound(self.HoverSoundRuid, 1)
         end)
-        self.closeHoverHandler = self.closeBtn.Entity:ConnectEvent(UITouchEnterEvent, function()
-            _SoundService:PlaySound(self.HoverSoundRuid, 1)
+        self:Wire(self.closeBtn.Entity, ButtonClickEvent, function()
+            _SoundService:PlaySound(self.ClickSoundRuid, 1)
+            self.overlay.Enable = false
         end)
-        log("[LootInvUI] ready (client)")
+        self:Wire(self.backdrop, UITouchDownEvent, function()
+            self.overlay.Enable = false   -- 패널 바깥 탭 닫기(기획서 3-1)
+        end)
+        self:Wire(self.tabEquipBtn.Entity, ButtonClickEvent, function()
+            _SoundService:PlaySound(self.ClickSoundRuid, 1)
+            self:SelectTab("equip")
+        end)
+        self:Wire(self.tabLootBtn.Entity, ButtonClickEvent, function()
+            _SoundService:PlaySound(self.ClickSoundRuid, 1)
+            self:SelectTab("loot")
+        end)
+        -- 등급 탭 3개(브론즈/실버/골드) — 경로 탐색으로 배선(바인딩 최소화)
+        for i = 1, 3 do
+            local capturedIdx = i
+            local tabEnt = self.panelLoot:GetChildByName("GradeTab_" .. i, false)
+            if tabEnt ~= nil and isvalid(tabEnt) then
+                self:Wire(tabEnt, ButtonClickEvent, function()
+                    _SoundService:PlaySound(self.ClickSoundRuid, 1)
+                    self.activeGrade = capturedIdx
+                    self:Paint()
+                end)
+            end
+        end
+        log("[LootInvUI] ready (client, v0.2 구조)")
+    end
+
+    @ExecSpace("ClientOnly")
+    method void Wire(Entity target, any eventType, any callback)
+        -- ConnectEvent + 해제 목록 등록(OnEndPlay 일괄 Disconnect).
+        if target == nil or not isvalid(target) then return end
+        local h = target:ConnectEvent(eventType, callback)
+        table.insert(self.handlers, { target = target, eventType = eventType, eventHandler = h })
     end
 
     @ExecSpace("ClientOnly")
     method void OnEndPlay()
-        -- 이벤트/타이머 해제(runtime-patterns Caveat 9/10).
-        if self.bagBtnHandler ~= nil then
-            self.bagBtn.Entity:DisconnectEvent(ButtonClickEvent, self.bagBtnHandler)
-        end
-        if self.closeBtnHandler ~= nil then
-            self.closeBtn.Entity:DisconnectEvent(ButtonClickEvent, self.closeBtnHandler)
-        end
-        if self.bagHoverHandler ~= nil then
-            self.bagBtn.Entity:DisconnectEvent(UITouchEnterEvent, self.bagHoverHandler)
-        end
-        if self.closeHoverHandler ~= nil then
-            self.closeBtn.Entity:DisconnectEvent(UITouchEnterEvent, self.closeHoverHandler)
+        -- 이벤트/타이머 일괄 해제.
+        if self.handlers ~= nil then
+            for _, rec in ipairs(self.handlers) do
+                if rec.target ~= nil and isvalid(rec.target) then
+                    rec.target:DisconnectEvent(rec.eventType, rec.eventHandler)
+                end
+            end
+            self.handlers = {}
         end
         if self.toastTimerId ~= 0 then
             _TimerService:ClearTimer(self.toastTimerId)
@@ -71,11 +99,43 @@ script LootInventoryLogic extends Logic
     end
 
     @ExecSpace("ClientOnly")
-    method void ToggleWindow()
-        -- 가방 버튼: 창 토글. 열 때 마지막 스냅샷으로 페인트(없으면 빈 슬롯).
-        self.window.Enable = not self.window.Enable
-        if self.window.Enable then
-            self:Paint()
+    method void ToggleOverlay()
+        -- 인벤 버튼: 오버레이 토글. 열 때 마지막 탭 유지 + 페인트.
+        self.overlay.Enable = not self.overlay.Enable
+        if self.overlay.Enable then
+            self:SelectTab(self.activeTab)
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void SelectTab(string tab)
+        -- [장비]/[전리품] 토글: 패널 전환 + 탭 강조 + 스코프 캡션(기획서 3-1).
+        self.activeTab = tab
+        local isEq = tab == "equip"
+        self.panelEq.Enable = isEq
+        self.panelLoot.Enable = not isEq
+        self:SetTabVisual(self.tabEquipBtn, isEq)
+        self:SetTabVisual(self.tabLootBtn, not isEq)
+        if isEq then
+            self.scopeNote.Text = "이번 스테이지 동안 유지 · 종료 시 초기화"
+        else
+            self.scopeNote.Text = "전직 재료는 런 한정 · 등급별 소재는 계정 귀속 누적"
+        end
+        if not isEq then self:Paint() end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void SetTabVisual(ButtonComponent btn, boolean active)
+        -- 활성 탭 = 밝은 배경/짙은 글씨, 비활성 = 반투명(기획서 목업).
+        local ent = btn.Entity
+        local sp = ent.SpriteGUIRendererComponent
+        local tx = ent.TextComponent
+        if active then
+            sp.Color = Color(0.95, 0.96, 0.98, 1)
+            tx.FontColor = Color(0.09, 0.17, 0.30, 1)
+        else
+            sp.Color = Color(1, 1, 1, 0.08)
+            tx.FontColor = Color(1, 1, 1, 0.65)
         end
     end
 
@@ -83,7 +143,7 @@ script LootInventoryLogic extends Logic
 
     @ExecSpace("Client")
     method void SyncBag(table slots, table currency)
-        -- 가방 스냅샷 수신: slots = [{icon,count}], currency = {lootId=n}. 캐시 후 페인트.
+        -- 가방 스냅샷 수신: slots = [{lootId,count,icon,name,grade,job}], currency = {lootId=n}.
         self.lastSlots = slots
         self.lastCurrency = currency
         self:Paint()
@@ -96,7 +156,6 @@ script LootInventoryLogic extends Logic
         if lp == nil or not isvalid(lp) then return end
         local map = lp.CurrentMap
         if map == nil or not isvalid(map) then return end
-        -- 클라 로컬 스폰(연출 전용 — 서버 점유와 무관)
         local fly = _SpawnService:SpawnByModelId("lootfly", "LootFly", Vector3(fromX, fromY, 0), map)
         if fly ~= nil and isvalid(fly) and iconRuid ~= nil and iconRuid ~= "" then
             fly.SpriteRendererComponent.SpriteRUID = iconRuid
@@ -114,48 +173,91 @@ script LootInventoryLogic extends Logic
         end, self.MagnetDuration)
     end
 
-    -- ===== 페인트 / 토스트 (ClientOnly) =====
+    -- ===== 페인트 (ClientOnly) =====
 
     @ExecSpace("ClientOnly")
     method void Paint()
-        -- 슬롯 그리드 + 메소 줄 페인트. 빈 슬롯 = 아이콘 투명 + 수량 공백.
+        -- 전리품 탭 페인트: 전직 재료 고정 카드 + 등급 탭 개수 + 활성 등급 소재 목록(보유 내림차순) + 메소.
         local slots = self.lastSlots
-        for i = 1, self.MaxSlots do
-            local slot = self.slotGrid:GetChildByName("Slot_" .. i, false)
-            if slot ~= nil and isvalid(slot) then
-                local icon = slot:GetChildByName("Icon", false)
-                local countEnt = slot:GetChildByName("Count", false)
-                local data = nil
-                if slots ~= nil then data = slots[i] end
-                if data ~= nil then
-                    if icon ~= nil and isvalid(icon) then
-                        local sp = icon.SpriteGUIRendererComponent
-                        sp.ImageRUID = DataRef(tostring(data.icon))
-                        sp:SetAlpha(1)
-                    end
-                    if countEnt ~= nil and isvalid(countEnt) then
-                        countEnt.TextComponent.Text = tostring(data.count)
-                    end
-                else
-                    if icon ~= nil and isvalid(icon) then
-                        icon.SpriteGUIRendererComponent:SetAlpha(0)
-                    end
-                    if countEnt ~= nil and isvalid(countEnt) then
-                        countEnt.TextComponent.Text = ""
-                    end
+        -- 1) 분류: 전직 재료 수량 / 등급별 소재 목록
+        local jobCount = 0
+        local byGrade = { bronze = {}, silver = {}, gold = {} }
+        if slots ~= nil then
+            for _, s in ipairs(slots) do
+                if s.job then
+                    jobCount = jobCount + s.count
+                elseif byGrade[s.grade] ~= nil then
+                    table.insert(byGrade[s.grade], s)
                 end
             end
         end
+        -- 2) 전직 재료 고정 카드(검은 구슬 — 필요 수량 진행률은 전직 시스템 확정 시)
+        local jobCard = self.panelLoot:GetChildByName("JobCard", false)
+        if jobCard ~= nil and isvalid(jobCard) then
+            local cnt = jobCard:GetChildByName("JobCount", false)
+            if cnt ~= nil and isvalid(cnt) then cnt.TextComponent.Text = "보유 " .. tostring(jobCount) end
+        end
+        -- 3) 등급 탭 라벨 + 개수
+        local gradeKeys = { "bronze", "silver", "gold" }
+        local gradeNames = { "브론즈", "실버", "골드" }
+        for i = 1, 3 do
+            local tabEnt = self.panelLoot:GetChildByName("GradeTab_" .. i, false)
+            if tabEnt ~= nil and isvalid(tabEnt) then
+                local total = 0
+                for _, s in ipairs(byGrade[gradeKeys[i]]) do total = total + s.count end
+                tabEnt.TextComponent.Text = gradeNames[i] .. " " .. tostring(total)
+                local sp = tabEnt.SpriteGUIRendererComponent
+                if i == self.activeGrade then
+                    sp.Color = Color(1, 1, 1, 0.18)
+                else
+                    sp.Color = Color(1, 1, 1, 0.06)
+                end
+            end
+        end
+        -- 4) 활성 등급 소재 목록(보유 내림차순, MatRows 행)
+        local list = byGrade[gradeKeys[self.activeGrade]]
+        table.sort(list, function(a, b) return a.count > b.count end)
+        for i = 1, self.MatRows do
+            local row = self.panelLoot:GetChildByName("MatRow_" .. i, false)
+            if row ~= nil and isvalid(row) then
+                local icon = row:GetChildByName("Icon", false)
+                local nameEnt = row:GetChildByName("Name", false)
+                local cntEnt = row:GetChildByName("Cnt", false)
+                local s = list[i]
+                if s ~= nil then
+                    row.Enable = true
+                    if icon ~= nil and isvalid(icon) then
+                        local sp = icon.SpriteGUIRendererComponent
+                        sp.ImageRUID = DataRef(tostring(s.icon))
+                        sp:SetAlpha(1)
+                    end
+                    if nameEnt ~= nil and isvalid(nameEnt) then nameEnt.TextComponent.Text = tostring(s.name) end
+                    if cntEnt ~= nil and isvalid(cntEnt) then cntEnt.TextComponent.Text = tostring(s.count) end
+                elseif i == 1 then
+                    -- 빈 등급 안내(기획서 3-3)
+                    row.Enable = true
+                    if icon ~= nil and isvalid(icon) then icon.SpriteGUIRendererComponent:SetAlpha(0) end
+                    if nameEnt ~= nil and isvalid(nameEnt) then nameEnt.TextComponent.Text = "아직 획득한 소재가 없습니다" end
+                    if cntEnt ~= nil and isvalid(cntEnt) then cntEnt.TextComponent.Text = "" end
+                else
+                    row.Enable = false
+                end
+            end
+        end
+        -- 5) 메소(임시 표기 — 재화 표시는 재화 시스템 문서 소관, 이관 예정)
         local meso = 0
         if self.lastCurrency ~= nil and self.lastCurrency["meso"] ~= nil then
             meso = self.lastCurrency["meso"]
         end
-        self.mesoText.Text = tostring(meso)
+        local mesoEnt = self.panelLoot:GetChildByName("MesoLine", false)
+        if mesoEnt ~= nil and isvalid(mesoEnt) then
+            mesoEnt.TextComponent.Text = "메소 " .. tostring(meso)
+        end
     end
 
     @ExecSpace("ClientOnly")
     method void ShowToast(string msg)
-        -- 획득 토스트(2026-07-11 확정 — 1차 포함): 하단 중앙 문구, ToastDuration 후 숨김.
+        -- 획득 토스트: 하단 중앙 문구, ToastDuration 후 숨김.
         self.toastText.Text = msg
         self.toastGroup.Enable = true
         if self.toastTimerId ~= 0 then

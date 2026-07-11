@@ -201,7 +201,13 @@ script BoardCatalogLogic extends Logic
                             currency = self:ToBool(row:GetItem("currency"), false),
                             maxStack = math.floor(tonumber(row:GetItem("maxStack")) or 99),
                             pickupSound = row:GetItem("pickupSound"),
+                            grade = row:GetItem("grade"),                                -- 소재 등급 bronze/silver/gold (인벤 기획서 v0.2)
+                            jobMaterial = self:ToBool(row:GetItem("jobMaterial"), false), -- 전직 재료(고정 카드·런 한정)
                         }
+                        -- 일반 소재(비-재화·비-전직)는 등급 필수 — 누락 시 bronze 폴백(인벤 등급 탭 분류용)
+                        if not def.currency and not def.jobMaterial and (def.grade == nil or def.grade == "") then
+                            def.grade = "bronze"
+                        end
                         -- 비-재화 maxStack ≥ 1 강제(2026-07-11 리뷰): 0 이하면 GainLoot 적립 루프가
                         -- count=0 슬롯만 쌓고 수량이 소실된다 — 적재 시점에 차단.
                         if not def.currency and def.maxStack < 1 then
