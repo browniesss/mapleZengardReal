@@ -273,8 +273,18 @@ script MonsterService extends Logic
             end
             _BoardService:SpawnLayerVisual(run, run.def, unit.col, unit.row, "item", payload)
             log("[MonsterService] 드랍: " .. tostring(picked.id) .. " @ " .. unit.col .. "_" .. unit.row)
+        elseif picked.kind == "loot" then
+            -- 전리품(LOOT-SPEC §2/§4): min~max 범위 굴림(RPG 표준 — 몬스터별 드랍 테이블이 범위 소유)
+            -- → 런 인벤(run.lootBag) 즉시 적립. 칸 점유 없음.
+            local count = 1
+            local lo = math.floor(tonumber(picked.min) or 0)
+            local hi = math.floor(tonumber(picked.max) or 0)
+            if lo > 0 and hi >= lo then
+                count = _UtilLogic:RandomIntegerRange(lo, hi)
+            end
+            _LootService:GainLoot(run, unit.col, unit.row, picked.id, count)
         else
-            -- loot/equip: 보상 풀 미확정(§8.7) — 기록만 남기고 skip
+            -- equip: 보상 풀 미확정(§8.7) — 기록만 남기고 skip
             log("[MonsterService] 드랍 skip(kind=" .. tostring(picked.kind) .. ", §8.7 미구현): " .. tostring(picked.id))
         end
     end

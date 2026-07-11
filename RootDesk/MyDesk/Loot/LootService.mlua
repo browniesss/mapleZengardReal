@@ -1,0 +1,125 @@
+@Logic
+script LootService extends Logic
+    -- 런 전용 전리품 인벤토리(LOOT-SPEC §3/§4): 드랍 수신·run.lootBag 적립·질의.
+    -- 무상태: 가방은 run.lootBag(런별 휘발)에만 산다 — Logic 전역 상태 금지, DataStorage 미사용(런 종료 = 소멸).
+    -- 추첨(무엇이 몇 개)은 MonsterService.KillUnit 소유 — 여기는 당첨된 loot의 적립·연출·질의만.
+
+    property boolean RunSelfTest = false   -- OnBeginPlay 자가검증. 본배선 검증 완료로 off(필요시 on).
+    property integer MaxSlots = 24         -- 인벤 슬롯 수(LOOT-SPEC §5 — 4열×6행). 초과분은 totalGained에만 기록.
+
+    @ExecSpace("ServerOnly")
+    method void OnBeginPlay()
+        -- 무상태라 초기화할 것 없음. 자가검증만.
+        log("[LootService] ready")
+        if self.RunSelfTest then self:SelfTest() end
+    end
+
+    method any EnsureBag(any run)
+        -- run.lootBag 보장(런 시작 = 빈 가방, LOOT-SPEC §3). BuildBoard 초기화 + 방어적 lazy-init 이중화.
+        if run.lootBag == nil then
+            run.lootBag = { slots = {}, currency = {}, totalGained = {} }
+        end
+        return run.lootBag
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean GainLoot(any run, integer col, integer row, string lootId, integer count)
+        -- 드랍 수신(LOOT-SPEC §4): LootTypes 검증 → 적립(재화/슬롯 분기) → 연출·UI 동기화.
+        -- (col,row) = 죽은 칸 — 자석 연출 시작점(§4 PlayMagnetFx, UI 단계에서 배선).
+        if count <= 0 then return false end
+        local def = _BoardCatalogLogic:GetLootType(lootId)
+        if def == nil then
+            log_error("[LootService] 알수없는 lootId: " .. tostring(lootId) .. " — 획득 무시")
+            return false
+        end
+        local bag = self:EnsureBag(run)
+        if def.currency then
+            -- 재화(메소 등): 슬롯 미점유·상한 없음(2026-07-11 확정)
+            bag.currency[lootId] = (bag.currency[lootId] or 0) + count
+        else
+            -- 일반 아이템: 미만석 기존 슬롯부터 합산 → 부족분은 새 슬롯(옛메 방식)
+            local remaining = count
+            for _, slot in ipairs(bag.slots) do
+                if slot.lootId == lootId and slot.count < def.maxStack then
+                    local add = math.min(def.maxStack - slot.count, remaining)
+                    slot.count = slot.count + add
+                    remaining = remaining - add
+                    if remaining <= 0 then break end
+                end
+            end
+            while remaining > 0 do
+                if #bag.slots >= self.MaxSlots then
+                    -- 슬롯 상한: 적립 유지(totalGained) + 초과분 UI 미표시 경고(LOOT-SPEC §3)
+                    log_warning("[LootService] 가방 슬롯 가득참 — 초과분 " .. tostring(remaining)
+                        .. "개는 누계에만 기록: " .. lootId)
+                    break
+                end
+                local add = math.min(def.maxStack, remaining)
+                table.insert(bag.slots, { lootId = lootId, count = add })
+                remaining = remaining - add
+            end
+        end
+        bag.totalGained[lootId] = (bag.totalGained[lootId] or 0) + count
+        log("[LootService] 획득: " .. tostring(def.name) .. " x" .. tostring(count)
+            .. " @ " .. tostring(col) .. "_" .. tostring(row)
+            .. " (누계 " .. tostring(bag.totalGained[lootId]) .. ")")
+        -- TODO(LOOT-SPEC §4/§5 후속 배선): 죽은 칸 → 아바타 자석 연출 RPC(PlayMagnetFx)
+        --   + 획득 토스트/픽업 사운드(def.pickupSound) + 인벤 UI 슬롯 스냅샷 push.
+        return true
+    end
+
+    -- ===== 질의 (UI·Result가 소비) =====
+
+    @ExecSpace("ServerOnly")
+    method any GetBag(any run)
+        -- 가방 스냅샷(deep-copy) — 소비측이 내부 상태를 오염시키지 않게.
+        local bag = self:EnsureBag(run)
+        local out = { slots = {}, currency = {}, totalGained = {} }
+        for i, slot in ipairs(bag.slots) do
+            out.slots[i] = { lootId = slot.lootId, count = slot.count }
+        end
+        for k, v in pairs(bag.currency) do out.currency[k] = v end
+        for k, v in pairs(bag.totalGained) do out.totalGained[k] = v end
+        return out
+    end
+
+    @ExecSpace("ServerOnly")
+    method integer CountLoot(any run, string lootId)
+        -- 보유 수량: 재화면 currency, 아니면 슬롯 합산.
+        local bag = self:EnsureBag(run)
+        if bag.currency[lootId] ~= nil then return bag.currency[lootId] end
+        local n = 0
+        for _, slot in ipairs(bag.slots) do
+            if slot.lootId == lootId then n = n + slot.count end
+        end
+        return n
+    end
+
+    -- ===== 자가검증(임시) =====
+
+    @ExecSpace("ServerOnly")
+    method void SelfTest()
+        -- 더미 run으로 적립 규칙 확인: 재화 무상한 / 스택 합산 / maxStack 경계 / 슬롯 상한 경고.
+        local run = {}
+        local ok1 = self:GainLoot(run, 0, 0, "meso", 30)
+        self:GainLoot(run, 1, 0, "meso", 25)
+        local ok2 = self:GainLoot(run, 2, 0, "mushroomCap", 98)
+        self:GainLoot(run, 3, 0, "mushroomCap", 3)   -- 98+3 → 99 만석 + 새 슬롯 2
+        local okBad = self:GainLoot(run, 0, 0, "no_such_loot", 1)
+        log("[LootService][SelfTest] meso=" .. tostring(self:CountLoot(run, "meso")) .. " (55 기대)"
+            .. " cap=" .. tostring(self:CountLoot(run, "mushroomCap")) .. " (101 기대)"
+            .. " slots=" .. tostring(#run.lootBag.slots) .. " (2 기대: 99+2)"
+            .. " ok=" .. tostring(ok1 and ok2) .. " 미존재 무시 OK=" .. tostring(okBad == false))
+        -- 슬롯 상한: 서로 다른 lootId가 없으므로 mushroomCap 만석 슬롯으로 채워 상한 경고 확인
+        for i = 1, self.MaxSlots do
+            self:GainLoot(run, 4, 0, "mushroomCap", 99)
+        end
+        log("[LootService][SelfTest] 상한 후 slots=" .. tostring(#run.lootBag.slots)
+            .. " (" .. tostring(self.MaxSlots) .. " 초과 금지)"
+            .. " 누계=" .. tostring(run.lootBag.totalGained["mushroomCap"]))
+        -- GetBag 격리: 반환본 변형이 원본에 영향 없어야 함
+        local snap = self:GetBag(run)
+        snap.currency["meso"] = -999
+        log("[LootService][SelfTest] GetBag 격리 OK=" .. tostring(self:CountLoot(run, "meso") == 55))
+    end
+end

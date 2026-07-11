@@ -14,6 +14,7 @@ script BoardCatalogLogic extends Logic
     property any itemTypeCache = nil     -- itemId -> def
     property any monsterTypeCache = nil  -- monsterId -> def (MONSTER-SPEC §2)
     property any dropTableCache = nil    -- dropTableId -> def (MONSTER-SPEC §2.5)
+    property any lootTypeCache = nil     -- lootId -> def (LOOT-SPEC §2)
 
     @ExecSpace("ServerOnly")
     method void OnBeginPlay()
@@ -177,6 +178,39 @@ script BoardCatalogLogic extends Logic
         return self:DeepCopy(self.itemTypeCache[itemId])
     end
 
+    @ExecSpace("ServerOnly")
+    method any GetLootType(string lootId)
+        -- lootId -> LootDef(deep-copy). 미존재 시 nil (LOOT-SPEC §2).
+        -- currency=true(메소)는 슬롯 미점유·무상한 재화, iconRuid/pickupSound는 연출·UI 소비.
+        if self.lootTypeCache == nil then
+            self.lootTypeCache = {}
+            local ds = _DataService:GetTable("LootTypes")
+            if ds == nil then
+                log_error("[BoardCatalog] LootTypes 데이터셋 없음")
+            else
+                for _, row in ipairs(ds:GetAllRow()) do
+                    local id = row:GetItem("lootId")
+                    if id ~= nil and id ~= "" then
+                        local def = {
+                            lootId = id,
+                            name = row:GetItem("name"),
+                            iconRuid = row:GetItem("iconRuid"),
+                            rarity = row:GetItem("rarity"),
+                            currency = self:ToBool(row:GetItem("currency"), false),
+                            maxStack = math.floor(tonumber(row:GetItem("maxStack")) or 99),
+                            pickupSound = row:GetItem("pickupSound"),
+                        }
+                        if def.iconRuid == nil or def.iconRuid == "" then
+                            log_warning("[BoardCatalog] LootTypes '" .. id .. "' iconRuid 누락 — 인벤/연출에 보이지 않음")
+                        end
+                        self.lootTypeCache[id] = def
+                    end
+                end
+            end
+        end
+        return self:DeepCopy(self.lootTypeCache[lootId])
+    end
+
     -- ===== MonsterTypes / DropTables (MONSTER-SPEC §2 / §2.5) =====
 
     @ExecSpace("ServerOnly")
@@ -263,9 +297,16 @@ script BoardCatalogLogic extends Logic
                                 else
                                     table.insert(cleaned, { kind = e.kind, id = e.id, weight = w })
                                 end
-                            elseif e.kind == "loot" or e.kind == "equip" then
-                                -- §8.7: 카탈로그(LootTypes/EquipTypes) 미신설 — 적재는 허용, 당첨 시 소비측이 log-skip
-                                log_warning("[BoardCatalog] DropTable '" .. id .. "' kind '" .. e.kind .. "' 카탈로그 미신설(§8.7) — 당첨 시 skip")
+                            elseif e.kind == "loot" then
+                                -- LOOT-SPEC §2: LootTypes 존재 검증(boardItem 검증과 동일 패턴)
+                                if self:GetLootType(e.id) == nil then
+                                    log_error("[BoardCatalog] DropTable '" .. id .. "' 알수없는 loot id: " .. tostring(e.id) .. " — 엔트리 제외")
+                                else
+                                    table.insert(cleaned, { kind = e.kind, id = e.id, weight = w, min = e.min, max = e.max })
+                                end
+                            elseif e.kind == "equip" then
+                                -- §8.7: EquipTypes 미신설 — 적재는 허용, 당첨 시 소비측이 log-skip
+                                log_warning("[BoardCatalog] DropTable '" .. id .. "' kind 'equip' 카탈로그 미신설(§8.7) — 당첨 시 skip")
                                 table.insert(cleaned, { kind = e.kind, id = e.id, weight = w, min = e.min, max = e.max })
                             else
                                 log_error("[BoardCatalog] DropTable '" .. id .. "' 알수없는 kind: " .. tostring(e.kind) .. " — 엔트리 제외")

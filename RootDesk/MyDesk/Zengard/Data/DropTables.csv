@@ -1,2 +1,2 @@
 dropTableId,entries
-mushroomTier,"[{""kind"":""boardItem"",""id"":""atkPotion"",""weight"":30},{""weight"":70}]"
+mushroomTier,"[{""kind"":""boardItem"",""id"":""atkPotion"",""weight"":30},{""kind"":""loot"",""id"":""mushroomCap"",""weight"":40,""min"":1,""max"":2},{""kind"":""loot"",""id"":""meso"",""weight"":20,""min"":10,""max"":30},{""weight"":10}]"

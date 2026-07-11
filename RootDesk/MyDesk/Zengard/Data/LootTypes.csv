@@ -1,0 +1,3 @@
+lootId,name,iconRuid,rarity,currency,maxStack,pickupSound
+mushroomCap,주황버섯의 갓,b871877a7c394eafb176a9fed9b7c415,common,false,99,f399837e702843abb2c8196829101982
+meso,메소,02a489cccff24a139a6c3582a5871f58,common,true,0,25e9b2779bd540fd9c8bb931d8363439
