@@ -63,9 +63,34 @@ script LootService extends Logic
         log("[LootService] 획득: " .. tostring(def.name) .. " x" .. tostring(count)
             .. " @ " .. tostring(col) .. "_" .. tostring(row)
             .. " (누계 " .. tostring(bag.totalGained[lootId]) .. ")")
-        -- TODO(LOOT-SPEC §4/§5 후속 배선): 죽은 칸 → 아바타 자석 연출 RPC(PlayMagnetFx)
-        --   + 획득 토스트/픽업 사운드(def.pickupSound) + 인벤 UI 슬롯 스냅샷 push.
+        -- 연출 + UI 동기화(LOOT-SPEC §4/§5): 죽은 칸 → 아바타 자석 흡입 + 토스트/사운드 + 슬롯 push.
+        -- run.def/board 없는 더미 run(SelfTest)은 연출 생략 — 적립 로직만 검증.
+        if run.def ~= nil and run.board ~= nil then
+            local pos = _BoardService:CellToWorld(run.def, run.board, col, row)
+            local josa = "개를"
+            if def.currency then josa = "을(를)" end
+            local toastMsg = tostring(def.name) .. " " .. tostring(count) .. josa .. " 얻었습니다."
+            _LootInventoryLogic:NotifyGain(toastMsg, tostring(def.iconRuid or ""), tostring(def.pickupSound or ""), pos.x, pos.y)
+            self:PushBag(run)
+        end
         return true
+    end
+
+    @ExecSpace("ServerOnly")
+    method void PushBag(any run)
+        -- 가방 스냅샷을 클라 UI에 push(LOOT-SPEC §4 동기화). 클라는 serveronly 데이터셋을 못 읽으므로
+        -- 표시 데이터(icon)를 서버가 채워 보낸다. 1차 싱글 = 브로드캐스트(멀티 시 유저별 타깃 확장).
+        local bag = self:EnsureBag(run)
+        local slots = {}
+        for i, slot in ipairs(bag.slots) do
+            local def = _BoardCatalogLogic:GetLootType(slot.lootId)
+            local icon = ""
+            if def ~= nil and def.iconRuid ~= nil then icon = def.iconRuid end
+            slots[i] = { lootId = slot.lootId, count = slot.count, icon = icon }
+        end
+        local currency = {}
+        for k, v in pairs(bag.currency) do currency[k] = v end
+        _LootInventoryLogic:SyncBag(slots, currency)
     end
 
     -- ===== 질의 (UI·Result가 소비) =====

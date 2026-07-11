@@ -1,0 +1,150 @@
+@Logic
+script LootInventoryLogic extends Logic
+    -- 런 인벤토리 UI 컨트롤러 + 획득 연출(LOOT-SPEC §4/§5): 옛메식 24슬롯 창·메소 줄·토스트·자석 흡입.
+    -- UI 엔티티는 클라 전용(runtime-patterns Caveat 1/2) — 서버 LootService가 이 Logic의
+    -- Client RPC(SyncBag/NotifyGain)로 푸시하고, 페인트·연출·입력은 전부 ClientOnly로 처리한다.
+    -- 바인딩 UUID는 ui/LootInventory.ui 빌더의 bind 주입으로 채워진다.
+
+    property Entity window = "3231ba26-b6bd-42ed-8390-892d14c0aace"                      -- 인벤 창 루트(토글 대상)
+    property ButtonComponent bagBtn = "4c0afed1-cd87-4c93-99fd-8c5dc09b9e8b"             -- HUD 가방 버튼
+    property ButtonComponent closeBtn = "1fdd689f-2493-40b2-bcd9-3b7ffe5df325"           -- 창 닫기 버튼
+    property Entity slotGrid = "59f167c1-ab7a-4e78-8724-c992f0e3e824"                    -- Slot_1..Slot_24 컨테이너
+    property TextComponent mesoText = "576bc7f5-075f-4ccf-a867-357fe6d39582"             -- 하단 메소 줄 수치
+    property Entity toastGroup = "866353e6-4f11-43bc-8824-184db36150b4"                  -- 획득 토스트 컨테이너
+    property TextComponent toastText = "a1dc4fcf-2636-4814-bc89-eb6c4072d7fa"            -- 토스트 문구
+
+    property integer MaxSlots = 24                   -- LootService.MaxSlots와 동일(§5)
+    property number MagnetDuration = 0.5             -- 자석 흡입 시간(초)
+    property number ToastDuration = 2.0              -- 토스트 표시 시간(초)
+
+    property any bagBtnHandler = nil
+    property any closeBtnHandler = nil
+    property integer toastTimerId = 0
+    property any lastSlots = nil                     -- 마지막 SyncBag 페이로드(클라 캐시)
+    property any lastCurrency = nil
+
+    @ExecSpace("ClientOnly")
+    method void OnBeginPlay()
+        -- 초기 상태: 창/토스트 숨김 + 버튼 배선. 가방은 빈 상태로 시작(LOOT-SPEC §3).
+        self.window.Enable = false
+        self.toastGroup.Enable = false
+        self.bagBtnHandler = self.bagBtn.Entity:ConnectEvent(ButtonClickEvent, function()
+            self:ToggleWindow()
+        end)
+        self.closeBtnHandler = self.closeBtn.Entity:ConnectEvent(ButtonClickEvent, function()
+            self.window.Enable = false
+        end)
+        log("[LootInvUI] ready (client)")
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnEndPlay()
+        -- 이벤트/타이머 해제(runtime-patterns Caveat 9/10).
+        if self.bagBtnHandler ~= nil then
+            self.bagBtn.Entity:DisconnectEvent(ButtonClickEvent, self.bagBtnHandler)
+        end
+        if self.closeBtnHandler ~= nil then
+            self.closeBtn.Entity:DisconnectEvent(ButtonClickEvent, self.closeBtnHandler)
+        end
+        if self.toastTimerId ~= 0 then
+            _TimerService:ClearTimer(self.toastTimerId)
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void ToggleWindow()
+        -- 가방 버튼: 창 토글. 열 때 마지막 스냅샷으로 페인트(없으면 빈 슬롯).
+        self.window.Enable = not self.window.Enable
+        if self.window.Enable then
+            self:Paint()
+        end
+    end
+
+    -- ===== 서버 → 클라 푸시 (LootService가 호출) =====
+
+    @ExecSpace("Client")
+    method void SyncBag(table slots, table currency)
+        -- 가방 스냅샷 수신: slots = [{icon,count}], currency = {lootId=n}. 캐시 후 페인트.
+        self.lastSlots = slots
+        self.lastCurrency = currency
+        self:Paint()
+    end
+
+    @ExecSpace("Client")
+    method void NotifyGain(string toastMsg, string iconRuid, string soundRuid, number fromX, number fromY)
+        -- 획득 연출(LOOT-SPEC §4): 죽은 칸 → 아바타 자석 흡입 → 도착 시 토스트+사운드.
+        local lp = _UserService.LocalPlayer
+        if lp == nil or not isvalid(lp) then return end
+        local map = lp.CurrentMap
+        if map == nil or not isvalid(map) then return end
+        -- 클라 로컬 스폰(연출 전용 — 서버 점유와 무관)
+        local fly = _SpawnService:SpawnByModelId("lootfly", "LootFly", Vector3(fromX, fromY, 0), map)
+        if fly ~= nil and isvalid(fly) and iconRuid ~= nil and iconRuid ~= "" then
+            fly.SpriteRendererComponent.SpriteRUID = iconRuid
+        end
+        local tp = lp.TransformComponent.WorldPosition
+        if fly ~= nil and isvalid(fly) then
+            _TweenLogic:MoveTo(fly, Vector2(tp.x, tp.y), self.MagnetDuration, EaseType.QuadEaseIn)
+        end
+        _TimerService:SetTimerOnce(function()
+            if fly ~= nil and isvalid(fly) then fly:Destroy() end
+            self:ShowToast(toastMsg)
+            if soundRuid ~= nil and soundRuid ~= "" then
+                _SoundService:PlaySound(soundRuid, 1)
+            end
+        end, self.MagnetDuration)
+    end
+
+    -- ===== 페인트 / 토스트 (ClientOnly) =====
+
+    @ExecSpace("ClientOnly")
+    method void Paint()
+        -- 슬롯 그리드 + 메소 줄 페인트. 빈 슬롯 = 아이콘 투명 + 수량 공백.
+        local slots = self.lastSlots
+        for i = 1, self.MaxSlots do
+            local slot = self.slotGrid:GetChildByName("Slot_" .. i, false)
+            if slot ~= nil and isvalid(slot) then
+                local icon = slot:GetChildByName("Icon", false)
+                local countEnt = slot:GetChildByName("Count", false)
+                local data = nil
+                if slots ~= nil then data = slots[i] end
+                if data ~= nil then
+                    if icon ~= nil and isvalid(icon) then
+                        local sp = icon.SpriteGUIRendererComponent
+                        sp.ImageRUID = DataRef(tostring(data.icon))
+                        sp:SetAlpha(1)
+                    end
+                    if countEnt ~= nil and isvalid(countEnt) then
+                        countEnt.TextComponent.Text = tostring(data.count)
+                    end
+                else
+                    if icon ~= nil and isvalid(icon) then
+                        icon.SpriteGUIRendererComponent:SetAlpha(0)
+                    end
+                    if countEnt ~= nil and isvalid(countEnt) then
+                        countEnt.TextComponent.Text = ""
+                    end
+                end
+            end
+        end
+        local meso = 0
+        if self.lastCurrency ~= nil and self.lastCurrency["meso"] ~= nil then
+            meso = self.lastCurrency["meso"]
+        end
+        self.mesoText.Text = tostring(meso)
+    end
+
+    @ExecSpace("ClientOnly")
+    method void ShowToast(string msg)
+        -- 획득 토스트(2026-07-11 확정 — 1차 포함): 하단 중앙 문구, ToastDuration 후 숨김.
+        self.toastText.Text = msg
+        self.toastGroup.Enable = true
+        if self.toastTimerId ~= 0 then
+            _TimerService:ClearTimer(self.toastTimerId)
+        end
+        self.toastTimerId = _TimerService:SetTimerOnce(function()
+            self.toastGroup.Enable = false
+            self.toastTimerId = 0
+        end, self.ToastDuration)
+    end
+end

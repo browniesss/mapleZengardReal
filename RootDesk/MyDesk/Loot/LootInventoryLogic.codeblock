@@ -1,0 +1,33 @@
+{
+  "Id": "",
+  "GameId": "",
+  "EntryKey": "codeblock://59e8d582-f383-4c9c-b2b9-9a99c5ebcb01",
+  "ContentType": "x-mod/codeblock",
+  "Content": "",
+  "Usage": 0,
+  "UsePublish": 1,
+  "UseService": 0,
+  "CoreVersion": "26.5.0.0",
+  "StudioVersion": "",
+  "DynamicLoading": 0,
+  "ContentProto": {
+    "Use": "Json",
+    "Json": {
+      "CoreVersion": {
+        "Major": 0,
+        "Minor": 2
+      },
+      "ScriptVersion": {
+        "Major": 1,
+        "Minor": 1
+      },
+      "Description": "",
+      "Id": "59e8d582-f383-4c9c-b2b9-9a99c5ebcb01",
+      "Language": 1,
+      "Name": "LootInventoryLogic",
+      "Type": 5,
+      "Source": 0,
+      "Target": null
+    }
+  }
+}
