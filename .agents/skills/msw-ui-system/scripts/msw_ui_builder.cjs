@@ -125,6 +125,19 @@ const BOOLEAN_COMPONENT_FIELDS = new Set([
   "UseCustomUVs", "UseHandle", "UseIntegerValue", "UseOutLine", "UseScroll",
 ]);
 
+const COMPONENT_FIELD_TYPE_OVERRIDES = new Map([
+  ["MOD.Core.GridViewComponent.Spacing", "Vector2"],
+]);
+
+function isFiniteNumber(v) {
+  return typeof v === "number" && Number.isFinite(v);
+}
+
+function isVector2Shape(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return isFiniteNumber(value.x) && isFiniteNumber(value.y);
+}
+
 function hexToRgba(hexColor, alpha = 1.0) {
   const h = String(hexColor).replace(/^#/, "");
   if (!/^[0-9a-fA-F]{6}$/.test(h)) {
@@ -220,6 +233,13 @@ function collectComponentScalarTypeIssues(data, findings) {
       const compType = component["@type"] || "?";
       for (const [key, value] of Object.entries(component)) {
         const label = `${entityPath}.${compType}.${key}`;
+        const overrideType = COMPONENT_FIELD_TYPE_OVERRIDES.get(`${compType}.${key}`);
+        if (overrideType === "Vector2") {
+          if (!isVector2Shape(value)) {
+            findings.push({ severity: "error", rule: "U005", message: `${label} must be Vector2 {x, y} with finite numbers. Got ${JSON.stringify(value)}` });
+          }
+          continue;
+        }
         if (INT32_COMPONENT_FIELDS.has(key) && !Number.isInteger(value)) {
           findings.push({ severity: "error", rule: "U002", message: `${label} must be int32. Got ${JSON.stringify(value)}` });
         }

@@ -5,5 +5,8 @@
 .omc/
 .omc.directory
 
+# MCP local config (contains auth token)
+.mcp.json
+
 # Dependencies
 node_modules/
