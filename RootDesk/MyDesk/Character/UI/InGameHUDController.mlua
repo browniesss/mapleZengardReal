@@ -141,8 +141,7 @@ script InGameHUDController extends Component
 
     @ExecSpace("ClientOnly")
     method void OnMoveClicked()
-        -- 이동 스킬 버튼 (개입 창 전용): 탭 → 이동 가능한 빈 칸 하이라이트. 칸 지정 입력의
-        -- 터치 배선은 SYS-HUD 상세 대기 — 하이라이트+서버 RPC(RequestInterventionMove)까지가 스텁 범위.
+        -- 이동 스킬 버튼 (개입 창 전용): 탭 → 빈 칸 하이라이트 → OnMoveTargets가 칸 터치 배선.
         if self.curPhase ~= "manual" then return end
         _TurnFlowStubLogic:RequestMoveTargets()
     end
@@ -174,6 +173,47 @@ script InGameHUDController extends Component
         elseif event.phase == "run_end" then
             self.rootPanel.Enable = false
         end
+    end
+
+    @EventSender("Logic", "TurnFlowStubLogic")
+    handler OnMoveTargets(MoveTargetsEvent event)
+        -- 이동 하이라이트 준비: 클라에서 movetgt_* 칸에 터치 배선 (TouchEvent는 클라 전용 dispatch).
+        self:WireMoveTargets(1)
+    end
+
+    @ExecSpace("ClientOnly")
+    method void WireMoveTargets(integer attempt)
+        -- 서버 스폰 → 클라 복제 지연 대비 재시도. 핸들러는 하이라이트 엔티티 귀속 —
+        -- 서버 ClearRangePreview의 Destroy로 함께 정리되므로 별도 해제 불필요.
+        local found = {}
+        local function walk(e)
+            if e == nil or not isvalid(e) then return end
+            for _, c in pairs(e.Children) do
+                if string.sub(c.Name, 1, 8) == "movetgt_" then table.insert(found, c) end
+                walk(c)
+            end
+        end
+        local player = _UserService.LocalPlayer
+        if not isvalid(player) then return end
+        walk(player.CurrentMap)
+        if #found == 0 then
+            if attempt < 5 then
+                _TimerService:SetTimerOnce(function() self:WireMoveTargets(attempt + 1) end, 0.2)
+            else
+                log_warning("[InGameHUD] 이동 칸 배선 실패 — 재시도 초과")
+            end
+            return
+        end
+        for _, hl in ipairs(found) do
+            local col = string.match(hl.Name, "^movetgt_(%d+)_%d+$")
+            local row = string.match(hl.Name, "^movetgt_%d+_(%d+)$")
+            if col ~= nil and row ~= nil then
+                hl:ConnectEvent(TouchEvent, function()
+                    _TurnFlowStubLogic:RequestInterventionMove(tonumber(col), tonumber(row))
+                end)
+            end
+        end
+        log("[InGameHUD] 이동 칸 터치 배선: " .. tostring(#found) .. "칸")
     end
 
     @EventSender("Logic", "TurnFlowStubLogic")

@@ -1,0 +1,104 @@
+@Component
+script InGameResultController extends Component
+    -- 런 결과 오버레이 (ClientOnly — SYS-WINLOSE §6 필수 영역의 스텁): 배너+사유+플레이 요약+CTA.
+    -- 보상 정산(계정 귀속·클리어 보상)은 전리품/아웃게임 소관이라 제외 — 소관 확정 시 이 패널에 증축.
+    -- 승리(보스 처치) 경로는 보스 도입(몬스터 담당) 시 활성 — result="clear" 훅만 준비.
+
+    property Entity resultPanel = "565ae19d-c16c-4ca1-9a91-aa7de236333f"            -- UUID는 빌더 bind 주입
+    property TextComponent bannerText = "5128b09b-2f87-42dc-8731-3dbae725d7fc"
+    property TextComponent reasonText = "e042ccd7-1dee-4e53-8d25-ffef32ed1f94"
+    property TextComponent statsText = "8d6756d7-63c0-408c-9ad4-05936b4261d8"
+    property ButtonComponent btnRetry = "95e3afc1-b631-4db9-8f6a-b96a7d3dde21"
+    property ButtonComponent btnClose = "cf79e0e8-d0d5-4cfd-b187-22651e87f0e4"
+
+    property integer lastWave = 0    -- 도달 젠 (PhaseChangedEvent 캐시 — 요약 표기용)
+    property any handlers = nil
+
+    @ExecSpace("ClientOnly")
+    method void OnBeginPlay()
+        -- 초기 숨김 + 버튼 구독 (클로저는 handlers에 보관, OnEndPlay 해제).
+        if isvalid(self.resultPanel) then self.resultPanel.Enable = false end
+        self.handlers = {}
+        self:Wire(self.btnRetry, self.OnRetryClicked)
+        self:Wire(self.btnClose, self.OnCloseClicked)
+    end
+
+    @ExecSpace("ClientOnly")
+    method void Wire(ButtonComponent btn, any callback)
+        -- 버튼 클릭 구독 + 핸들러 보관. 미배선 UUID여도 나머지 초기화가 죽지 않게 방어.
+        if not isvalid(btn) then return end
+        local h = btn.Entity:ConnectEvent(ButtonClickEvent, callback)
+        table.insert(self.handlers, { entity = btn.Entity, eventType = ButtonClickEvent, eventHandler = h })
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnEndPlay()
+        -- 구독 해제(필수).
+        if self.handlers ~= nil then
+            for _, rec in ipairs(self.handlers) do
+                if isvalid(rec.entity) then
+                    rec.entity:DisconnectEvent(rec.eventType, rec.eventHandler)
+                end
+            end
+            self.handlers = nil
+        end
+    end
+
+    @EventSender("Logic", "TurnFlowStubLogic")
+    handler OnPhaseChanged(PhaseChangedEvent event)
+        -- 도달 젠 캐시 (결과 요약 표기용 — run_end 이벤트에는 wave가 실려 온다).
+        if event.wave ~= nil and event.wave > 0 then
+            self.lastWave = event.wave
+        end
+    end
+
+    @EventSender("LocalPlayer")
+    handler OnRunEnded(RunEndedEvent event)
+        -- 런 종료 → 결과 오버레이 (SYS-WINLOSE §6 필수 위계: 배너+사유 → 요약 → CTA).
+        if not isvalid(self.resultPanel) then return end
+        local isClear = event.result == "clear"
+        if isvalid(self.bannerText) then
+            self.bannerText.Text = isClear and "스테이지 클리어" or "스테이지 실패"
+        end
+        if isvalid(self.reasonText) then
+            self.reasonText.Text = isClear and "보스 격파!" or "판이 가득 찼습니다"
+        end
+        if isvalid(self.statsText) then
+            local player = _UserService.LocalPlayer
+            local level = 0
+            local kills = 0
+            if isvalid(player) then
+                ---@type PlayerGrowthComponent
+                local growth = player:GetComponent("script.PlayerGrowthComponent")
+                if growth ~= nil then level = growth.Level end
+                ---@type PlayerRunComponent
+                local runComp = player:GetComponent("script.PlayerRunComponent")
+                if runComp ~= nil then kills = runComp.TotalKills end
+            end
+            self.statsText.Text = "도달  " .. tostring(self.lastWave) .. "젠"
+                .. "\n처치  " .. tostring(kills) .. "마리"
+                .. "\n최종 레벨  Lv." .. tostring(level)
+        end
+        self.resultPanel.Enable = true
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnRetryClicked()
+        -- 다시 도전 (실패 CTA): 같은 직업으로 새 판 (SYS-WINLOSE §6 — 새 판 = 새 랜덤).
+        local player = _UserService.LocalPlayer
+        if not isvalid(player) then return end
+        ---@type PlayerJobComponent
+        local jobComp = player:GetComponent("script.PlayerJobComponent")
+        if jobComp == nil or jobComp.Job == "" then return end
+        self.resultPanel.Enable = false
+        self.lastWave = 0
+        _GameStartLogic:RequestStartGame(jobComp.Job)
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnCloseClicked()
+        -- 닫기: 오버레이만 닫는다 (로비 복귀 이동은 보드/아웃게임 소관 — 도입 시 이 버튼이 로비 CTA로 승격).
+        self.resultPanel.Enable = false
+        self.lastWave = 0
+    end
+end

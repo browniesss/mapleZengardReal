@@ -1,0 +1,5 @@
+@Event
+script MoveTargetsEvent extends EventType
+    -- 이동 가능 칸 하이라이트 준비 통지 (SYS-SKILLQUEUE §6). Logic 발신 — HUD가 클라에서
+    -- movetgt_* 엔티티에 터치를 배선한다 (TouchEvent는 클라 전용이라 서버 배선 불가 — E2E 실측).
+end

@@ -307,6 +307,7 @@ script TurnFlowStubLogic extends Logic
                 self:SpawnHitEffects(ctx.run, result.hits)
                 local kills = _MonsterStubLogic:ApplyHitPlan(ctx.run, ctx.def, result.hits, ctx.playerEntity)
                 ctx.flow.totalKills = (ctx.flow.totalKills or 0) + kills
+                ctx.runComp.TotalKills = ctx.runComp.TotalKills + kills   -- 런 누적 (결과 화면 요약용)
                 log("[TurnFlowStub] 발동 " .. tostring(index) .. "/" .. tostring(#queue) .. ": " .. inst.skillId
                     .. " (" .. facing .. ", cast " .. tostring(entry.cast) .. "/" .. tostring(entry.casts) .. ")"
                     .. " hits=" .. tostring(#result.hits) .. " 처치=" .. tostring(kills))
@@ -381,7 +382,9 @@ script TurnFlowStubLogic extends Logic
     @ExecSpace("Server")
     method void RequestMoveTargets()
         -- 개입 창 이동 1단계 (SYS-SKILLQUEUE §6): 이동 버튼 탭 → 이동 가능한 빈 칸 하이라이트.
-        local ctx = self:FindRunContext(senderUserId)
+        -- 각 하이라이트 칸은 터치 수신(TouchReceiveComponent) — 칸 1탭 = 즉시 이동.
+        local userId = senderUserId
+        local ctx = self:FindRunContext(userId)
         if ctx == nil or ctx.flow.manualWait == nil then return end
         if ctx.runComp.MoveSkillId == "" or (ctx.runComp.MoveCharges or 0) <= 0 then return end
         self:ClearRangePreview(ctx.run)
@@ -392,19 +395,41 @@ script TurnFlowStubLogic extends Logic
             for row = 0, ctx.def.rows - 1 do
                 if _BoardService:IsInside(ctx.def, col, row)
                     and _BoardService:CanPlaceUnit(ctx.def, ctx.run.board, col, row) then
-                    self:SpawnPreviewCell(ctx, col, row, tint)
+                    self:SpawnMoveTargetCell(ctx, col, row, tint)
                     count = count + 1
                 end
             end
         end
-        log("[TurnFlowStub] 이동 가능 칸 하이라이트: " .. tostring(count) .. "칸")
+        log("[TurnFlowStub] 이동 가능 칸 하이라이트: " .. tostring(count) .. "칸 (탭=이동)")
+        self:NotifyMoveTargetsClient(userId)
+    end
+
+    @ExecSpace("ServerOnly")
+    method void SpawnMoveTargetCell(any ctx, integer col, integer row, Color tint)
+        -- 이동 대상 칸 하이라이트 + 터치 수신 영역 (SYS-SKILLQUEUE §6 — 칸 1탭 = 즉시 이동).
+        -- TouchEvent는 클라 전용 dispatch라 서버 ConnectEvent는 수신 불가(E2E 실측) —
+        -- 배선은 HUD(OnMoveTargets)가 클라에서 하고, 서버는 스폰+TouchReceiveComponent까지.
+        local slot = ctx.run.board.slots[col .. "_" .. row]
+        if slot == nil or not isvalid(slot) then return end
+        local hl = _SpawnService:SpawnByModelId("BoardCell", "movetgt_" .. col .. "_" .. row, Vector3(0, 0, -0.08), slot)
+        if not isvalid(hl) then return end
+        local sr = hl.SpriteRendererComponent
+        if isvalid(sr) then sr.Color = tint end
+        hl:AddComponent(TouchReceiveComponent)
+        table.insert(ctx.flow.previewEntities, hl)
     end
 
     @ExecSpace("Server")
     method void RequestInterventionMove(integer col, integer row)
+        -- 개입 창 이동 RPC 진입점 (칸 터치와 동일 코어 위임).
+        self:DoInterventionMove(senderUserId, col, row)
+    end
+
+    @ExecSpace("ServerOnly")
+    method void DoInterventionMove(string userId, integer col, integer row)
         -- 개입 창 이동 2단계: 빈 칸 1탭 = 즉시 이동 (텔레포트식 — 판 위 아무 빈 칸, P0 공통 규격).
         -- 잔여 횟수 내 반복 가능. 이동 후 조준 단계 복귀(범위 프리뷰 갱신).
-        local ctx = self:FindRunContext(senderUserId)
+        local ctx = self:FindRunContext(userId)
         if ctx == nil or ctx.flow.manualWait == nil then return end
         if ctx.runComp.MoveSkillId == "" or (ctx.runComp.MoveCharges or 0) <= 0 then return end
         if not _BoardService:CanPlaceUnit(ctx.def, ctx.run.board, col, row) then
@@ -436,9 +461,9 @@ script TurnFlowStubLogic extends Logic
         ctx.runComp:ApplyCellEnter(mods)
         ctx.runComp:TeleportToCell(ctx.run, ctx.def, col, row)
         ctx.runComp:SpendMoveCharge()
-        local def = _SkillCatalogLogic:GetSkillRO(ctx.runComp.MoveSkillId)
-        if def ~= nil then
-            self:SpawnCellFx(ctx.run, ctx.flow.playerCell, def.hitFxRuid)
+        local moveDef = _SkillCatalogLogic:GetSkillRO(ctx.runComp.MoveSkillId)
+        if moveDef ~= nil then
+            self:SpawnCellFx(ctx.run, ctx.flow.playerCell, moveDef.hitFxRuid)
         end
         log("[TurnFlowStub] 이동 스킬 사용 -> (" .. col .. "," .. row .. ") 남은 회수 "
             .. tostring(ctx.runComp.MoveCharges))
@@ -560,5 +585,11 @@ script TurnFlowStubLogic extends Logic
         ev.wave = wave
         ev.danger = danger
         self:SendEvent(ev)
+    end
+
+    @ExecSpace("Client")
+    method void NotifyMoveTargetsClient()
+        -- 소유 클라에서 실행: 이동 하이라이트 준비 통지 — HUD가 movetgt_* 칸에 터치를 배선한다.
+        self:SendEvent(MoveTargetsEvent())
     end
 end

@@ -9,6 +9,7 @@ script PlayerRunComponent extends Component
     @Sync property string MoveSkillName = ""   -- 이동 스킬 한글명 (카탈로그는 서버 전용이라 HUD 표시용 동기화)
     @Sync property integer MoveCharges = 0     -- 이동 스킬 남은 회수 (판당 제한 — SYS-SKILLQUEUE §6)
     @Sync property integer RerollCharges = 0   -- 젠 리롤 남은 회수 (S2 세팅 전용 — SYS-CORELOOP §5)
+    @Sync property integer TotalKills = 0      -- 런 누적 처치 (결과 화면 플레이 요약 — SYS-WINLOSE §6)
 
     property integer MoveChargesPerRun = 3    -- 판당 이동 스킬 회수 (잠정값 — SYS-SKILLQUEUE §6)
     property integer RerollChargesPerRun = 1  -- 판당 젠 리롤 회수 (제안값 — SYS-CORELOOP §5, 아웃게임 능력치 연동 여지)
@@ -67,6 +68,7 @@ script PlayerRunComponent extends Component
         self.MoveSkillName = ""
         self.MoveCharges = self.MoveChargesPerRun
         self.RerollCharges = self.RerollChargesPerRun
+        self.TotalKills = 0
         self:SetFreeMoveEnabled(false)   -- 아바타 = 보드 말(I-3): WASD 자유 이동 잠금, 이동은 젠 재배치로만
         self:SetupFixedCamera()          -- 카메라 고정: 보드 전체 뷰 (재배치 시 카메라 이동 없음)
         self.RunActive = true
@@ -219,7 +221,7 @@ script PlayerRunComponent extends Component
 
     @ExecSpace("ServerOnly")
     method void EndRun(string result)
-        -- 런 종료: 상태 비활성 + 이벤트. 데이터 초기화는 다음 StartRun이 수행.
+        -- 런 종료: 상태 비활성 + 이벤트(서버) + 소유 클라 통지(결과 화면). 데이터 초기화는 다음 StartRun.
         if not self.RunActive then return end
         self.RunActive = false
         self.run = nil
@@ -229,6 +231,15 @@ script PlayerRunComponent extends Component
         local ev = RunEndedEvent()
         ev.result = result
         self.Entity:SendEvent(ev)
+        self:NotifyRunEndClient(result, self.Entity.PlayerComponent.UserId)
         log("[PlayerRun] 런 종료: " .. result)
+    end
+
+    @ExecSpace("Client")
+    method void NotifyRunEndClient(string result)
+        -- 소유 클라에서 실행: 결과 화면 오버레이가 소비할 로컬 이벤트 (SYS-WINLOSE §6).
+        local ev = RunEndedEvent()
+        ev.result = result
+        self.Entity:SendEvent(ev)
     end
 end
