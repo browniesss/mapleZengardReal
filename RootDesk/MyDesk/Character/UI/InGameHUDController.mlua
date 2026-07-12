@@ -21,6 +21,7 @@ script InGameHUDController extends Component
     property SpriteGUIRendererComponent expBarFill = "24828e11-1a92-4a13-b0f2-fdf2386cc3f0"
     property Entity choicePanel = "fe8835d2-00c8-4ac1-a468-ce8d41ef7df3"   -- 읽기 전용 — 소유자는 InGameChoiceController (노출 중 사이클 정지 판정)
 
+
     property string curPhase = "none"
     property string facingDir = "UP"
     property integer speedMult = 1         -- 배속 (1x/2x — 서버 flow와 동기 유지)

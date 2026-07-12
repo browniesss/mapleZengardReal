@@ -1,0 +1,5 @@
+rewardType,currencyClass,currencyTier
+iap_free_coin,free,primary
+iap_paid_coin,paid,primary
+play_free_coin,free,secondary
+play_paid_coin,paid,secondary
