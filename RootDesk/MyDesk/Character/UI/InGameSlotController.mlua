@@ -1,0 +1,259 @@
+@Component
+script InGameSlotController extends Component
+    -- 스킬 발동 순서 패널 (ClientOnly, UI설계 ⑥ / 규칙서 §5.3): 순서 리스트 + 2탭 스왑 + 발동 강조 +
+    -- 호버 툴팁 + 재추첨(사양서 §3-5) + 버프·패시브 요약. 로드아웃은 LocalPlayer 이벤트로 수신.
+    -- (구 InGameUIController를 HUD/선택지/슬롯 3분할 — 아키텍처 검수 2026-07-10)
+
+    property ButtonComponent btnSlot1 = "0f0ad92f-512c-4b18-aed7-791fc6d89cf4"
+    property ButtonComponent btnSlot2 = "4961a8e1-b056-44d5-a4ee-3817b03a789d"
+    property ButtonComponent btnSlot3 = "36586d38-5990-4434-8430-ed31ab1b1cf0"
+    property ButtonComponent btnSlot4 = "3d2cfd3a-8960-4ac0-bd84-7af8d36d878e"   -- 슬롯 5 확장 (max_active_slots=5 — UUID는 빌더 bind 주입)
+    property ButtonComponent btnSlot5 = "f9732c25-ad6b-48d9-9385-398b50f7bedb"
+    property SpriteGUIRendererComponent iconSlot1 = "fab3b71d-51ee-4a0e-9799-b9017b5cfb95"
+    property SpriteGUIRendererComponent iconSlot2 = "b2aabdd6-7fbe-49fc-a0f2-11f4e928c764"
+    property SpriteGUIRendererComponent iconSlot3 = "4b533667-50c0-439f-84c6-2453bf60b833"
+    property SpriteGUIRendererComponent iconSlot4 = "db647432-260f-4487-b13a-19e607c7b91b"
+    property SpriteGUIRendererComponent iconSlot5 = "7936e866-ed01-4ebc-a951-e2f45c5a28a9"
+    property TextComponent supportText = "5a29452a-ff94-4efc-a6d7-ed88ec4e3175"
+    property Entity tooltipPanel = "cab1dad2-856d-4633-9311-9d8babc10e29"
+    property TextComponent tooltipText = "00e47582-8851-4915-b99e-699af661f063"
+    property TextComponent ownedText = "6a3cd40a-e3c0-4bba-89c8-89a17a316e02"   -- 좌하단 보유 스킬·장비 목록 (UI설계 좌하단 영역)
+    property ButtonComponent btnAuto1 = "d8c1390b-f66e-47ae-a166-fae1d91061e7"   -- 슬롯별 수동/자동 토글 (SYS-SKILLQUEUE §3)
+    property ButtonComponent btnAuto2 = "73c8a157-0e07-48a7-bdbe-9598f23be121"
+    property ButtonComponent btnAuto3 = "8e4f9ae9-9249-45be-9055-5cebfaee86fe"
+    property ButtonComponent btnAuto4 = "b8ca9018-e354-4076-9226-fbe90a86ec3d"
+    property ButtonComponent btnAuto5 = "f6d5877e-4a8d-478d-9c1f-083990a94a45"
+
+    property integer orderSwapFirst = 0    -- 순서 변경 1차 선택 슬롯 (0=없음)
+    property integer firingIndex = 0       -- 지금 발동 중인 순서 리스트 위치 (0=없음 — 강조용)
+    property integer slotCount = 0
+    property any handlers = nil
+    property any slotTooltips = nil        -- [i] = 슬롯 호버 툴팁 텍스트
+    property string ownedSkillLine = ""    -- 보유 목록 조합용 (스킬/서포트 줄)
+    property string ownedEquipLine = ""    -- 보유 목록 조합용 (장비 줄)
+
+    @ExecSpace("ClientOnly")
+    method void OnBeginPlay()
+        -- 버튼/호버 구독 (클로저는 handlers에 보관, OnEndPlay 해제).
+        self.handlers = {}
+        self.slotTooltips = {}
+        -- 슬롯 버튼 = 발동 순서 변경: 두 슬롯을 차례로 탭하면 순서 교환 (드래그 재정렬은 HUD 상세 소관 — 잠정 2탭 스왑)
+        self:Wire(self.btnSlot1, function() self:OnSlotClicked(1) end)
+        self:Wire(self.btnSlot2, function() self:OnSlotClicked(2) end)
+        self:Wire(self.btnSlot3, function() self:OnSlotClicked(3) end)
+        self:Wire(self.btnSlot4, function() self:OnSlotClicked(4) end)
+        self:Wire(self.btnSlot5, function() self:OnSlotClicked(5) end)
+        -- 슬롯 호버 -> 스킬 효과 툴팁 (ButtonStateChangeEvent.Hover — 개선 요청 2026-07-09)
+        self:WireState(self.btnSlot1, function(ev) self:OnSlotState(1, ev.state) end)
+        self:WireState(self.btnSlot2, function(ev) self:OnSlotState(2, ev.state) end)
+        self:WireState(self.btnSlot3, function(ev) self:OnSlotState(3, ev.state) end)
+        self:WireState(self.btnSlot4, function(ev) self:OnSlotState(4, ev.state) end)
+        self:WireState(self.btnSlot5, function(ev) self:OnSlotState(5, ev.state) end)
+        -- 슬롯별 수동/자동 토글 (SYS-SKILLQUEUE §3): 수동 스킬 차례에 개입 창이 열린다
+        self:Wire(self.btnAuto1, function() self:OnAutoToggleClicked(1) end)
+        self:Wire(self.btnAuto2, function() self:OnAutoToggleClicked(2) end)
+        self:Wire(self.btnAuto3, function() self:OnAutoToggleClicked(3) end)
+        self:Wire(self.btnAuto4, function() self:OnAutoToggleClicked(4) end)
+        self:Wire(self.btnAuto5, function() self:OnAutoToggleClicked(5) end)
+        if isvalid(self.tooltipPanel) then self.tooltipPanel.Enable = false end
+    end
+
+    property any slotAutoFire = nil   -- [i] = 자동 발동 여부 (LoadoutSynced 수신 값 — 토글 시 반전 요청)
+
+    @ExecSpace("ClientOnly")
+    method void OnAutoToggleClicked(integer index)
+        -- 자동 토글: 현재 값 반전 요청 — 확정 표시는 LoadoutSyncedEvent 회신이 수행.
+        if index > self.slotCount then return end
+        local cur = self.slotAutoFire ~= nil and self.slotAutoFire[index]
+        local player = _UserService.LocalPlayer
+        if not isvalid(player) then return end
+        ---@type SkillLoadoutComponent
+        local loadout = player:GetComponent("script.SkillLoadoutComponent")
+        if loadout ~= nil then
+            loadout:RequestSetAutoFireByOrder(index, cur == false)
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void Wire(ButtonComponent btn, any callback)
+        -- 버튼 클릭 구독 + 핸들러 보관. 미배선 UUID여도 나머지 초기화가 죽지 않게 방어.
+        if not isvalid(btn) then return end
+        local h = btn.Entity:ConnectEvent(ButtonClickEvent, callback)
+        table.insert(self.handlers, { entity = btn.Entity, eventType = ButtonClickEvent, eventHandler = h })
+    end
+
+    @ExecSpace("ClientOnly")
+    method void WireState(ButtonComponent btn, any callback)
+        -- 버튼 상태 변화(Hover 등) 구독 — 툴팁용.
+        if not isvalid(btn) then return end
+        local h = btn.Entity:ConnectEvent(ButtonStateChangeEvent, callback)
+        table.insert(self.handlers, { entity = btn.Entity, eventType = ButtonStateChangeEvent, eventHandler = h })
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnEndPlay()
+        -- 구독 해제(필수).
+        if self.handlers ~= nil then
+            for _, rec in ipairs(self.handlers) do
+                if isvalid(rec.entity) then
+                    rec.entity:DisconnectEvent(rec.eventType, rec.eventHandler)
+                end
+            end
+            self.handlers = nil
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnSlotClicked(integer index)
+        -- 발동 순서 변경: 1차 탭 = 선택, 2차 탭 = 두 위치 교환 요청. 같은 슬롯 재탭 = 해제.
+        if index > self.slotCount then return end
+        if self.orderSwapFirst == 0 then
+            self.orderSwapFirst = index
+            self:RefreshSwapMark()
+            return
+        end
+        if self.orderSwapFirst ~= index then
+            local player = _UserService.LocalPlayer
+            if isvalid(player) then
+                ---@type SkillLoadoutComponent
+                local loadout = player:GetComponent("script.SkillLoadoutComponent")
+                if loadout ~= nil then
+                    loadout:RequestSwapOrder(self.orderSwapFirst, index)
+                end
+            end
+        end
+        self.orderSwapFirst = 0
+        -- 표시 갱신은 LoadoutSyncedEvent가 수행 (같은 슬롯 재탭 해제 시엔 즉시)
+        self:RefreshSwapMark()
+    end
+
+    @ExecSpace("ClientOnly")
+    method void RefreshSwapMark()
+        -- 슬롯 배경색 갱신 — 우선순위: 발동 중(붉은 주황) > 순서 변경 1차 선택(금색) > 기본.
+        -- (태그 재추첨 버튼은 확장 백로그로 제거 — SYS-GROWTH v0.1)
+        local buttons = { self.btnSlot1, self.btnSlot2, self.btnSlot3, self.btnSlot4, self.btnSlot5 }
+        for i, btn in ipairs(buttons) do
+            if isvalid(btn) then
+                local sr = btn.Entity.SpriteGUIRendererComponent
+                if isvalid(sr) then
+                    -- 스프라이트 위 곱연산 틴트 — 밝은 계열 사용
+                    if i == self.firingIndex then
+                        sr.Color = Color(1.00, 0.45, 0.25, 1.0)
+                    elseif i == self.orderSwapFirst then
+                        sr.Color = Color(1.00, 0.85, 0.45, 1.0)
+                    else
+                        sr.Color = Color(1, 1, 1, 1)
+                    end
+                end
+            end
+        end
+    end
+
+    @EventSender("Logic", "TurnFlowStubLogic")
+    handler OnSkillFiring(SkillFiringEvent event)
+        -- 지금 발동 중인 스킬을 순서 리스트에서 강조 (0=체인 종료 -> 해제).
+        self.firingIndex = event.orderIndex
+        self:RefreshSwapMark()
+    end
+
+    @ExecSpace("ClientOnly")
+    method string TruncateName(string name, integer maxChars)
+        -- 스킬명 말줄임 (UI설계 ⑥: 한글 10자 초과 시 …). UTF-8 문자 단위.
+        local len = utf8.len(name)
+        if len == nil or len <= maxChars then return name end
+        return string.sub(name, 1, utf8.offset(name, maxChars + 1) - 1) .. "…"
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnSlotState(integer index, any state)
+        -- 슬롯 호버 시 스킬 효과 툴팁 표시, 벗어나면(Normal) 숨김. 클릭 계열 상태는 유지.
+        -- (state는 ButtonState — 엔진 enum은 파라미터 타입 선언이 불가해 any로 받는다)
+        if not isvalid(self.tooltipPanel) then return end
+        if state == ButtonState.Hover then
+            local tip = self.slotTooltips[index]
+            if tip == nil or tip == "" then return end
+            if isvalid(self.tooltipText) then self.tooltipText.Text = tip end
+            self.tooltipPanel.Enable = true
+        elseif state == ButtonState.Normal then
+            self.tooltipPanel.Enable = false
+        end
+    end
+
+    @EventSender("LocalPlayer")
+    handler OnLoadoutSynced(LoadoutSyncedEvent event)
+        -- 발동 순서 큐 갱신: 순번(①②③) + 아이콘 + 이름(10자 말줄임) + Lv + 쿨다운 + 태그.
+        self.slotCount = #event.slots
+        self.orderSwapFirst = 0
+        self:RefreshSwapMark()
+        if self.slotAutoFire == nil then self.slotAutoFire = {} end
+        local marks = { "①", "②", "③", "④", "⑤" }
+        local buttons = { self.btnSlot1, self.btnSlot2, self.btnSlot3, self.btnSlot4, self.btnSlot5 }
+        local icons = { self.iconSlot1, self.iconSlot2, self.iconSlot3, self.iconSlot4, self.iconSlot5 }
+        local autoBtns = { self.btnAuto1, self.btnAuto2, self.btnAuto3, self.btnAuto4, self.btnAuto5 }
+        for i, btn in ipairs(buttons) do
+            if not isvalid(btn) then break end
+            local slot = event.slots[i]
+            -- 수동/자동 토글 버튼: 스킬 있는 슬롯만 노출, 상태 표기 (SYS-SKILLQUEUE §3)
+            local autoBtn = autoBtns[i]
+            if isvalid(autoBtn) then
+                autoBtn.Entity.Enable = slot ~= nil
+                if slot ~= nil then
+                    self.slotAutoFire[i] = slot.autoFire ~= false
+                    autoBtn.Entity.TextComponent.Text = self.slotAutoFire[i] and "자동" or "수동"
+                end
+            end
+            if slot ~= nil then
+                local line = marks[i] .. " " .. self:TruncateName(slot.name, 10) .. " Lv." .. tostring(slot.level)
+                if slot.cooldownLeft ~= nil and slot.cooldownLeft > 0 then
+                    line = line .. " (쿨 " .. tostring(slot.cooldownLeft) .. "턴)"
+                end
+                btn.Entity.TextComponent.Text = line .. "\n" .. slot.tagsText
+                local tip = slot.name .. " Lv." .. tostring(slot.level) .. "\n" .. tostring(slot.desc or "")
+                if slot.tagsText ~= nil and slot.tagsText ~= "" then
+                    tip = tip .. "\n태그: " .. slot.tagsText
+                end
+                self.slotTooltips[i] = tip
+                if slot.iconRuid ~= nil and slot.iconRuid ~= "" then
+                    icons[i].ImageRUID = slot.iconRuid
+                    icons[i].Entity.Enable = true
+                else
+                    icons[i].Entity.Enable = false
+                end
+            else
+                btn.Entity.TextComponent.Text = "빈 슬롯"
+                self.slotTooltips[i] = nil
+                icons[i].Entity.Enable = false
+            end
+        end
+        if isvalid(self.supportText) then
+            self.supportText.Text = event.supportText ~= "" and ("버프·패시브: " .. event.supportText) or ""
+        end
+        -- 좌하단 보유 목록: 공격 스킬(레벨) + 서포트 줄
+        local skillLine = ""
+        for _, slot in ipairs(event.slots) do
+            if skillLine ~= "" then skillLine = skillLine .. " · " end
+            skillLine = skillLine .. slot.name .. " Lv." .. tostring(slot.level)
+        end
+        self.ownedSkillLine = skillLine
+        if event.supportText ~= "" then
+            self.ownedSkillLine = self.ownedSkillLine .. "\n보조: " .. event.supportText
+        end
+        self:RefreshOwnedText()
+    end
+
+    @EventSender("LocalPlayer")
+    handler OnEquipSynced(EquipSyncedEvent event)
+        -- 보유 장비 목록 갱신 (장비 획득 시 서버 통지).
+        self.ownedEquipLine = event.equipText
+        self:RefreshOwnedText()
+    end
+
+    @ExecSpace("ClientOnly")
+    method void RefreshOwnedText()
+        -- 좌하단 보유 목록 패널 텍스트 조합: 스킬/보조/장비.
+        if not isvalid(self.ownedText) then return end
+        local text = self.ownedSkillLine ~= "" and ("스킬: " .. self.ownedSkillLine) or "스킬: 없음"
+        text = text .. "\n장비: " .. (self.ownedEquipLine ~= "" and self.ownedEquipLine or "없음")
+        self.ownedText.Text = text
+    end
+end

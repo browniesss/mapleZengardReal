@@ -12,6 +12,7 @@ script PlayerJobComponent extends Component
 
     property integer AdvanceLootCost = 3          -- 기획 미정 플레이스홀더 (밸런스 문서 대기)
     property integer ExposureThreshold = 3        -- 선택지 3회 노출 시 전직 활성 (초안 §9)
+    property boolean MoveOfferPending = false     -- 이동 스킬 확정 등장 대기 (SYS-GROWTH §4-5 — 차수 도달 후 첫 3중1)
 
     @ExecSpace("ServerOnly")
     method void ResetForRun(string job)
@@ -22,6 +23,7 @@ script PlayerJobComponent extends Component
         self.Tier = 1
         self.LootCount = 0
         self.ChoiceExposure = 0
+        self.MoveOfferPending = true   -- 1차 이동 스킬: 최초 2중1 다음의 첫 3중1에 확정 등장 (SYS-GROWTH §4-5)
     end
 
     @ExecSpace("ServerOnly")
@@ -34,6 +36,14 @@ script PlayerJobComponent extends Component
     method void AddLoot(integer amount)
         -- 전리품 획득 (몬스터 처치 드랍 등 외부 유입 입구).
         self.LootCount = self.LootCount + amount
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean SpendLoot(integer amount)
+        -- 전리품 소모 (재추첨 등 전직 외 소비처 공용). 부족하면 false, 차감 없음.
+        if self.LootCount < amount then return false end
+        self.LootCount = self.LootCount - amount
+        return true
     end
 
     @ExecSpace("ServerOnly")
@@ -55,15 +65,4 @@ script PlayerJobComponent extends Component
         return true
     end
 
-    @ExecSpace("Server")
-    method void RequestAdvance()
-        -- 클라(전직 버튼) -> 서버 전직 요청. 소유자 검증 후 조건 재검증(Advance 내부)까지 서버에서.
-        if senderUserId ~= self.Entity.PlayerComponent.UserId then
-            log_warning("[PlayerJob] 비소유자 전직 요청 무시: " .. senderUserId)
-            return
-        end
-        if not self:Advance() then
-            log("[PlayerJob] 전직 조건 미충족 — 요청 거부")
-        end
-    end
 end

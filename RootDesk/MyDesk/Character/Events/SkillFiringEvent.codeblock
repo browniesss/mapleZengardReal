@@ -1,0 +1,33 @@
+{
+  "Id": "",
+  "GameId": "",
+  "EntryKey": "codeblock://6bc3f618-d0d7-4cc0-bd38-3633a1f7345a",
+  "ContentType": "x-mod/codeblock",
+  "Content": "",
+  "Usage": 0,
+  "UsePublish": 1,
+  "UseService": 0,
+  "CoreVersion": "26.5.0.0",
+  "StudioVersion": "",
+  "DynamicLoading": 0,
+  "ContentProto": {
+    "Use": "Json",
+    "Json": {
+      "CoreVersion": {
+        "Major": 0,
+        "Minor": 2
+      },
+      "ScriptVersion": {
+        "Major": 1,
+        "Minor": 1
+      },
+      "Description": "",
+      "Id": "6bc3f618-d0d7-4cc0-bd38-3633a1f7345a",
+      "Language": 1,
+      "Name": "SkillFiringEvent",
+      "Type": 3,
+      "Source": 0,
+      "Target": null
+    }
+  }
+}

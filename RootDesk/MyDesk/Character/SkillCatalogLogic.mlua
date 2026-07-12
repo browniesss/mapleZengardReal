@@ -7,12 +7,13 @@ script SkillCatalogLogic extends Logic
     property boolean RunSelfTest = false   -- OnBeginPlay 자가검증. 본배선 검증 완료로 off(필요시 on).
 
     property any skillCache = nil          -- skillId -> def
+    property any jobTierIndex = nil        -- job -> tier -> [skillId] (선택지 풀 조회 인덱스, 적재 시 구축)
     property any rangeCache = nil          -- rangeId -> def(offsets 포함)
     property any tagCache = nil            -- tagId -> def
     property any statusCache = nil         -- statusId -> def
     property any growthCache = nil         -- level -> requiredExp
     property any jobCache = nil            -- job -> def
-    property any statChoiceCache = nil     -- [스탯 선택지 def]
+    property any equipCache = nil          -- [장비 def]
 
     @ExecSpace("ServerOnly")
     method void OnBeginPlay()
@@ -108,6 +109,20 @@ script SkillCatalogLogic extends Logic
         return self:DeepCopy(defs[tagId])
     end
 
+    @ExecSpace("ServerOnly")
+    method any GetTagDefRO(string tagId)
+        -- 읽기 전용 원본 참조 — **절대 변이 금지**. 핫패스(태그 집계/표기)의 deep-copy 비용 제거용.
+        local defs = self:GetTagDefs()
+        return defs[tagId]
+    end
+
+    @ExecSpace("ServerOnly")
+    method any GetRangePatternRO(string rangeId)
+        -- 읽기 전용 원본 참조 — **절대 변이 금지**. 첫 호출만 캐시 구축을 위해 기존 게터를 경유.
+        if self.rangeCache == nil then self:GetRangePattern(rangeId) end
+        return self.rangeCache[rangeId]
+    end
+
     -- ===== RangePattern =====
 
     method any ParseGridOffsets(string rangeId, any grid)
@@ -198,6 +213,7 @@ script SkillCatalogLogic extends Logic
         -- SkillMaster 전체 적재(1회). rarity/perHitCoefLv3는 적재 시 산출.
         if self.skillCache == nil then
             self.skillCache = {}
+            self.jobTierIndex = {}
             local ds = _DataService:GetTable("SkillMaster")
             if ds == nil then
                 log_error("[SkillCatalog] SkillMaster 데이터셋 없음")
@@ -222,11 +238,17 @@ script SkillCatalogLogic extends Logic
                             iconRuid = row:GetItem("iconRuid"),
                             hitFxRuid = row:GetItem("hitFxRuid"),
                             desc = row:GetItem("desc"),
+                            supportEffect = self:ParseJsonCell(row:GetItem("supportEffect"), {}),
+                            supportTurns = math.floor(tonumber(row:GetItem("supportTurns")) or 0),
+                            targetSelect = row:GetItem("targetSelect"),   -- 대상 선정 규칙 (SYS-COMBAT §4 — 빈 값=nearest)
                         }
                         def.rarity = self:TierToRarity(def.tier)
                         def.perHitCoefLv3 = def.coefLv3 / self:CountBaseHits(def)
                         self:ValidateSkill(def)
                         self.skillCache[id] = def
+                        if self.jobTierIndex[def.job] == nil then self.jobTierIndex[def.job] = {} end
+                        if self.jobTierIndex[def.job][def.tier] == nil then self.jobTierIndex[def.job][def.tier] = {} end
+                        table.insert(self.jobTierIndex[def.job][def.tier], id)
                     end
                 end
             end
@@ -241,9 +263,24 @@ script SkillCatalogLogic extends Logic
     end
 
     @ExecSpace("ServerOnly")
+    method any GetSkillRO(string skillId)
+        -- 읽기 전용 원본 참조 — **절대 변이 금지**. 후보 필터링/요약 표기 등 읽기만 하는
+        -- 핫패스용 (46종 스케일에서 GetSkill의 deep-copy가 지배 비용이라 분리 — 아키텍처 검수 2026-07-10).
+        self:EnsureSkillCache()
+        return self.skillCache[skillId]
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean IsSupportSkill(any def)
+        -- 버프/패시브 여부 — 공격 슬롯이 아니라 서포트 슬롯으로 장착된다 (사양서 §3-1 별도 슬롯).
+        return def.attackType == "buff" or def.attackType == "passive"
+    end
+
+    @ExecSpace("ServerOnly")
     method void ValidateSkill(any def)
         -- 적재 시 참조 무결성 검증: rangeId/baseTags/onHitStatus 존재 확인 (경고만, 차단 안 함).
-        if self:GetRangePattern(def.rangeId) == nil then
+        -- 서포트 스킬(버프/패시브)은 범위 패턴이 없으므로 rangeId 검증을 건너뛴다.
+        if not self:IsSupportSkill(def) and self:GetRangePattern(def.rangeId) == nil then
             log_error("[SkillCatalog] 스킬 " .. def.skillId .. " rangeId 무효: " .. tostring(def.rangeId))
         end
         local tags = self:GetTagDefs()
@@ -259,12 +296,16 @@ script SkillCatalogLogic extends Logic
 
     @ExecSpace("ServerOnly")
     method table GetSkillIdsByJobTier(string job, integer maxTier)
-        -- 직업 + 차수 상한 필터 스킬 id 목록 (선택지 풀).
+        -- 직업 + 차수 상한 필터 스킬 id 목록 (선택지 풀) — 적재 시 구축한 인덱스 조회.
         self:EnsureSkillCache()
         local result = {}
-        for id, def in pairs(self.skillCache) do
-            if def.job == job and def.tier <= maxTier then
-                table.insert(result, id)
+        local byJob = self.jobTierIndex[job]
+        if byJob == nil then return result end
+        for tier = 1, maxTier do
+            if byJob[tier] ~= nil then
+                for _, id in ipairs(byJob[tier]) do
+                    table.insert(result, id)
+                end
             end
         end
         return result
@@ -359,34 +400,45 @@ script SkillCatalogLogic extends Logic
         return self:DeepCopy(self.jobCache[job])
     end
 
-    -- ===== StatChoiceDef =====
+    -- (StatChoiceDef 소비 로직 제거 — 능력치 카드는 패시브 스킬로 대체, SYS-GROWTH §4-3.
+    --  데이터셋 파일은 밸런스 참고 자산으로 보존)
+
+    -- ===== EquipDef =====
 
     @ExecSpace("ServerOnly")
-    method table GetStatChoices()
-        -- 능력치 선택지 목록(deep-copy). Modifier 계약 필드(stat/modType/value)로 구성.
-        if self.statChoiceCache == nil then
-            self.statChoiceCache = {}
-            local ds = _DataService:GetTable("StatChoiceDef")
+    method table GetEquipDefs()
+        -- 장비 목록(deep-copy). effect = Modifier 계약 배열 — "엄청난 효과" 아이템 (초안 §8 장비 10%).
+        if self.equipCache == nil then
+            self.equipCache = {}
+            local ds = _DataService:GetTable("EquipDef")
             if ds == nil then
-                log_error("[SkillCatalog] StatChoiceDef 데이터셋 없음")
+                log_error("[SkillCatalog] EquipDef 데이터셋 없음")
             else
                 for _, row in ipairs(ds:GetAllRow()) do
-                    local id = row:GetItem("choiceId")
+                    local id = row:GetItem("equipId")
                     if id ~= nil and id ~= "" then
-                        table.insert(self.statChoiceCache, {
-                            choiceId = id,
+                        table.insert(self.equipCache, {
+                            equipId = id,
                             name = row:GetItem("name"),
-                            stat = row:GetItem("stat"),
-                            modType = row:GetItem("modType"),
-                            value = tonumber(row:GetItem("value")) or 0,
-                            desc = row:GetItem("desc"),
                             iconRuid = row:GetItem("iconRuid"),
+                            desc = row:GetItem("desc"),
+                            effect = self:ParseJsonCell(row:GetItem("effect"), {}),
                         })
                     end
                 end
             end
         end
-        return self:DeepCopy(self.statChoiceCache)
+        return self:DeepCopy(self.equipCache)
+    end
+
+    @ExecSpace("ServerOnly")
+    method any GetEquipDef(string equipId)
+        -- equipId -> def(deep-copy). 미존재 시 nil.
+        self:GetEquipDefs()
+        for _, def in ipairs(self.equipCache) do
+            if def.equipId == equipId then return self:DeepCopy(def) end
+        end
+        return nil
     end
 
     -- ===== 자가검증(임시) =====

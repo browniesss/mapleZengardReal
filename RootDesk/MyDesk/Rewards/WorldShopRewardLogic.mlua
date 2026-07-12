@@ -1,0 +1,76 @@
+@Logic
+script WorldShopRewardLogic extends Logic
+    property boolean callbackRegistered = false
+
+    @ExecSpace("ServerOnly")
+    method void OnBeginPlay()
+        -- 월드샵 구매 처리 콜백을 한 번만 등록한다.
+        if self.callbackRegistered then
+            return
+        end
+
+        _WorldShopService:SetProcessPurchaseCallback(self.ProcessPurchase)
+        self.callbackRegistered = true
+        log("[WorldShopReward] callback registered")
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean ProcessPurchase(WorldShopPurchaseInfo purchaseInfo)
+        -- 네이티브 결제 정보를 검증한 뒤 보상 트랜잭션 성공 여부만 반환한다.
+        if purchaseInfo == nil
+            or purchaseInfo.UserId == nil or purchaseInfo.UserId == ""
+            or purchaseInfo.ProductId == nil or purchaseInfo.ProductId == ""
+            or purchaseInfo.PurchaseId == nil or purchaseInfo.PurchaseId == "" then
+            log_warning("[WorldShopReward] purchase rejected")
+            return false
+        end
+
+        local userEntity = _UserService:GetUserEntityByUserId(purchaseInfo.UserId)
+        if not isvalid(userEntity) then
+            log_warning("[WorldShopReward] purchase rejected userId=" .. purchaseInfo.UserId)
+            return false
+        end
+
+        local product = _WorldShopService:GetProductAndWait(purchaseInfo.ProductId)
+        if product == nil
+            or product.Id ~= purchaseInfo.ProductId
+            or product.Status ~= WorldShopProductStatus.Ing
+            or product.Type ~= WorldShopProductType.Item
+            or product.Price <= 0 then
+            log_warning("[WorldShopReward] purchase rejected productId=" .. purchaseInfo.ProductId)
+            return false
+        end
+
+        local package = _PackageCatalogLogic:GetPackage(purchaseInfo.ProductId)
+        if package == nil or package.productType ~= "in_app_purchase" then
+            log_warning("[WorldShopReward] purchase rejected productId=" .. purchaseInfo.ProductId)
+            return false
+        end
+
+        local callOk, result = pcall(function()
+            return _RewardServiceLogic:GrantWorldShopPurchase(
+                purchaseInfo.UserId,
+                purchaseInfo.PurchaseId,
+                purchaseInfo.ProductId
+            )
+        end)
+        if not callOk or type(result) ~= "table" or result.ok ~= true then
+            log_error("[WorldShopReward] delivery failed purchaseId=" .. purchaseInfo.PurchaseId
+                .. " userId=" .. purchaseInfo.UserId
+                .. " productId=" .. purchaseInfo.ProductId)
+            return false
+        end
+
+        local alreadyApplied = result.alreadyApplied == true
+        log("[WorldShopReward] deliver success purchaseId=" .. purchaseInfo.PurchaseId
+            .. " userId=" .. purchaseInfo.UserId
+            .. " productId=" .. purchaseInfo.ProductId
+            .. " orderNumber=" .. tostring(purchaseInfo.OrderNumber)
+            .. " alreadyApplied=" .. tostring(alreadyApplied))
+
+        pcall(function()
+            _LogStorageService:LogPurchaseInfo(purchaseInfo, "Reward granted")
+        end)
+        return true
+    end
+end

@@ -1,0 +1,72 @@
+@Component
+script PlayerEquipComponent extends Component
+    -- per-player 장비 보유 (초안 §8: 선택지 장비 10% — "엄청난 효과" 아이템, 2026-07-10 도입).
+    -- 장착 = 즉시 영구 modifier 적용(런 내). 해제/교체 없음 잠정 — 기획 확정 시 확장.
+    -- 상태 변경 전부 ServerOnly, 목록 표시는 클라 이벤트로 동기화.
+
+    property any equips = nil   -- [{ equipId, name }] 보유 순서 유지
+
+    @ExecSpace("ServerOnly")
+    method void OnBeginPlay()
+        -- 런 시작 전 빈 상태. 실제 초기화는 ResetForRun.
+        self.equips = {}
+    end
+
+    @ExecSpace("ServerOnly")
+    method void ResetForRun()
+        -- 런 시작: 목록 초기화 (효과 modifier는 PlayerStatComponent.ResetForRun이 일괄 제거).
+        self.equips = {}
+        self:NotifyChanged()
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean HasEquip(string equipId)
+        -- 보유 여부 — 같은 장비 중복 획득 방지(선택지 후보 필터용).
+        for _, e in ipairs(self.equips) do
+            if e.equipId == equipId then return true end
+        end
+        return false
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean AcquireEquip(string equipId)
+        -- 장비 획득: 효과 즉시 적용 + 목록 등재. 미존재/중복이면 false.
+        local def = _SkillCatalogLogic:GetEquipDef(equipId)
+        if def == nil or self:HasEquip(equipId) then return false end
+        local mods = {}
+        for _, e in ipairs(def.effect) do
+            table.insert(mods, { stat = e.stat, type = e.type, value = e.value,
+                source = "equip:" .. equipId })
+        end
+        ---@type PlayerStatComponent
+        local statComp = self.Entity:GetComponent("script.PlayerStatComponent")
+        if statComp == nil then
+            log_error("[PlayerEquip] PlayerStatComponent 없음 — 장비 미적용: " .. equipId)
+            return false
+        end
+        statComp:ApplyModifiers(mods)
+        table.insert(self.equips, { equipId = equipId, name = def.name })
+        log("[PlayerEquip] 장비 획득: " .. def.name)
+        self:NotifyChanged()
+        return true
+    end
+
+    @ExecSpace("ServerOnly")
+    method void NotifyChanged()
+        -- 소유 클라에 보유 목록 요약 동기화.
+        local text = ""
+        for _, e in ipairs(self.equips) do
+            if text ~= "" then text = text .. " · " end
+            text = text .. e.name
+        end
+        self:SyncEquipsClient(text, self.Entity.PlayerComponent.UserId)
+    end
+
+    @ExecSpace("Client")
+    method void SyncEquipsClient(string equipText)
+        -- 소유 클라에서 실행: 보유 목록 UI에 로컬 이벤트로 전달.
+        local ev = EquipSyncedEvent()
+        ev.equipText = equipText
+        self.Entity:SendEvent(ev)
+    end
+end

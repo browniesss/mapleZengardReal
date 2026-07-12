@@ -23,10 +23,12 @@ script CombatFxLogic extends Logic
         if not isvalid(slot.DamageSkinSpawnerComponent) then
             slot:AddComponent(DamageSkinSpawnerComponent)
         end
+        -- damages 배열 = HitPlan 대미지의 단일 진실 (타격별 크리 개별 반영 — SYS-COMBAT §5)
         local damages = {}
-        for _ = 1, hit.hitCount do
-            table.insert(damages, math.floor(hit.damagePerHit + 0.5))
+        for _, d in ipairs(hit.damages or {}) do
+            table.insert(damages, math.floor(d + 0.5))
         end
+        if #damages == 0 then return end
         self:PlayDamageSkin(slot, damages, hit.isCrit == true)
     end
 

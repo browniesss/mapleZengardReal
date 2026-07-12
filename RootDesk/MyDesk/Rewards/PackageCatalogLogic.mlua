@@ -1,0 +1,234 @@
+@Logic
+script PackageCatalogLogic extends Logic
+    -- Packages와 PackageRewards를 결합해 검증된 구매·교환 패키지를 제공하는 서버 카탈로그다.
+
+    property any packageMap = nil
+
+    @ExecSpace("ServerOnly")
+    method void OnBeginPlay()
+        -- 카탈로그 캐시를 초기화하고 준비 로그를 남긴다.
+        self.packageMap = nil
+        log("[PackageCatalog] ready")
+    end
+
+    method any DeepCopy(any value)
+        -- 테이블이면 재귀 복제하고, 원시값은 그대로 반환한다.
+        if type(value) ~= "table" then
+            return value
+        end
+
+        local out = {}
+        for key, child in pairs(value) do
+            out[key] = self:DeepCopy(child)
+        end
+        return out
+    end
+
+    method void RejectPackage(any invalidReasons, string productId, string reason)
+        -- 패키지의 첫 실패 사유를 보존하면서 모든 거부 사유를 경고로 남긴다.
+        if invalidReasons[productId] == nil then
+            invalidReasons[productId] = reason
+        end
+        log_warning("[PackageCatalog] rejected productId=" .. productId .. " reason=" .. reason)
+    end
+
+    @ExecSpace("ServerOnly")
+    method void EnsureCache()
+        -- 두 데이터셋을 1회 결합하고 유효한 패키지만 private 캐시에 저장한다.
+        if self.packageMap ~= nil then
+            return
+        end
+
+        self.packageMap = {}
+
+        if not _RewardTypeCatalogLogic:IsCoinCatalogAvailable() then
+            log_error("[PackageCatalog] CoinTypes 코인 메타데이터 카탈로그 없음")
+            return
+        end
+
+        local packagesDataSet = _DataService:GetTable("Packages")
+        if packagesDataSet == nil then
+            log_error("[PackageCatalog] Packages 데이터셋 없음")
+            return
+        end
+
+        local packageRewardsDataSet = _DataService:GetTable("PackageRewards")
+        if packageRewardsDataSet == nil then
+            log_error("[PackageCatalog] PackageRewards 데이터셋 없음")
+            return
+        end
+
+        local packagesById = {}
+        local invalidReasons = {}
+
+        for _, row in ipairs(packagesDataSet:GetAllRow()) do
+            local productId = row:GetItem("productId")
+            local productType = row:GetItem("productType")
+            local productPriceRaw = row:GetItem("productPrice")
+
+            if productId == nil or productId == "" then
+                log_warning("[PackageCatalog] rejected productId=<empty> reason=empty_product_id")
+            elseif packagesById[productId] ~= nil then
+                self:RejectPackage(invalidReasons, productId, "duplicate_product_id")
+            else
+                local productPrice = math.floor(tonumber(productPriceRaw) or 0)
+                local package = {
+                    productId = productId,
+                    productType = productType,
+                    productPrice = productPrice,
+                    rewards = {},
+                }
+                packagesById[productId] = package
+
+                if productType ~= "in_app_purchase" and productType ~= "currency_exchange" then
+                    self:RejectPackage(invalidReasons, productId, "invalid_product_type")
+                elseif productType == "in_app_purchase" and productPriceRaw ~= "" then
+                    self:RejectPackage(invalidReasons, productId, "in_app_purchase_price_must_be_empty")
+                elseif productType == "currency_exchange" and productPrice <= 0 then
+                    self:RejectPackage(invalidReasons, productId, "invalid_currency_exchange_price")
+                elseif productType == "in_app_purchase" then
+                    package.productPrice = 0
+                end
+            end
+        end
+
+        local rewardIdentityByProduct = {}
+        for _, row in ipairs(packageRewardsDataSet:GetAllRow()) do
+            local productId = row:GetItem("productId")
+            local rewardType = row:GetItem("rewardType")
+            local rewardExtra = row:GetItem("rewardExtra") or ""
+            local rewardValue = math.floor(tonumber(row:GetItem("rewardValue")) or 0)
+            local package = productId ~= nil and packagesById[productId] or nil
+
+            if productId == nil or productId == "" then
+                log_warning("[PackageCatalog] rejected productId=<empty> reason=empty_reward_product_id")
+            elseif package == nil then
+                log_warning("[PackageCatalog] rejected productId=" .. productId .. " reason=orphan_reward")
+            elseif rewardType == nil or rewardType == "" then
+                self:RejectPackage(invalidReasons, productId, "empty_reward_type")
+            elseif rewardValue <= 0 then
+                self:RejectPackage(invalidReasons, productId, "invalid_reward_value")
+            elseif #rewardExtra > 256 then
+                self:RejectPackage(invalidReasons, productId, "reward_extra_too_large")
+            elseif not _RewardTypeCatalogLogic:HasRewardType(rewardType) then
+                self:RejectPackage(invalidReasons, productId, "unknown_reward_type")
+            else
+                local identitiesForProduct = rewardIdentityByProduct[productId]
+                if identitiesForProduct == nil then
+                    identitiesForProduct = {}
+                    rewardIdentityByProduct[productId] = identitiesForProduct
+                end
+
+                local extrasForType = identitiesForProduct[rewardType]
+                if extrasForType == nil then
+                    extrasForType = {}
+                    identitiesForProduct[rewardType] = extrasForType
+                end
+
+                if extrasForType[rewardExtra] then
+                    self:RejectPackage(invalidReasons, productId, "duplicate_reward_identity")
+                else
+                    extrasForType[rewardExtra] = true
+                    table.insert(package.rewards, {
+                        rewardType = rewardType,
+                        rewardExtra = rewardExtra,
+                        amount = rewardValue,
+                    })
+                end
+            end
+        end
+
+        local loadedCount = 0
+        for productId, package in pairs(packagesById) do
+            if invalidReasons[productId] == nil then
+                if #package.rewards == 0 then
+                    self:RejectPackage(invalidReasons, productId, "missing_rewards")
+                else
+                    local rewardTypeCount = 0
+                    local rewardTypesSeen = {}
+                    local currencyCount = 0
+                    local currencyRewardType = ""
+                    local hasPaidPrimaryInAppCurrency = false
+                    local hasInvalidInAppCurrency = false
+
+                    for _, reward in ipairs(package.rewards) do
+                        if rewardTypesSeen[reward.rewardType] == nil then
+                            rewardTypesSeen[reward.rewardType] = true
+                            rewardTypeCount += 1
+                        end
+
+                        if _RewardTypeCatalogLogic:IsCurrencyType(reward.rewardType) then
+                            currencyCount += 1
+                            currencyRewardType = reward.rewardType
+                            if package.productType == "in_app_purchase" then
+                                local currencyClass = _RewardTypeCatalogLogic:GetCurrencyClass(reward.rewardType)
+                                local currencyTier = _RewardTypeCatalogLogic:GetCurrencyTier(reward.rewardType)
+                                if currencyTier ~= "primary"
+                                    or (currencyClass ~= "paid" and currencyClass ~= "free") then
+                                    hasInvalidInAppCurrency = true
+                                elseif currencyClass == "paid" then
+                                    hasPaidPrimaryInAppCurrency = true
+                                end
+                            end
+                        end
+                    end
+
+                    if rewardTypeCount > 19 then
+                        self:RejectPackage(invalidReasons, productId, "too_many_reward_types")
+                    elseif package.productType == "in_app_purchase" and hasInvalidInAppCurrency then
+                        self:RejectPackage(invalidReasons, productId, "in_app_purchase_currency_must_be_primary_paid_or_free")
+                    elseif package.productType == "in_app_purchase" and not hasPaidPrimaryInAppCurrency then
+                        self:RejectPackage(invalidReasons, productId, "in_app_purchase_paid_primary_currency_missing")
+                    elseif package.productType == "currency_exchange" and currencyCount ~= 1 then
+                        self:RejectPackage(invalidReasons, productId, "currency_exchange_requires_one_currency_reward")
+                    else
+                        local paymentRewardType = nil
+                        if package.productType == "currency_exchange" then
+                            if currencyRewardType == "" then
+                                self:RejectPackage(invalidReasons, productId, "currency_exchange_currency_reward_missing")
+                            else
+                                local currencyTier = _RewardTypeCatalogLogic:GetCurrencyTier(currencyRewardType)
+                                local currencyClass = _RewardTypeCatalogLogic:GetCurrencyClass(currencyRewardType)
+                                if currencyTier ~= "secondary" then
+                                    self:RejectPackage(invalidReasons, productId, "currency_exchange_reward_must_be_secondary")
+                                elseif currencyClass == nil then
+                                    self:RejectPackage(invalidReasons, productId, "currency_exchange_reward_currency_class_missing")
+                                else
+                                    paymentRewardType = _RewardTypeCatalogLogic:FindCurrencyType("primary", currencyClass)
+                                    if paymentRewardType == nil then
+                                        self:RejectPackage(invalidReasons, productId, "currency_exchange_primary_pair_missing_or_ambiguous")
+                                    end
+                                end
+                            end
+                        end
+
+                        if invalidReasons[productId] == nil then
+                            self.packageMap[productId] = {
+                                productId = package.productId,
+                                productType = package.productType,
+                                productPrice = package.productPrice,
+                                rewards = package.rewards,
+                                paymentRewardType = paymentRewardType,
+                            }
+                            loadedCount += 1
+                            log("[PackageCatalog] loaded productId=" .. productId
+                                .. " type=" .. package.productType)
+                        end
+                    end
+                end
+            end
+        end
+
+        log("[PackageCatalog] cache loaded count=" .. tostring(loadedCount))
+    end
+
+    @ExecSpace("ServerOnly")
+    method table GetPackage(string productId)
+        -- 유효한 productId의 패키지를 호출자가 바꿀 수 없는 deep-copy로 반환한다.
+        self:EnsureCache()
+        if productId == nil or productId == "" then
+            return nil
+        end
+        return self:DeepCopy(self.packageMap[productId])
+    end
+end

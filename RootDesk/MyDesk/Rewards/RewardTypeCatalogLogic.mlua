@@ -1,18 +1,23 @@
 @Logic
 script RewardTypeCatalogLogic extends Logic
-    -- 계층 ①: RewardTypes 데이터셋을 적재·검증·캐시하는 보상 타입 조회 레이어.
-    -- 모든 조회는 ServerOnly. 필터 nil=전체, string/table=부분 조회를 지원한다.
+    -- 계층 ①: 일반 보상 정의와 코인 전용 메타데이터를 분리 적재하는 서버 카탈로그다.
 
     property boolean RunSelfTest = false
 
     property any rewardTypeList = nil
     property any rewardTypeMap = nil
+    property any coinTypeList = nil
+    property any coinTypeMap = nil
+    property boolean coinCatalogAvailable = false
 
     @ExecSpace("ServerOnly")
     method void OnBeginPlay()
-        -- 캐시를 초기화하고 준비 로그를 남긴다.
+        -- 일반 보상과 코인 메타데이터 캐시를 초기화하고 준비 로그를 남긴다.
         self.rewardTypeList = nil
         self.rewardTypeMap = nil
+        self.coinTypeList = nil
+        self.coinTypeMap = nil
+        self.coinCatalogAvailable = false
         log("[RewardTypeCatalog] ready")
         if self.RunSelfTest then
             self:SelfTest()
@@ -20,10 +25,11 @@ script RewardTypeCatalogLogic extends Logic
     end
 
     method any DeepCopy(any value)
-        -- 테이블이면 재귀 복제하고, 원시값은 그대로 반환한다.
+        -- 테이블이면 재귀 복제하고 원시값은 그대로 반환한다.
         if type(value) ~= "table" then
             return value
         end
+
         local out = {}
         for key, child in pairs(value) do
             out[key] = self:DeepCopy(child)
@@ -33,21 +39,27 @@ script RewardTypeCatalogLogic extends Logic
 
     @ExecSpace("ServerOnly")
     method void EnsureCache()
-        -- RewardTypes 데이터셋을 1회 적재해 순서 배열과 맵 캐시를 구축한다.
-        if self.rewardTypeList ~= nil and self.rewardTypeMap ~= nil then
+        -- RewardTypes와 CoinTypes를 1회 적재해 일반 보상과 코인 메타데이터 캐시를 구축한다.
+        if self.rewardTypeList ~= nil
+            and self.rewardTypeMap ~= nil
+            and self.coinTypeList ~= nil
+            and self.coinTypeMap ~= nil then
             return
         end
 
         self.rewardTypeList = {}
         self.rewardTypeMap = {}
+        self.coinTypeList = {}
+        self.coinTypeMap = {}
+        self.coinCatalogAvailable = false
 
-        local ds = _DataService:GetTable("RewardTypes")
-        if ds == nil then
+        local rewardDataSet = _DataService:GetTable("RewardTypes")
+        if rewardDataSet == nil then
             log_error("[RewardTypeCatalog] RewardTypes 데이터셋 없음")
             return
         end
 
-        for _, row in ipairs(ds:GetAllRow()) do
+        for _, row in ipairs(rewardDataSet:GetAllRow()) do
             local rewardType = row:GetItem("rewardType")
             local label = row:GetItem("label")
 
@@ -65,15 +77,46 @@ script RewardTypeCatalogLogic extends Logic
             end
         end
 
-        log("[RewardTypeCatalog] loaded count=" .. tostring(#self.rewardTypeList))
+        local coinDataSet = _DataService:GetTable("CoinTypes")
+        if coinDataSet == nil then
+            log_error("[RewardTypeCatalog] CoinTypes 데이터셋 없음")
+            return
+        end
+
+        for _, row in ipairs(coinDataSet:GetAllRow()) do
+            local rewardType = row:GetItem("rewardType")
+            local currencyClass = row:GetItem("currencyClass")
+            local currencyTier = row:GetItem("currencyTier")
+
+            if rewardType == nil or rewardType == "" then
+                log_warning("[RewardTypeCatalog] CoinTypes 빈 rewardType 행 스킵")
+            elseif self.rewardTypeMap[rewardType] == nil then
+                log_warning("[RewardTypeCatalog] CoinTypes 보상 정의 없는 코인 스킵: " .. rewardType)
+            elseif self.coinTypeMap[rewardType] ~= nil then
+                log_warning("[RewardTypeCatalog] CoinTypes 중복 rewardType 스킵: " .. rewardType)
+            elseif currencyClass ~= "paid" and currencyClass ~= "free" then
+                log_warning("[RewardTypeCatalog] CoinTypes 잘못된 currencyClass 스킵: " .. rewardType)
+            elseif currencyTier ~= "primary" and currencyTier ~= "secondary" then
+                log_warning("[RewardTypeCatalog] CoinTypes 잘못된 currencyTier 스킵: " .. rewardType)
+            else
+                local coinDef = {
+                    rewardType = rewardType,
+                    currencyClass = currencyClass,
+                    currencyTier = currencyTier,
+                }
+                self.coinTypeMap[rewardType] = coinDef
+                table.insert(self.coinTypeList, coinDef)
+            end
+        end
+
+        self.coinCatalogAvailable = true
+        log("[RewardTypeCatalog] loaded rewards=" .. tostring(#self.rewardTypeList)
+            .. " coins=" .. tostring(#self.coinTypeList))
     end
 
     method void TryAppendRewardType(table result, any seen, string rewardType)
-        -- 존재하는 rewardType이면 중복 없이 결과 배열에 추가한다.
-        if rewardType == nil or rewardType == "" then
-            return
-        end
-        if seen[rewardType] then
+        -- 존재하는 rewardType이면 중복 없이 일반 보상 정의를 결과 배열에 추가한다.
+        if rewardType == nil or rewardType == "" or seen[rewardType] then
             return
         end
 
@@ -89,35 +132,97 @@ script RewardTypeCatalogLogic extends Logic
 
     @ExecSpace("ServerOnly")
     method any GetRewardType(string rewardType)
-        -- 단일 보상 타입 정의를 deep-copy로 반환한다. 없으면 nil.
+        -- 일반 보상 정의를 deep-copy로 반환하고 코인 전용 정보는 CoinTypes 조회로 분리한다.
         self:EnsureCache()
         return self:DeepCopy(self.rewardTypeMap[rewardType])
     end
 
     @ExecSpace("ServerOnly")
     method boolean HasRewardType(string rewardType)
-        -- 보상 타입 존재 여부를 반환한다.
+        -- 일반 보상 타입의 존재 여부를 반환한다.
         self:EnsureCache()
         return self.rewardTypeMap[rewardType] ~= nil
     end
 
     @ExecSpace("ServerOnly")
-    method table GetRewardTypes(any filter)
-        -- nil=전체, string=단일, table=여러 타입 필터를 적용한 정의 목록을 반환한다.
+    method boolean IsCoinCatalogAvailable()
+        -- CoinTypes 데이터셋을 성공적으로 적재했는지 반환한다.
         self:EnsureCache()
+        return self.coinCatalogAvailable
+    end
 
+    @ExecSpace("ServerOnly")
+    method any GetCoinType(string rewardType)
+        -- 코인 타입의 paid/free와 primary/secondary 메타데이터를 deep-copy로 반환한다.
+        self:EnsureCache()
+        return self:DeepCopy(self.coinTypeMap[rewardType])
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean IsCurrencyType(string rewardType)
+        -- 호환 API로 CoinTypes에 등록된 보상이 코인인지 반환한다.
+        self:EnsureCache()
+        return self.coinCatalogAvailable and self.coinTypeMap[rewardType] ~= nil
+    end
+
+    @ExecSpace("ServerOnly")
+    method string GetCurrencyClass(string rewardType)
+        -- CoinTypes에 등록된 코인의 paid/free 분류를 반환하고 코인이 아니면 nil을 반환한다.
+        self:EnsureCache()
+        local coinDef = self.coinTypeMap[rewardType]
+        if not self.coinCatalogAvailable or coinDef == nil then
+            return nil
+        end
+        return coinDef.currencyClass
+    end
+
+    @ExecSpace("ServerOnly")
+    method string GetCurrencyTier(string rewardType)
+        -- CoinTypes에 등록된 코인의 primary/secondary 단계를 반환하고 코인이 아니면 nil을 반환한다.
+        self:EnsureCache()
+        local coinDef = self.coinTypeMap[rewardType]
+        if not self.coinCatalogAvailable or coinDef == nil then
+            return nil
+        end
+        return coinDef.currencyTier
+    end
+
+    @ExecSpace("ServerOnly")
+    method string FindCurrencyType(string currencyTier, string currencyClass)
+        -- CoinTypes에서 단계와 paid/free 조합이 정확히 하나인 코인 rewardType만 반환한다.
+        self:EnsureCache()
+        if not self.coinCatalogAvailable then
+            return nil
+        end
+
+        local matchedRewardType = nil
+        for _, coinDef in ipairs(self.coinTypeList) do
+            if coinDef.currencyTier == currencyTier and coinDef.currencyClass == currencyClass then
+                if matchedRewardType ~= nil then
+                    log_warning("[RewardTypeCatalog] 모호한 코인 조합: "
+                        .. tostring(currencyTier) .. "/" .. tostring(currencyClass))
+                    return nil
+                end
+                matchedRewardType = coinDef.rewardType
+            end
+        end
+        return matchedRewardType
+    end
+
+    @ExecSpace("ServerOnly")
+    method table GetRewardTypes(any filter)
+        -- nil=전체, string=단일, table=여러 타입 필터를 적용한 일반 보상 정의 목록을 반환한다.
+        self:EnsureCache()
         if filter == nil then
             return self:DeepCopy(self.rewardTypeList)
         end
 
         local result = {}
         local seen = {}
-
         if type(filter) == "string" then
             self:TryAppendRewardType(result, seen, filter)
             return result
         end
-
         if type(filter) == "table" then
             for _, rewardType in ipairs(filter) do
                 if type(rewardType) == "string" then
@@ -133,7 +238,7 @@ script RewardTypeCatalogLogic extends Logic
 
     @ExecSpace("ServerOnly")
     method table GetRewardTypeIds(any filter)
-        -- 필터에 해당하는 rewardType id 배열만 반환한다.
+        -- 필터에 해당하는 일반 rewardType id 배열만 반환한다.
         local defs = self:GetRewardTypes(filter)
         local result = {}
         for _, def in ipairs(defs) do
@@ -144,11 +249,10 @@ script RewardTypeCatalogLogic extends Logic
 
     @ExecSpace("ServerOnly")
     method void SelfTest()
-        -- 데이터셋 적재와 기본 조회 계약을 로그로 검증한다.
+        -- 일반 보상과 코인 메타데이터의 분리 적재 상태를 로그로 검증한다.
         local defs = self:GetRewardTypes(nil)
-        local first = defs[1]
-        log("[RewardTypeCatalog][SelfTest] count=" .. tostring(#defs)
-            .. " first=" .. tostring(first and first.rewardType or "nil")
-            .. " label=" .. tostring(first and first.label or "nil"))
+        log("[RewardTypeCatalog][SelfTest] rewards=" .. tostring(#defs)
+            .. " coins=" .. tostring(#self.coinTypeList)
+            .. " coinCatalogAvailable=" .. tostring(self.coinCatalogAvailable))
     end
 end

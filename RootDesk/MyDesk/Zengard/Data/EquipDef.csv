@@ -1,0 +1,5 @@
+﻿equipId,name,iconRuid,desc,effect
+EQ_BLUENEOS,블루 네오스 소드,5e8567767e7544da94326f2f3dfd6a9e,[장비] 공격력이 50% 증가한다,"[{""stat"":""atk"",""type"":""percentAdd"",""value"":0.5}]"
+EQ_HTPENDANT,혼테일의 목걸이,4be7532a78ec4ecbad8b68d500b6ec0e,[장비] 크리티컬 확률 +25%p,"[{""stat"":""critRate"",""type"":""flat"",""value"":0.25}]"
+EQ_TIMELESS,타임리스 이어링,bbe526281d6e4109ab4c4bfbb80bcf6d,[장비] 크리티컬 피해 +60%p,"[{""stat"":""critDmg"",""type"":""flat"",""value"":0.6}]"
+EQ_MAPLECROWN,메이플 크라운,271bc3e3d1e544569bb1d82b2ef1d879,[장비] 공격력 +15,"[{""stat"":""atk"",""type"":""flat"",""value"":15}]"
