@@ -148,7 +148,8 @@ script PackageCatalogLogic extends Logic
                     local rewardTypesSeen = {}
                     local currencyCount = 0
                     local currencyRewardType = ""
-                    local hasUnpaidInAppCurrency = false
+                    local hasPaidPrimaryInAppCurrency = false
+                    local hasInvalidInAppCurrency = false
 
                     for _, reward in ipairs(package.rewards) do
                         if rewardTypesSeen[reward.rewardType] == nil then
@@ -159,17 +160,25 @@ script PackageCatalogLogic extends Logic
                         if _RewardTypeCatalogLogic:IsCurrencyType(reward.rewardType) then
                             currencyCount += 1
                             currencyRewardType = reward.rewardType
-                            if package.productType == "in_app_purchase"
-                                and _RewardTypeCatalogLogic:GetCurrencyClass(reward.rewardType) ~= "paid" then
-                                hasUnpaidInAppCurrency = true
+                            if package.productType == "in_app_purchase" then
+                                local currencyClass = _RewardTypeCatalogLogic:GetCurrencyClass(reward.rewardType)
+                                local currencyTier = _RewardTypeCatalogLogic:GetCurrencyTier(reward.rewardType)
+                                if currencyTier ~= "primary"
+                                    or (currencyClass ~= "paid" and currencyClass ~= "free") then
+                                    hasInvalidInAppCurrency = true
+                                elseif currencyClass == "paid" then
+                                    hasPaidPrimaryInAppCurrency = true
+                                end
                             end
                         end
                     end
 
                     if rewardTypeCount > 19 then
                         self:RejectPackage(invalidReasons, productId, "too_many_reward_types")
-                    elseif package.productType == "in_app_purchase" and hasUnpaidInAppCurrency then
-                        self:RejectPackage(invalidReasons, productId, "in_app_purchase_currency_must_be_paid")
+                    elseif package.productType == "in_app_purchase" and hasInvalidInAppCurrency then
+                        self:RejectPackage(invalidReasons, productId, "in_app_purchase_currency_must_be_primary_paid_or_free")
+                    elseif package.productType == "in_app_purchase" and not hasPaidPrimaryInAppCurrency then
+                        self:RejectPackage(invalidReasons, productId, "in_app_purchase_paid_primary_currency_missing")
                     elseif package.productType == "currency_exchange" and currencyCount ~= 1 then
                         self:RejectPackage(invalidReasons, productId, "currency_exchange_requires_one_currency_reward")
                     else

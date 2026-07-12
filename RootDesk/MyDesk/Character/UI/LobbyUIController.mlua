@@ -13,12 +13,13 @@ script LobbyUIController extends Component
     property ButtonComponent btnJobBack = "2f6d9d9d-4c11-4535-b913-1a3976824127"
     property ButtonComponent btnShop = "760583f8-e113-4c2e-b5f4-bdf85b8b7c7d"
     property Entity shopPanel = "fef7b34f-621a-4a11-887c-ed1a140a527d"
-    property ButtonComponent btnShopBuy = "b037ad4a-e87b-4dfd-bb05-46e21eca0ec6"
+    property Entity shopProductTemplate = "613da5ab-0dc3-4ca5-b6dd-295c050c2990"
     property ButtonComponent btnShopClose = "038d9e7b-09f3-42a5-84eb-d016dc383c43"
-    property string shopProductId = "UY9VR4EH3"
     property TextComponent currencyText = "22b5abdf-7dba-4841-8596-6ec96ecc71c4"
     property integer displayedCurrencySyncVersion = -1
     property any handlers = nil
+    property any shopProducts = nil
+    property any shopProductEntities = nil
 
     @ExecSpace("ClientOnly")
     method void OnBeginPlay()
@@ -31,10 +32,11 @@ script LobbyUIController extends Component
         self:Wire(self.btnJobThf, function() self:OnJobPicked("THF") end)
         self:Wire(self.btnJobBack, self.OnJobBackClicked)
         self:Wire(self.btnShop, self.OnShopOpenClicked)
-        self:Wire(self.btnShopBuy, self.OnShopBuyClicked)
+        -- 상품 카드는 CSV 로딩 뒤에 템플릿 복제로 연결한다.
         self:Wire(self.btnShopClose, self.OnShopCloseClicked)
         if isvalid(self.shopPanel) then self.shopPanel.Enable = false end
         if isvalid(self.jobPanel) then self.jobPanel.Enable = false end
+        self:LoadShopProducts()
         self:RefreshCurrencyDisplay()
     end
 
@@ -53,7 +55,7 @@ script LobbyUIController extends Component
 
     @ExecSpace("ClientOnly")
     method void RefreshCurrencyDisplay()
-        -- 초기 동기화가 끝난 로컬 플레이어 보상 캐시에서 유상 1차 재화를 표시한다.
+        -- 초기 동기화가 끝난 로컬 플레이어 보상 캐시에서 유상·무상 1차 재화를 표시한다.
         if not isvalid(self.currencyText) then
             return
         end
@@ -72,16 +74,19 @@ script LobbyUIController extends Component
             return
         end
 
-        local amount = cache:GetCachedAmount("iap_paid_coin", "")
-        self.currencyText.Text = "유상 1차 재화: " .. tostring(amount)
+        local paidAmount = cache:GetCachedAmount("iap_paid_coin", "")
+        local freeAmount = cache:GetCachedAmount("iap_free_coin", "")
+        self.currencyText.Text = "유상 1차 재화: " .. tostring(paidAmount)
+            .. " | 무상 1차 재화: " .. tostring(freeAmount)
         self.displayedCurrencySyncVersion = cache.syncVersion
-        log("[LobbyCurrency] displayed amount=" .. tostring(amount)
+        log("[LobbyCurrency] displayed paid=" .. tostring(paidAmount)
+            .. " free=" .. tostring(freeAmount)
             .. " version=" .. tostring(cache.syncVersion))
     end
 
     @ExecSpace("ClientOnly")
     method void RequestCurrencyRefresh()
-        -- 로비 상점 진입·종료 시 유상 1차 재화의 서버 기준 스냅샷을 다시 요청한다.
+        -- 로비 상점 진입·종료 시 유상·무상 1차 재화의 서버 기준 스냅샷을 다시 요청한다.
         local player = _UserService.LocalPlayer
         if not isvalid(player) then
             return
@@ -90,7 +95,7 @@ script LobbyUIController extends Component
         ---@type RewardClientCacheComponent
         local cache = player:GetComponent("script.RewardClientCacheComponent")
         if cache ~= nil then
-            cache:RequestPartialSync({ "iap_paid_coin" })
+            cache:RequestPartialSync({ "iap_paid_coin", "iap_free_coin" })
         end
     end
 
@@ -137,14 +142,81 @@ script LobbyUIController extends Component
     end
 
     @ExecSpace("ClientOnly")
-    method void OnShopBuyClicked()
-        -- 선택한 네이티브 WorldShop 상품의 엔진 결제창만 연다.
-        if self.shopProductId == "" then
+    method void LoadShopProducts()
+        -- 공개된 1차 재화 상품 CSV를 읽어 표시용 목록만 구성한다.
+        local dataSet = _DataService:GetTable("PrimaryCurrencyShop")
+        if dataSet == nil then
+            log_error("[CurrencyShop] PrimaryCurrencyShop 데이터셋 없음")
+            self.shopProducts = {}
+            self:RenderShopProducts()
+            return
+        end
+
+        local products = {}
+        for _, row in ipairs(dataSet:GetAllRow()) do
+            local productId = row:GetItem("productId")
+            local enabled = row:GetItem("enabled")
+            if enabled == "true" and productId ~= nil and productId ~= "" then
+                table.insert(products, {
+                    productId = productId,
+                    displayOrder = tonumber(row:GetItem("displayOrder")) or 0,
+                    title = row:GetItem("title") or productId,
+                    description = row:GetItem("description") or "",
+                })
+            end
+        end
+        table.sort(products, function(left, right)
+            return left.displayOrder < right.displayOrder
+        end)
+        self.shopProducts = products
+        self:RenderShopProducts()
+        log("[CurrencyShop] catalog loaded count=" .. tostring(#products))
+    end
+
+    @ExecSpace("ClientOnly")
+    method void RenderShopProducts()
+        -- CSV 상품마다 카드 템플릿을 복제해 목록 길이에 맞춰 표시한다.
+        if not isvalid(self.shopProductTemplate) then
+            log_error("[CurrencyShop] product template is missing")
+            return
+        end
+        self.shopProductTemplate.Enable = false
+        if self.shopProductEntities ~= nil then
+            for _, entity in ipairs(self.shopProductEntities) do
+                if isvalid(entity) then entity:Destroy() end
+            end
+        end
+        self.shopProductEntities = {}
+        if self.shopProducts == nil then
+            return
+        end
+
+        for index, product in ipairs(self.shopProducts) do
+            local productId = product.productId
+            local displayOrder = product.displayOrder
+            local card = self.shopProductTemplate:Clone("Product_" .. tostring(index))
+            card.Enable = true
+            local title = card:GetChildByName("Title")
+            local description = card:GetChildByName("Desc")
+            if isvalid(title) then title.TextComponent.Text = product.title end
+            if isvalid(description) then description.TextComponent.Text = product.description end
+            self:Wire(card.ButtonComponent, function()
+                self:OnShopProductClicked(productId, displayOrder)
+            end)
+            table.insert(self.shopProductEntities, card)
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnShopProductClicked(string productId, integer displayOrder)
+        -- 선택한 CSV 상품의 productId로만 네이티브 WorldShop 결제창을 연다.
+        if productId == "" then
             log_warning("[CurrencyShop] productId is empty")
             return
         end
-        log("[CurrencyShop] prompt productId=" .. self.shopProductId)
-        _WorldShopService:PromptPurchase(self.shopProductId)
+        log("[CurrencyShop] prompt productId=" .. productId
+            .. " order=" .. tostring(displayOrder))
+        _WorldShopService:PromptPurchase(productId)
     end
 
     @ExecSpace("ClientOnly")

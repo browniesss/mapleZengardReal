@@ -238,13 +238,14 @@ script RewardServiceLogic extends Logic
     end
 
     @ExecSpace("ServerOnly")
-    method any BuildPackageRewardMutations(any package, boolean requirePaidCurrency)
+    method any BuildPackageRewardMutations(any package, boolean requirePaidPrimaryCurrency)
         -- 패키지 보상 전체를 검증된 양의 저장 mutation 배열로 변환한다.
         if type(package) ~= "table" or type(package.rewards) ~= "table" or #package.rewards == 0 then
             return nil
         end
 
         local mutations = {}
+        local hasPaidPrimaryCurrency = false
         for _, reward in ipairs(package.rewards) do
             if type(reward) ~= "table"
                 or type(reward.rewardType) ~= "string"
@@ -257,10 +258,16 @@ script RewardServiceLogic extends Logic
             if amount == 0 or not _RewardTypeCatalogLogic:HasRewardType(reward.rewardType) then
                 return nil
             end
-            if requirePaidCurrency
-                and _RewardTypeCatalogLogic:IsCurrencyType(reward.rewardType)
-                and _RewardTypeCatalogLogic:GetCurrencyClass(reward.rewardType) ~= "paid" then
-                return nil
+            if requirePaidPrimaryCurrency and _RewardTypeCatalogLogic:IsCurrencyType(reward.rewardType) then
+                local currencyClass = _RewardTypeCatalogLogic:GetCurrencyClass(reward.rewardType)
+                local currencyTier = _RewardTypeCatalogLogic:GetCurrencyTier(reward.rewardType)
+                if currencyTier ~= "primary"
+                    or (currencyClass ~= "paid" and currencyClass ~= "free") then
+                    return nil
+                end
+                if currencyClass == "paid" then
+                    hasPaidPrimaryCurrency = true
+                end
             end
 
             table.insert(mutations, {
@@ -268,6 +275,9 @@ script RewardServiceLogic extends Logic
                 rewardExtra = reward.rewardExtra,
                 delta = amount,
             })
+        end
+        if requirePaidPrimaryCurrency and not hasPaidPrimaryCurrency then
+            return nil
         end
         return mutations
     end
