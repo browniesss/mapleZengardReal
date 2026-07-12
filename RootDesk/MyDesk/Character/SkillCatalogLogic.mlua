@@ -13,7 +13,6 @@ script SkillCatalogLogic extends Logic
     property any statusCache = nil         -- statusId -> def
     property any growthCache = nil         -- level -> requiredExp
     property any jobCache = nil            -- job -> def
-    property any statChoiceCache = nil     -- [스탯 선택지 def]
     property any equipCache = nil          -- [장비 def]
 
     @ExecSpace("ServerOnly")
@@ -241,6 +240,7 @@ script SkillCatalogLogic extends Logic
                             desc = row:GetItem("desc"),
                             supportEffect = self:ParseJsonCell(row:GetItem("supportEffect"), {}),
                             supportTurns = math.floor(tonumber(row:GetItem("supportTurns")) or 0),
+                            targetSelect = row:GetItem("targetSelect"),   -- 대상 선정 규칙 (SYS-COMBAT §4 — 빈 값=nearest)
                         }
                         def.rarity = self:TierToRarity(def.tier)
                         def.perHitCoefLv3 = def.coefLv3 / self:CountBaseHits(def)
@@ -274,17 +274,6 @@ script SkillCatalogLogic extends Logic
     method boolean IsSupportSkill(any def)
         -- 버프/패시브 여부 — 공격 슬롯이 아니라 서포트 슬롯으로 장착된다 (사양서 §3-1 별도 슬롯).
         return def.attackType == "buff" or def.attackType == "passive"
-    end
-
-    @ExecSpace("ServerOnly")
-    method any GetMoveSkillForJobTier(string job, integer tier)
-        -- 해당 직업·차수의 이동기 def (전직 자동 습득용 — 회의 §2). 없으면 nil.
-        -- 이동기는 선택지에 나오지 않고 전직 시 지급된다 (ChoiceRollerLogic이 movement 제외).
-        for _, skillId in ipairs(self:GetSkillIdsByJobTier(job, tier)) do
-            local def = self:GetSkillRO(skillId)
-            if def ~= nil and def.attackType == "movement" then return def end
-        end
-        return nil
     end
 
     @ExecSpace("ServerOnly")
@@ -411,35 +400,8 @@ script SkillCatalogLogic extends Logic
         return self:DeepCopy(self.jobCache[job])
     end
 
-    -- ===== StatChoiceDef =====
-
-    @ExecSpace("ServerOnly")
-    method table GetStatChoices()
-        -- 능력치 선택지 목록(deep-copy). Modifier 계약 필드(stat/modType/value)로 구성.
-        if self.statChoiceCache == nil then
-            self.statChoiceCache = {}
-            local ds = _DataService:GetTable("StatChoiceDef")
-            if ds == nil then
-                log_error("[SkillCatalog] StatChoiceDef 데이터셋 없음")
-            else
-                for _, row in ipairs(ds:GetAllRow()) do
-                    local id = row:GetItem("choiceId")
-                    if id ~= nil and id ~= "" then
-                        table.insert(self.statChoiceCache, {
-                            choiceId = id,
-                            name = row:GetItem("name"),
-                            stat = row:GetItem("stat"),
-                            modType = row:GetItem("modType"),
-                            value = tonumber(row:GetItem("value")) or 0,
-                            desc = row:GetItem("desc"),
-                            iconRuid = row:GetItem("iconRuid"),
-                        })
-                    end
-                end
-            end
-        end
-        return self:DeepCopy(self.statChoiceCache)
-    end
+    -- (StatChoiceDef 소비 로직 제거 — 능력치 카드는 패시브 스킬로 대체, SYS-GROWTH §4-3.
+    --  데이터셋 파일은 밸런스 참고 자산으로 보존)
 
     -- ===== EquipDef =====
 

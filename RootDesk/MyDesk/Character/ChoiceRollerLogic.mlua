@@ -2,8 +2,16 @@
 script ChoiceRollerLogic extends Logic
     -- 레벨업 선택지 롤링 전담(무상태) — PlayerGrowthComponent에서 분리 (아키텍처 검수 2026-07-10).
     -- 성장 컴포넌트는 "언제 노출/커밋하는가"만, 여기는 "무엇이 후보인가"만 담당한다.
-    -- 새 선택지 종류(장비 등)는 Roll* 추가 + RollChoices 조립부 한 곳만 수정하면 된다.
+    -- 생성 규칙 (SYS-GROWTH §4): 이동 스킬 확정 등장(차수 도달 후 첫 3중1의 1자리) →
+    --   자리별 카테고리 가중(액티브60/패시브25/장비10/이동5) → 항목 추첨.
+    --   풀 필터 = 현재 차수 이하 · 동일 선택지 내 중복 금지 · Lv.3 만렙 제외.
+    -- 능력치/합성 카드는 폐기 — 능력치는 패시브 스킬이 대체, 합성은 만석 규칙 B안 후보(백로그).
     -- 카탈로그 접근은 전부 RO 게터 — 후보 필터링은 읽기 전용이라 deep-copy가 불필요.
+
+    property integer WeightActive = 60    -- 카테고리 가중 (잠정 · 논의 필요-16)
+    property integer WeightPassive = 25   -- 버프·패시브 (buff는 잠정 패시브 카테고리 취급 — P1 스킬 데이터 확정 대기)
+    property integer WeightEquip = 10
+    property integer WeightMove = 5       -- 확정 등장 미선택 후 재등장 확률
 
     @ExecSpace("ServerOnly")
     method void OnBeginPlay()
@@ -12,60 +20,25 @@ script ChoiceRollerLogic extends Logic
     end
 
     @ExecSpace("ServerOnly")
-    method string RollRarity()
-        -- 레어도 추첨: N60 / R28 / E10 / U2 (사양서 §3-2).
-        local r = _UtilLogic:RandomDouble() * 100
-        if r < 60 then return "N" end
-        if r < 88 then return "R" end
-        if r < 98 then return "E" end
-        return "U"
-    end
-
-    method integer RarityToTier(string rarity)
-        -- 레어도 -> 전직 차수 (마스터 테이블 §0 자동 규칙의 역방향).
-        if rarity == "N" then return 1 end
-        if rarity == "R" then return 2 end
-        if rarity == "E" then return 3 end
-        return 4
-    end
-
-    @ExecSpace("ServerOnly")
-    method table RollChoices(any jobComp, any loadout, any equipComp, integer count, number synthesisChance, number equipChance)
-        -- 레벨업 선택지 조립 (규칙서 §6.1 / 초안 §8 / 사양서 §3):
-        --   ⓪ 장비 후보(확률 등장 — 초안 §8 "스킬 90 / 장비 10", equipChance로 조절)
-        --   ① 합성 후보(있으면 확률 등장, 1슬롯) ② 능력치 후보(최소 1슬롯 보장 — 데드락 방지)
-        --   ③ 나머지는 스킬 후보. 전직은 선택지가 아니라 패널 하단 전용 버튼 (2026-07-10 재확정).
-        -- 스킬 후보가 고갈돼도 능력치로 채우므로 선택지가 항상 count개 구성된다. 마지막에 셔플.
+    method table RollChoices(any jobComp, any loadout, any equipComp, any runComp, integer count)
+        -- 레벨업 선택지 조립 (SYS-GROWTH §4-1): 이동 확정 등장 1자리 + 나머지 카테고리 가중 추첨.
+        -- 후보 부족 시 있는 만큼(GR-2 — 3→2→1), 전무하면 빈 목록(호출자가 스킵). 마지막에 셔플.
         local choices = {}
-        local usedStatIds = {}
-
-        local equip = self:RollEquipChoice(equipComp)
-        if equip ~= nil and _UtilLogic:RandomDouble() < equipChance then
-            table.insert(choices, equip)
-        end
-
-        local synth = self:RollSynthesisChoice(loadout)
-        if synth ~= nil and _UtilLogic:RandomDouble() < synthesisChance then
-            table.insert(choices, synth)
-        end
-
-        local statChoice = self:RollStatChoice(loadout, usedStatIds)
-        if statChoice ~= nil then
-            table.insert(choices, statChoice)
-        end
-
-        while #choices < count do
-            local skillChoice = self:RollSkillChoice(jobComp, loadout)
-            if skillChoice ~= nil then
-                table.insert(choices, skillChoice)
-            else
-                local filler = self:RollStatChoice(loadout, usedStatIds)
-                if filler == nil then break end   -- 스탯 종류까지 소진되면 그만 (count 미만 허용)
-                table.insert(choices, filler)
+        local usedKeys = {}
+        if jobComp.MoveOfferPending and runComp ~= nil and runComp.MoveSkillId == "" then
+            -- 확정 등장 (§4-5): 이 노출에서만 100% — 미선택 시 이후 일반 가중으로 재등장 (GR-4)
+            local mv = self:RollMoveChoice(jobComp, runComp)
+            if mv ~= nil then
+                table.insert(choices, mv)
+                usedKeys["move"] = true
             end
+            jobComp.MoveOfferPending = false
         end
-
-        -- 위치 편향 제거 셔플
+        while #choices < count do
+            local c = self:RollOneSlot(jobComp, loadout, equipComp, runComp, usedKeys)
+            if c == nil then break end
+            table.insert(choices, c)
+        end
         for i = #choices, 2, -1 do
             local j = _UtilLogic:RandomIntegerRange(1, i)
             choices[i], choices[j] = choices[j], choices[i]
@@ -74,24 +47,61 @@ script ChoiceRollerLogic extends Logic
     end
 
     @ExecSpace("ServerOnly")
-    method table FilterSkillCandidates(any jobComp, any loadout, integer tier)
-        -- 지정 차수 풀에서 획득 가능한 스킬 def 후보 (RollSkillChoice/OfTier 공용 필터).
-        -- 서포트(버프/패시브)는 레벨업·교체 없음 잠정 — 보유 중이거나 서포트 만석이면 제외.
-        -- 공격 스킬은 Lv.3 만렙 보유만 제외 (만석이어도 신규 포함 — 교체 플로우, 사양서 §3-4).
-        local isSupportFull = #loadout.supportSlots >= loadout.MaxSupportSlots
+    method any RollOneSlot(any jobComp, any loadout, any equipComp, any runComp, any usedKeys)
+        -- 자리 1개 추첨: 카테고리 가중 → 항목. 뽑힌 카테고리에 후보가 없으면 남은 카테고리로 재추첨.
+        local cats = {
+            { key = "active", w = self.WeightActive },
+            { key = "passive", w = self.WeightPassive },
+            { key = "equip", w = self.WeightEquip },
+            { key = "move", w = self.WeightMove },
+        }
+        while #cats > 0 do
+            local total = 0
+            for _, c in ipairs(cats) do total = total + c.w end
+            local r = _UtilLogic:RandomDouble() * total
+            local pickIdx = #cats
+            local acc = 0
+            for i, c in ipairs(cats) do
+                acc = acc + c.w
+                if r < acc then pickIdx = i break end
+            end
+            local cat = cats[pickIdx].key
+            local choice = nil
+            if cat == "active" then
+                choice = self:RollActiveChoice(jobComp, loadout, usedKeys)
+            elseif cat == "passive" then
+                choice = self:RollPassiveChoice(jobComp, loadout, usedKeys)
+            elseif cat == "equip" then
+                choice = self:RollEquipChoice(equipComp, usedKeys)
+            else
+                if usedKeys["move"] == nil and runComp ~= nil and runComp.MoveSkillId == "" then
+                    choice = self:RollMoveChoice(jobComp, runComp)
+                    if choice ~= nil then usedKeys["move"] = true end
+                end
+            end
+            if choice ~= nil then return choice end
+            table.remove(cats, pickIdx)   -- 후보 없는 카테고리 제외 후 재추첨
+        end
+        return nil
+    end
+
+    @ExecSpace("ServerOnly")
+    method table FilterActiveCandidates(any jobComp, any loadout, any usedKeys, integer tierExact)
+        -- 액티브(공격) 후보: 현재 차수 이하 전체 풀 (tierExact > 0이면 해당 차수만 — 전직 직후 보장용).
+        -- 신규 획득 + 보유 레벨업 동일 취급, Lv.3 만렙 제외, 동일 선택지 내 중복 금지.
         local cands = {}
-        for _, skillId in ipairs(_SkillCatalogLogic:GetSkillIdsByJobTier(jobComp.Job, tier)) do
-            local def = _SkillCatalogLogic:GetSkillRO(skillId)
-            if def.tier == tier and def.attackType ~= "movement" then   -- 이동기는 전직 자동 습득 — 선택지 미출현 (회의 §2)
-                if _SkillCatalogLogic:IsSupportSkill(def) then
-                    if loadout:FindSupportIndex(skillId) == 0 and not isSupportFull then
-                        table.insert(cands, def)
-                    end
-                else
-                    local slotIdx = loadout:FindSlotIndex(skillId)
-                    local maxed = slotIdx > 0 and loadout.attackSlots[slotIdx].level >= 3
-                    if not maxed then
-                        table.insert(cands, def)
+        local maxTier = jobComp.Tier
+        for tier = 1, maxTier do
+            if tierExact <= 0 or tier == tierExact then
+                for _, skillId in ipairs(_SkillCatalogLogic:GetSkillIdsByJobTier(jobComp.Job, tier)) do
+                    local def = _SkillCatalogLogic:GetSkillRO(skillId)
+                    if def.attackType ~= "movement" and not _SkillCatalogLogic:IsSupportSkill(def)
+                        and usedKeys[skillId] == nil then
+                        local slotIdx = loadout:FindSlotIndex(skillId)
+                        local maxed = slotIdx > 0 and loadout.attackSlots[slotIdx].level >= 3
+                        if not maxed then
+                            table.insert(cands, def)
+                        end
                     end
                 end
             end
@@ -100,8 +110,47 @@ script ChoiceRollerLogic extends Logic
     end
 
     @ExecSpace("ServerOnly")
+    method any RollActiveChoice(any jobComp, any loadout, any usedKeys)
+        -- 액티브 후보 1개. 후보 전무 시 nil.
+        local cands = self:FilterActiveCandidates(jobComp, loadout, usedKeys, 0)
+        if #cands == 0 then return nil end
+        local picked = cands[_UtilLogic:RandomIntegerRange(1, #cands)]
+        usedKeys[picked.skillId] = true
+        return self:BuildSkillChoice(picked, loadout)
+    end
+
+    @ExecSpace("ServerOnly")
+    method any RollPassiveChoice(any jobComp, any loadout, any usedKeys)
+        -- 패시브·버프 후보 1개 (미보유만 — 서포트는 레벨업 없음 잠정). 후보 전무 시 nil.
+        local cands = {}
+        for tier = 1, jobComp.Tier do
+            for _, skillId in ipairs(_SkillCatalogLogic:GetSkillIdsByJobTier(jobComp.Job, tier)) do
+                local def = _SkillCatalogLogic:GetSkillRO(skillId)
+                if _SkillCatalogLogic:IsSupportSkill(def) and usedKeys[skillId] == nil
+                    and loadout:FindSupportIndex(skillId) == 0
+                    and #loadout.supportSlots < loadout.MaxSupportSlots then
+                    table.insert(cands, def)
+                end
+            end
+        end
+        if #cands == 0 then return nil end
+        local picked = cands[_UtilLogic:RandomIntegerRange(1, #cands)]
+        usedKeys[picked.skillId] = true
+        return self:BuildSkillChoice(picked, loadout)
+    end
+
+    @ExecSpace("ServerOnly")
+    method any RollSkillChoiceOfTier(any jobComp, any loadout, integer tier)
+        -- 지정 차수 풀에서만 액티브 후보 1개 — 전직 직후 "새 차수 스킬 1장 보장"용 (§4-4 차수 가중의 스텁).
+        local cands = self:FilterActiveCandidates(jobComp, loadout, {}, tier)
+        if #cands == 0 then return nil end
+        return self:BuildSkillChoice(cands[_UtilLogic:RandomIntegerRange(1, #cands)], loadout)
+    end
+
+    @ExecSpace("ServerOnly")
     method any BuildSkillChoice(any picked, any loadout)
         -- 스킬 def -> 선택지 카드. 보유 중이면 "강화" 표기, 만석 신규면 교체 힌트 (표기 규칙 단일 지점).
+        -- (만석 규칙은 논의 필요-01 A/B 미확정 — 현행 교체 플로우 잠정 유지)
         if _SkillCatalogLogic:IsSupportSkill(picked) then
             return { kind = "skill", skillId = picked.skillId, name = picked.name,
                 rarity = picked.rarity, iconRuid = picked.iconRuid, desc = picked.desc }
@@ -122,107 +171,34 @@ script ChoiceRollerLogic extends Logic
     end
 
     @ExecSpace("ServerOnly")
-    method any RollSkillChoice(any jobComp, any loadout)
-        -- 스킬 후보 1개: 레어도 추첨 -> 직업·차수 풀. 후보 부족 시 차수 하향 폴백. 후보 전무 시 nil.
-        local tier = self:RarityToTier(self:RollRarity())
-        if tier > jobComp.Tier then tier = jobComp.Tier end
-        while tier >= 1 do
-            local cands = self:FilterSkillCandidates(jobComp, loadout, tier)
-            if #cands > 0 then
-                return self:BuildSkillChoice(cands[_UtilLogic:RandomIntegerRange(1, #cands)], loadout)
+    method any RollMoveChoice(any jobComp, any runComp)
+        -- 이동 스킬 카드 (SYS-GROWTH §4-5): 직업의 현재 차수 이하 movement 스킬 1종. 보유 후 풀 제외.
+        if runComp == nil or runComp.MoveSkillId ~= "" then return nil end
+        for tier = jobComp.Tier, 1, -1 do
+            for _, skillId in ipairs(_SkillCatalogLogic:GetSkillIdsByJobTier(jobComp.Job, tier)) do
+                local def = _SkillCatalogLogic:GetSkillRO(skillId)
+                if def.attackType == "movement" then
+                    return { kind = "moveSkill", skillId = def.skillId, name = def.name,
+                        rarity = "이동", iconRuid = def.iconRuid, desc = def.desc }
+                end
             end
-            tier = tier - 1
         end
         return nil
     end
 
     @ExecSpace("ServerOnly")
-    method any RollSkillChoiceOfTier(any jobComp, any loadout, integer tier)
-        -- 지정 차수 풀에서만 후보 1개 (하향 폴백 없음) — 전직 직후 "새 차수 스킬 1장 보장"용.
-        local cands = self:FilterSkillCandidates(jobComp, loadout, tier)
-        if #cands == 0 then return nil end
-        return self:BuildSkillChoice(cands[_UtilLogic:RandomIntegerRange(1, #cands)], loadout)
-    end
-
-    @ExecSpace("ServerOnly")
-    method any RollStatChoice(any loadout, any usedIds)
-        -- 능력치 후보 1개: StatChoiceDef(공격력/크리 등) + 동적 "사거리 증가"(방향 종속 스킬 보유 시).
-        -- usedIds로 같은 선택지 세트 내 중복 방지.
-        local cands = {}
-        for _, def in ipairs(_SkillCatalogLogic:GetStatChoices()) do
-            if not usedIds[def.choiceId] then
-                table.insert(cands, { kind = "stat", choiceId = def.choiceId, name = def.name,
-                    rarity = "능력치", iconRuid = def.iconRuid, desc = def.desc,
-                    stat = def.stat, modType = def.modType, value = def.value })
-            end
-        end
-        for slotIdx, inst in ipairs(loadout.attackSlots) do
-            local skillDef = _SkillCatalogLogic:GetSkillRO(inst.skillId)
-            local pattern = skillDef ~= nil and _SkillCatalogLogic:GetRangePatternRO(skillDef.rangeId) or nil
-            if pattern ~= nil and pattern.dirDependent then
-                local choiceId = "rangeUp:" .. tostring(slotIdx)
-                if not usedIds[choiceId] then
-                    table.insert(cands, { kind = "skillTag", choiceId = choiceId,
-                        name = skillDef.name .. " 사거리 증가", rarity = "능력치",
-                        iconRuid = skillDef.iconRuid,
-                        desc = skillDef.name .. "의 사거리가 1칸 늘어난다",
-                        slotIndex = slotIdx, tagId = "rangeUp" })
-                end
-            end
-        end
-        if #cands == 0 then return nil end
-        local picked = cands[_UtilLogic:RandomIntegerRange(1, #cands)]
-        usedIds[picked.choiceId] = true
-        return picked
-    end
-
-    @ExecSpace("ServerOnly")
-    method any RollEquipChoice(any equipComp)
-        -- 미보유 장비 중 랜덤 1개를 장비 카드로. 전부 보유했으면 nil.
+    method any RollEquipChoice(any equipComp, any usedKeys)
+        -- 미보유 장비 중 랜덤 1개를 장비 카드로. 전부 보유했으면 nil. 획득 즉시 자동 적용, 판 종료 소멸.
         local cands = {}
         for _, def in ipairs(_SkillCatalogLogic:GetEquipDefs()) do
-            if not equipComp:HasEquip(def.equipId) then
+            if not equipComp:HasEquip(def.equipId) and usedKeys[def.equipId] == nil then
                 table.insert(cands, def)
             end
         end
         if #cands == 0 then return nil end
         local picked = cands[_UtilLogic:RandomIntegerRange(1, #cands)]
+        usedKeys[picked.equipId] = true
         return { kind = "equip", equipId = picked.equipId, name = picked.name,
             rarity = "장비", iconRuid = picked.iconRuid, desc = picked.desc }
-    end
-
-    @ExecSpace("ServerOnly")
-    method any RollSynthesisChoice(any loadout)
-        -- 보유 공격 스킬 중 "재료에 이식 가능 태그가 있는" (타겟, 재료) 쌍을 랜덤 1개 골라 합성 선택지로.
-        local slots = loadout.attackSlots
-        if #slots < 2 then return nil end
-        local pairs_ = {}
-        for t = 1, #slots do
-            for s = 1, #slots do
-                if t ~= s and #_SkillInstanceLogic:GetTransferablePool(slots[s]) > 0 then
-                    table.insert(pairs_, { t = t, s = s })
-                end
-            end
-        end
-        if #pairs_ == 0 then return nil end
-        local pick = pairs_[_UtilLogic:RandomIntegerRange(1, #pairs_)]
-        local targetDef = _SkillCatalogLogic:GetSkillRO(slots[pick.t].skillId)
-        local sourceDef = _SkillCatalogLogic:GetSkillRO(slots[pick.s].skillId)
-        -- 이식될 태그를 카드에 확정 표기 (전부 승계 규칙이라 목록이 확정적 — 가독성 개선)
-        local tagNames = ""
-        for _, tagId in ipairs(_SkillInstanceLogic:GetTransferablePool(slots[pick.s])) do
-            local tagDef = _SkillCatalogLogic:GetTagDefRO(tagId)
-            if tagNames ~= "" then tagNames = tagNames .. ", " end
-            tagNames = tagNames .. (tagDef ~= nil and tagDef.name or tagId)
-        end
-        return {
-            kind = "synthesis",
-            targetIndex = pick.t,
-            sourceIndex = pick.s,
-            name = targetDef.name .. " + " .. sourceDef.name,
-            rarity = "합성",
-            iconRuid = targetDef.iconRuid,
-            desc = "[" .. tagNames .. "] 태그를 " .. targetDef.name .. "에 이식\n(같은 태그는 ×2로 중첩)\n재료 " .. sourceDef.name .. " 소멸",
-        }
     end
 end

@@ -7,17 +7,22 @@ script InGameSlotController extends Component
     property ButtonComponent btnSlot1 = "0f0ad92f-512c-4b18-aed7-791fc6d89cf4"
     property ButtonComponent btnSlot2 = "4961a8e1-b056-44d5-a4ee-3817b03a789d"
     property ButtonComponent btnSlot3 = "36586d38-5990-4434-8430-ed31ab1b1cf0"
+    property ButtonComponent btnSlot4 = "3d2cfd3a-8960-4ac0-bd84-7af8d36d878e"   -- 슬롯 5 확장 (max_active_slots=5 — UUID는 빌더 bind 주입)
+    property ButtonComponent btnSlot5 = "f9732c25-ad6b-48d9-9385-398b50f7bedb"
     property SpriteGUIRendererComponent iconSlot1 = "fab3b71d-51ee-4a0e-9799-b9017b5cfb95"
     property SpriteGUIRendererComponent iconSlot2 = "b2aabdd6-7fbe-49fc-a0f2-11f4e928c764"
     property SpriteGUIRendererComponent iconSlot3 = "4b533667-50c0-439f-84c6-2453bf60b833"
+    property SpriteGUIRendererComponent iconSlot4 = "db647432-260f-4487-b13a-19e607c7b91b"
+    property SpriteGUIRendererComponent iconSlot5 = "7936e866-ed01-4ebc-a951-e2f45c5a28a9"
     property TextComponent supportText = "5a29452a-ff94-4efc-a6d7-ed88ec4e3175"
-    property ButtonComponent btnReroll = "72691e69-3bb6-422f-b3df-ca3f8e1840cc"
     property Entity tooltipPanel = "cab1dad2-856d-4633-9311-9d8babc10e29"
     property TextComponent tooltipText = "00e47582-8851-4915-b99e-699af661f063"
     property TextComponent ownedText = "6a3cd40a-e3c0-4bba-89c8-89a17a316e02"   -- 좌하단 보유 스킬·장비 목록 (UI설계 좌하단 영역)
-    property ButtonComponent btnAuto1 = "d8c1390b-f66e-47ae-a166-fae1d91061e7"   -- 슬롯별 자동 발동 토글 (회의 §3 — UUID는 빌더 bind 주입)
+    property ButtonComponent btnAuto1 = "d8c1390b-f66e-47ae-a166-fae1d91061e7"   -- 슬롯별 수동/자동 토글 (SYS-SKILLQUEUE §3)
     property ButtonComponent btnAuto2 = "73c8a157-0e07-48a7-bdbe-9598f23be121"
     property ButtonComponent btnAuto3 = "8e4f9ae9-9249-45be-9055-5cebfaee86fe"
+    property ButtonComponent btnAuto4 = "b8ca9018-e354-4076-9226-fbe90a86ec3d"
+    property ButtonComponent btnAuto5 = "f6d5877e-4a8d-478d-9c1f-083990a94a45"
 
     property integer orderSwapFirst = 0    -- 순서 변경 1차 선택 슬롯 (0=없음)
     property integer firingIndex = 0       -- 지금 발동 중인 순서 리스트 위치 (0=없음 — 강조용)
@@ -32,21 +37,25 @@ script InGameSlotController extends Component
         -- 버튼/호버 구독 (클로저는 handlers에 보관, OnEndPlay 해제).
         self.handlers = {}
         self.slotTooltips = {}
-        -- 슬롯 버튼 = 발동 순서 변경 (UI설계 ⑥): 두 슬롯을 차례로 탭하면 순서 교환
+        -- 슬롯 버튼 = 발동 순서 변경: 두 슬롯을 차례로 탭하면 순서 교환 (드래그 재정렬은 HUD 상세 소관 — 잠정 2탭 스왑)
         self:Wire(self.btnSlot1, function() self:OnSlotClicked(1) end)
         self:Wire(self.btnSlot2, function() self:OnSlotClicked(2) end)
         self:Wire(self.btnSlot3, function() self:OnSlotClicked(3) end)
-        self:Wire(self.btnReroll, self.OnRerollClicked)
+        self:Wire(self.btnSlot4, function() self:OnSlotClicked(4) end)
+        self:Wire(self.btnSlot5, function() self:OnSlotClicked(5) end)
         -- 슬롯 호버 -> 스킬 효과 툴팁 (ButtonStateChangeEvent.Hover — 개선 요청 2026-07-09)
         self:WireState(self.btnSlot1, function(ev) self:OnSlotState(1, ev.state) end)
         self:WireState(self.btnSlot2, function(ev) self:OnSlotState(2, ev.state) end)
         self:WireState(self.btnSlot3, function(ev) self:OnSlotState(3, ev.state) end)
-        -- 슬롯별 자동 발동 토글 (회의 §3 반자동): OFF 스킬은 체인이 멈추고 수동 발사 대기
+        self:WireState(self.btnSlot4, function(ev) self:OnSlotState(4, ev.state) end)
+        self:WireState(self.btnSlot5, function(ev) self:OnSlotState(5, ev.state) end)
+        -- 슬롯별 수동/자동 토글 (SYS-SKILLQUEUE §3): 수동 스킬 차례에 개입 창이 열린다
         self:Wire(self.btnAuto1, function() self:OnAutoToggleClicked(1) end)
         self:Wire(self.btnAuto2, function() self:OnAutoToggleClicked(2) end)
         self:Wire(self.btnAuto3, function() self:OnAutoToggleClicked(3) end)
+        self:Wire(self.btnAuto4, function() self:OnAutoToggleClicked(4) end)
+        self:Wire(self.btnAuto5, function() self:OnAutoToggleClicked(5) end)
         if isvalid(self.tooltipPanel) then self.tooltipPanel.Enable = false end
-        if isvalid(self.btnReroll) then self.btnReroll.Entity.Enable = false end
     end
 
     property any slotAutoFire = nil   -- [i] = 자동 발동 여부 (LoadoutSynced 수신 값 — 토글 시 반전 요청)
@@ -121,23 +130,22 @@ script InGameSlotController extends Component
     @ExecSpace("ClientOnly")
     method void RefreshSwapMark()
         -- 슬롯 배경색 갱신 — 우선순위: 발동 중(붉은 주황) > 순서 변경 1차 선택(금색) > 기본.
-        -- 선택 중에만 재추첨 버튼 노출 (사양서 §3-5).
-        local buttons = { self.btnSlot1, self.btnSlot2, self.btnSlot3 }
+        -- (태그 재추첨 버튼은 확장 백로그로 제거 — SYS-GROWTH v0.1)
+        local buttons = { self.btnSlot1, self.btnSlot2, self.btnSlot3, self.btnSlot4, self.btnSlot5 }
         for i, btn in ipairs(buttons) do
-            local sr = btn.Entity.SpriteGUIRendererComponent
-            if isvalid(sr) then
-                -- 우드 리본 스프라이트 위 곱연산 틴트 — 밝은 계열 사용 (v14 리스킨)
-                if i == self.firingIndex then
-                    sr.Color = Color(1.00, 0.45, 0.25, 1.0)
-                elseif i == self.orderSwapFirst then
-                    sr.Color = Color(1.00, 0.85, 0.45, 1.0)
-                else
-                    sr.Color = Color(1, 1, 1, 1)
+            if isvalid(btn) then
+                local sr = btn.Entity.SpriteGUIRendererComponent
+                if isvalid(sr) then
+                    -- 스프라이트 위 곱연산 틴트 — 밝은 계열 사용
+                    if i == self.firingIndex then
+                        sr.Color = Color(1.00, 0.45, 0.25, 1.0)
+                    elseif i == self.orderSwapFirst then
+                        sr.Color = Color(1.00, 0.85, 0.45, 1.0)
+                    else
+                        sr.Color = Color(1, 1, 1, 1)
+                    end
                 end
             end
-        end
-        if isvalid(self.btnReroll) then
-            self.btnReroll.Entity.Enable = self.orderSwapFirst > 0
         end
     end
 
@@ -145,20 +153,6 @@ script InGameSlotController extends Component
     handler OnSkillFiring(SkillFiringEvent event)
         -- 지금 발동 중인 스킬을 순서 리스트에서 강조 (0=체인 종료 -> 해제).
         self.firingIndex = event.orderIndex
-        self:RefreshSwapMark()
-    end
-
-    @ExecSpace("ClientOnly")
-    method void OnRerollClicked()
-        -- 선택 슬롯의 계승 태그 재추첨 요청 (전리품 소모·검증은 서버).
-        if self.orderSwapFirst == 0 then return end
-        local player = _UserService.LocalPlayer
-        if not isvalid(player) then return end
-        ---@type SkillLoadoutComponent
-        local loadout = player:GetComponent("script.SkillLoadoutComponent")
-        if loadout == nil then return end
-        loadout:RequestRerollTagByOrder(self.orderSwapFirst)
-        self.orderSwapFirst = 0
         self:RefreshSwapMark()
     end
 
@@ -192,13 +186,14 @@ script InGameSlotController extends Component
         self.orderSwapFirst = 0
         self:RefreshSwapMark()
         if self.slotAutoFire == nil then self.slotAutoFire = {} end
-        local marks = { "①", "②", "③" }
-        local buttons = { self.btnSlot1, self.btnSlot2, self.btnSlot3 }
-        local icons = { self.iconSlot1, self.iconSlot2, self.iconSlot3 }
-        local autoBtns = { self.btnAuto1, self.btnAuto2, self.btnAuto3 }
+        local marks = { "①", "②", "③", "④", "⑤" }
+        local buttons = { self.btnSlot1, self.btnSlot2, self.btnSlot3, self.btnSlot4, self.btnSlot5 }
+        local icons = { self.iconSlot1, self.iconSlot2, self.iconSlot3, self.iconSlot4, self.iconSlot5 }
+        local autoBtns = { self.btnAuto1, self.btnAuto2, self.btnAuto3, self.btnAuto4, self.btnAuto5 }
         for i, btn in ipairs(buttons) do
+            if not isvalid(btn) then break end
             local slot = event.slots[i]
-            -- 자동 토글 버튼: 스킬 있는 슬롯만 노출, 상태 표기 (회의 §3)
+            -- 수동/자동 토글 버튼: 스킬 있는 슬롯만 노출, 상태 표기 (SYS-SKILLQUEUE §3)
             local autoBtn = autoBtns[i]
             if isvalid(autoBtn) then
                 autoBtn.Entity.Enable = slot ~= nil

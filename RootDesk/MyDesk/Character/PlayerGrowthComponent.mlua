@@ -9,11 +9,9 @@ script PlayerGrowthComponent extends Component
     @Sync property integer NextExp = 0   -- 다음 레벨 필요 EXP (HUD 프로필 표시용 — 곡선은 서버 데이터셋)
 
     property any pendingChoices = nil   -- 노출 중 선택지 [{kind,skillId,name,rarity,...}] (nil=없음)
-    property any pendingReplace = nil   -- 만석 교체 대기 중인 신규 스킬 선택지 (nil=없음, 사양서 §3-4)
-    property boolean levelUpHold = false -- 공격 해소 중 레벨업 보류 — 체인 종료 후 일괄 판정 (2026-07-05 사용자 확정)
-    property number EquipChance = 0.1   -- 장비 카드 등장 확률 (초안 §8 "스킬 90/장비 10" — 값만 바꿔 조절)
-    property integer ChoiceCount = 3    -- 기본 선택지 수 (전리품 확장 시 5)
-    property number SynthesisChance = 1 -- 합성 선택지 등장 확률 (기획 "확률적" — 테스트 동안 100%)
+    property any pendingReplace = nil   -- 만석 교체 대기 중인 신규 스킬 선택지 (nil=없음 — 만석 규칙 논의-01 잠정)
+    property boolean levelUpHold = false -- 큐 실행 중 레벨업 보류 — S4에서 일괄 판정 (SYS-CORELOOP CL-7)
+    property integer ChoiceCount = 3    -- 기본 선택지 수 (3중1 — SYS-GROWTH §4-2. 확장 3→5는 백로그)
     property string AdvanceFxRuid = "46fc31761f6b4b26be2d66e4530ba941"   -- 전직 연출 (아바타 부착)
 
     @ExecSpace("ServerOnly")
@@ -92,12 +90,14 @@ script PlayerGrowthComponent extends Component
 
     @ExecSpace("ServerOnly")
     method table RollChoicesNow()
-        -- 선택지 롤링 위임 — 후보 구성 규칙은 전부 ChoiceRollerLogic(무상태), 여기는 정책 값만 공급.
+        -- 선택지 롤링 위임 — 후보 구성 규칙은 전부 ChoiceRollerLogic(무상태), 여기는 참조만 공급.
+        -- 카테고리 가중(액티브60/패시브25/장비10/이동5)·이동 확정 등장은 롤러 소관 (SYS-GROWTH §4).
         ---@type SkillLoadoutComponent
         local loadout = self.Entity:GetComponent("script.SkillLoadoutComponent")
         local equipComp = self.Entity:GetComponent("script.PlayerEquipComponent")
+        local runComp = self.Entity:GetComponent("script.PlayerRunComponent")
         return _ChoiceRollerLogic:RollChoices(self:GetJobComponent(), loadout, equipComp,
-            self.ChoiceCount, self.SynthesisChance, self.EquipChance)
+            runComp, self.ChoiceCount)
     end
 
     @ExecSpace("ServerOnly")
@@ -148,25 +148,23 @@ script PlayerGrowthComponent extends Component
         ---@type SkillLoadoutComponent
         local loadout = self.Entity:GetComponent("script.SkillLoadoutComponent")
         local resultStatus
-        if choice.kind == "synthesis" then
-            local transferred = loadout:Synthesize(choice.targetIndex, choice.sourceIndex)
-            resultStatus = transferred ~= nil and "synthesized" or "synthesisFailed"
-            choice.skillId = choice.name   -- 커밋 로그/이벤트 표기용
-        elseif choice.kind == "stat" then
-            ---@type PlayerStatComponent
-            local statComp = self.Entity:GetComponent("script.PlayerStatComponent")
-            statComp:ApplyModifiers({ { stat = choice.stat, type = choice.modType, value = choice.value,
-                source = "choice:" .. choice.choiceId .. ":lv" .. tostring(self.Level) } })
-            resultStatus = "statApplied"
-            choice.skillId = choice.name
-        elseif choice.kind == "equip" then
+        if choice.kind == "equip" then
+            -- 장비: 획득 즉시 자동 적용, 장착 조작 없음 (SYS-GROWTH §5)
             ---@type PlayerEquipComponent
             local equipComp = self.Entity:GetComponent("script.PlayerEquipComponent")
             resultStatus = (equipComp ~= nil and equipComp:AcquireEquip(choice.equipId)) and "equipped" or "equipFailed"
             choice.skillId = choice.name
-        elseif choice.kind == "skillTag" then
-            resultStatus = loadout:AddTagToSlot(choice.slotIndex, choice.tagId) and "tagApplied" or "tagFailed"
-            choice.skillId = choice.name
+        elseif choice.kind == "moveSkill" then
+            -- 이동 스킬: 이동 버튼 활성화, 판당 3회 (SYS-GROWTH §5 / SYS-SKILLQUEUE §6). 보유 후 풀 제외.
+            local def = _SkillCatalogLogic:GetSkillRO(choice.skillId)
+            ---@type PlayerRunComponent
+            local runComp = self.Entity:GetComponent("script.PlayerRunComponent")
+            if def ~= nil and runComp ~= nil then
+                runComp:GrantMoveSkill(def)
+                resultStatus = "moveAcquired"
+            else
+                resultStatus = "error"
+            end
         else
             resultStatus = loadout:AcquireSkill(choice.skillId)
             if resultStatus == "full" then
@@ -213,13 +211,8 @@ script PlayerGrowthComponent extends Component
             return "advanceFailed"
         end
         self:PlayAdvanceFx()
-        -- 이동기 자동 습득 (회의 §2: 마2 텔레포트/궁·도3 플래시 점프/전4 돌진 — 선택지 미출현)
-        local moveDef = _SkillCatalogLogic:GetMoveSkillForJobTier(jobComp.Job, jobComp.Tier)
-        if moveDef ~= nil then
-            ---@type PlayerRunComponent
-            local runComp = self.Entity:GetComponent("script.PlayerRunComponent")
-            if runComp ~= nil then runComp:GrantMoveSkill(moveDef) end
-        end
+        -- 새 차수 이동 스킬 확정 등장 예약 (SYS-GROWTH §4-5 — 미보유 시 다음 선택지 1자리 100%)
+        jobComp.MoveOfferPending = true
         self.pendingChoices = nil
         local advanceName = tostring(jobComp.Tier) .. "차 전직"
         local ev = ChoiceCommittedEvent()
@@ -241,7 +234,12 @@ script PlayerGrowthComponent extends Component
         if not hasNewTier then
             local tierPick = _ChoiceRollerLogic:RollSkillChoiceOfTier(jobComp, loadout, jobComp.Tier)
             if tierPick ~= nil then
-                choices[#choices] = tierPick
+                -- 이동 확정 카드(§4-5)를 덮어쓰지 않는 슬롯에 배치 (검수 반영)
+                local replaceIdx = #choices
+                for i = #choices, 1, -1 do
+                    if choices[i].kind ~= "moveSkill" then replaceIdx = i break end
+                end
+                choices[replaceIdx] = tierPick
             end
         end
         self:PresentChoices(choices, false)

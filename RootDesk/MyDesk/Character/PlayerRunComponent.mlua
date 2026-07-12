@@ -5,11 +5,13 @@ script PlayerRunComponent extends Component
     -- 이어하기(RestoreRun)는 세이브 스키마를 보드와 합의 후 후속 구현 (설계서 §6).
 
     @Sync property boolean RunActive = false
-    @Sync property string MoveSkillId = ""     -- 이동기 (전직 자동 습득 — 회의 §2: 마2 텔레포트/궁·도3 플점/전4 돌진)
-    @Sync property string MoveSkillName = ""   -- 이동기 한글명 (카탈로그는 서버 전용이라 HUD 표시용 동기화)
-    @Sync property integer MoveCharges = 0     -- 이동기 남은 회수 (판당 제한 — 전술적 희소 자원)
+    @Sync property string MoveSkillId = ""     -- 이동 스킬 (레벨업 선택지 확정 등장으로 획득 — SYS-GROWTH §4-5)
+    @Sync property string MoveSkillName = ""   -- 이동 스킬 한글명 (카탈로그는 서버 전용이라 HUD 표시용 동기화)
+    @Sync property integer MoveCharges = 0     -- 이동 스킬 남은 회수 (판당 제한 — SYS-SKILLQUEUE §6)
+    @Sync property integer RerollCharges = 0   -- 젠 리롤 남은 회수 (S2 세팅 전용 — SYS-CORELOOP §5)
 
-    property integer MoveChargesPerRun = 3    -- 판당 이동기 회수 (회의 §2 예시값 — 밸런스 조절용)
+    property integer MoveChargesPerRun = 3    -- 판당 이동 스킬 회수 (잠정값 — SYS-SKILLQUEUE §6)
+    property integer RerollChargesPerRun = 1  -- 판당 젠 리롤 회수 (제안값 — SYS-CORELOOP §5, 아웃게임 능력치 연동 여지)
     property any run = nil            -- 보드 run 핸들 (run.board 점유 상태)
     property any boardDef = nil       -- BoardDef (deep-copy본)
     property any cameraAnchor = nil   -- 고정 카메라 앵커 엔티티 (런 동안 유지)
@@ -64,6 +66,7 @@ script PlayerRunComponent extends Component
         self.MoveSkillId = ""
         self.MoveSkillName = ""
         self.MoveCharges = self.MoveChargesPerRun
+        self.RerollCharges = self.RerollChargesPerRun
         self:SetFreeMoveEnabled(false)   -- 아바타 = 보드 말(I-3): WASD 자유 이동 잠금, 이동은 젠 재배치로만
         self:SetupFixedCamera()          -- 카메라 고정: 보드 전체 뷰 (재배치 시 카메라 이동 없음)
         self.RunActive = true
@@ -141,22 +144,30 @@ script PlayerRunComponent extends Component
 
     @ExecSpace("ServerOnly")
     method void GrantMoveSkill(any def)
-        -- 이동기 습득 (전직 훅에서 호출). 직업당 1종 — 덮어쓰기 없음 전제(차수별 이동기는 직업별 1개).
+        -- 이동 스킬 습득 (레벨업 선택지 커밋에서 호출 — SYS-GROWTH §5). 보유 후 풀 제외, 레벨 없음(P0).
         self.MoveSkillId = def.skillId
         self.MoveSkillName = def.name
-        log("[PlayerRun] 이동기 습득: " .. def.name .. " (판당 " .. tostring(self.MoveCharges) .. "회)")
+        log("[PlayerRun] 이동 스킬 습득: " .. def.name .. " (판당 " .. tostring(self.MoveCharges) .. "회)")
     end
 
     @ExecSpace("ServerOnly")
     method void SpendMoveCharge()
-        -- 이동기 회수 차감 (사용 검증은 호출자 — TurnFlowStub.RequestMoveCommit).
+        -- 이동 스킬 회수 차감 (사용 검증은 호출자 — TurnFlowStub.RequestInterventionMove).
         if self.MoveCharges > 0 then
             self.MoveCharges = self.MoveCharges - 1
         end
     end
 
     @ExecSpace("ServerOnly")
-    method any ResolveSingleSkill(any inst, string facing, any playerCell, boolean applyCooldown, number dmgMult)
+    method void SpendRerollCharge()
+        -- 젠 리롤 회수 차감 (사용 검증은 호출자 — TurnFlowStub.RequestGenReroll).
+        if self.RerollCharges > 0 then
+            self.RerollCharges = self.RerollCharges - 1
+        end
+    end
+
+    @ExecSpace("ServerOnly")
+    method any ResolveSingleSkill(any inst, string facing, any playerCell, boolean applyCooldown)
         -- 단일 스킬 1회 발동 해석 (통합 지점 I-1 — 순차 발동): 젠 플로우가 cast 단위로 호출.
         -- 앞 발동의 처치가 보드에 반영된 뒤 호출되므로 죽은 적은 다음 발동 타겟에서 자연 제외된다.
         -- 연타(castAdd) 스킬은 마지막 cast에만 applyCooldown=true — 중간 cast에서 쿨다운이 걸리면
@@ -171,7 +182,6 @@ script PlayerRunComponent extends Component
             order = { inst },
             playerCell = playerCell,
             facing = facing,
-            dmgMult = dmgMult,   -- AI 자동 조작 효율 패널티 (nil = 1 — 회의 §3)
         }
         local result = _CombatResolveLogic:ResolveAttack(ctx, self.run, self.boardDef)
         if applyCooldown then

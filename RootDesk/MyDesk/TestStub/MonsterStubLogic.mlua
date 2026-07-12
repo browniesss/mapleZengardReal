@@ -1,12 +1,29 @@
 @Logic
 script MonsterStubLogic extends Logic
-    -- [임시 스텁] 테스트용 몬스터: 스폰(보드 unit 점유+비주얼), HP 관리, HitPlan 소비(사망/EXP/전리품).
-    -- 몬스터 시스템은 별도 담당자 예정 — 이 파일과 TestStub/ 폴더째 삭제하면 제거 완료되도록
-    -- 캐릭터/보드 코드에 몬스터 지식을 두지 않고 여기에 격리한다. 상태는 run.flow에만 보관(무상태 Logic).
+    -- [임시 스텁] 테스트용 몬스터: 스폰(보드 unit 점유+비주얼), HP 관리, HitPlan 소비(사망/EXP/전리품),
+    -- 상태이상 P0 3종(스턴/빙결/중독 — SYS-COMBAT §6) 구조. 몬스터 시스템은 별도 담당자 예정 —
+    -- 이 파일과 TestStub/ 폴더째 삭제하면 제거 완료되도록 캐릭터/보드 코드에 몬스터 지식을 두지 않고
+    -- 여기에 격리한다. 상태는 run.flow에만 보관(무상태 Logic).
+    -- 몬스터 방해 스킬 카운터(SYS-COMBAT §7)는 몬스터 담당 소관 — 스턴·빙결 중 카운터 정지 계약만
+    -- monsterStatus로 노출한다.
+    --
+    -- ▶ 정식 몬스터 시스템 이관 체크리스트 (폴더 삭제 전 아래 소비 계약을 승계):
+    --   1. ApplyHitPlan(run, def, hits, playerEntity) — HitPlan 소비: hits[i].damages 배열이 대미지의
+    --      단일 진실(타격별 크리 개별 반영), 처치 시 EXP·전리품 지급(PlayerGrowth.AddExp/PlayerJob.AddLoot)
+    --   2. TickPoisonDoT(run, def, playerEntity) — S1 서브스텝 ① (TurnFlowStub.RequestZen이 호출)
+    --   3. TickStatusDurations(run) — S4 마지막 일괄 해제 (TurnFlowStub.FireNextSkill이 호출)
+    --   4. IsCounterFrozen(run, instanceId) — 스킬 카운터 정지 판정 (스턴·빙결 — 몬스터 카운터 구현이 소비)
+    --   5. SpawnWave(run, def, count) — GameStartLogic.OnBoardReady·RequestZen이 호출
+    --   6. run.flow.monsterHp / monsterStatus — 이 Logic이 소유하는 상태 (스키마는 EnsureFlow)
 
     property number StubHp = 10          -- 주황버섯 예시 HP (초안 기획서 §14)
     property integer ExpPerKill = 3      -- 데모용: 4마리 처치 = 12 EXP (Lv1 필요 10)
     property integer LootPerKill = 1
+    property number FreezeAmp = 1.3      -- 빙결: 받는 모든 피해 +30% (잠정 — SYS-COMBAT §6)
+    property number PoisonCoef = 0.3     -- 중독 DoT = 시전 시점 ATK × 0.3 (잠정)
+    property integer StunTurns = 1       -- 스턴 지속 젠 (잠정)
+    property integer FreezeTurns = 1     -- 빙결 지속 젠 (잠정)
+    property integer PoisonTurns = 3     -- 중독 지속 젠 (잠정)
 
     -- 주황버섯 리소스 팩 mob/1210102.img (msw-search로 확보)
     property string StandRuid = "a95cfed2c8fe4d2cb64cbb62db051f92"   -- stand animationclip (루프 재생)
@@ -14,85 +31,15 @@ script MonsterStubLogic extends Logic
 
     @ExecSpace("ServerOnly")
     method void EnsureFlow(any run)
-        -- run.flow(스텁 상태) 보장: monsterHp[instanceId->hp] + monsterStun[instanceId->남은 턴].
+        -- run.flow(스텁 상태) 보장: monsterHp[id->hp] + monsterStatus[id->{stun,freeze,poison,poisonDmg}].
         if run.flow == nil then run.flow = {} end
         if run.flow.monsterHp == nil then run.flow.monsterHp = {} end
-        if run.flow.monsterStun == nil then run.flow.monsterStun = {} end
-    end
-
-    @ExecSpace("ServerOnly")
-    method void ApplyStun(any run, string instanceId, integer turns, Entity visual)
-        -- 스턴 표기 (회의 §2 벽궁): 스텁 몬스터는 자체 행동이 없어 실효과는 정식 몬스터/보스 도입 시
-        -- 이 상태값(run.flow.monsterStun)을 소비하는 계약만 남긴다. 비주얼은 회색 틴트.
-        self:EnsureFlow(run)
-        run.flow.monsterStun[instanceId] = turns
-        if isvalid(visual) then
-            local sr = visual.SpriteRendererComponent
-            if isvalid(sr) then sr.Color = Color(0.55, 0.55, 0.62, 1) end
-        end
-        log("[MonsterStub] 스턴: " .. tostring(instanceId) .. " (" .. tostring(turns) .. "턴)")
-    end
-
-    @ExecSpace("ServerOnly")
-    method void PushMonster(any run, any def, any fromCell, string facing, Entity playerEntity, number slamCoef)
-        -- 돌진 밀침 (회의 §2): 밀 곳이 비었으면 1칸 이동, 막혔으면(경계/블록/점유) 벽궁 —
-        -- 추가 데미지(ATK×slamCoef) + 스턴 1턴. 스텁 이동은 비주얼 재스폰으로 처리.
-        self:EnsureFlow(run)
-        local board = run.board
-        local rec = _BoardService:GetCellLayer(board, fromCell.col, fromCell.row, "unit")
-        if rec == nil or rec.payload == nil or rec.payload.occupantKind ~= "monster" then return end
-        local dc = 0
-        local dr = 0
-        if facing == "UP" then dr = 1 elseif facing == "DOWN" then dr = -1
-        elseif facing == "RIGHT" then dc = 1 else dc = -1 end
-        local toCol = fromCell.col + dc
-        local toRow = fromCell.row + dr
-        if _BoardService:CanPlaceUnit(def, board, toCol, toRow) then
-            local hp = run.flow.monsterHp[rec.instanceId] or self.StubHp   -- HP 미추적 몬스터 폴백 (검수 반영)
-            local stun = run.flow.monsterStun[rec.instanceId]
-            if isvalid(rec.entity) then rec.entity:Destroy() end
-            _BoardService:Release(board, fromCell.col, fromCell.row, "unit", rec.instanceId)
-            run.flow.monsterHp[rec.instanceId] = nil
-            run.flow.monsterStun[rec.instanceId] = nil
-            local payload = { occupantId = "stubmon", occupantKind = "monster" }
-            local newId = _BoardService:TryOccupy(def, board, toCol, toRow, "unit", payload)
-            if newId == nil then
-                log_error("[MonsterStub] 밀침 점유 실패 — 몬스터 소실 방지 위해 원 칸 복구")
-                newId = _BoardService:TryOccupy(def, board, fromCell.col, fromCell.row, "unit", payload)
-                toCol = fromCell.col
-                toRow = fromCell.row
-            end
-            if newId ~= nil then
-                _BoardService:SpawnLayerVisual(run, def, toCol, toRow, "unit", payload)
-                local newRec = _BoardService:GetCellLayer(board, toCol, toRow, "unit")
-                if newRec ~= nil and isvalid(newRec.entity) then
-                    local sr = newRec.entity.SpriteRendererComponent
-                    if isvalid(sr) then sr.SpriteRUID = self.StandRuid end
-                end
-                run.flow.monsterHp[newId] = hp
-                run.flow.monsterStun[newId] = stun
-            end
-            log("[MonsterStub] 밀침: (" .. fromCell.col .. "," .. fromCell.row .. ") -> ("
-                .. toCol .. "," .. toRow .. ")")
-        else
-            -- 벽궁(Wall-Slam): 이동 없음 — 추가 데미지 + 스턴
-            ---@type PlayerStatComponent
-            local statComp = playerEntity:GetComponent("script.PlayerStatComponent")
-            local atk = statComp ~= nil and statComp:GetStatsSnapshot().atk or 10
-            local hit = { skillId = "WAR_RUSH", cell = { col = fromCell.col, row = fromCell.row },
-                occupantId = rec.payload.occupantId, instanceId = rec.instanceId,
-                hitCount = 1, damagePerHit = atk * (slamCoef or 1.5), isCrit = false,
-                element = "none", elementStacks = 0, defPen = 0, onHitStatus = "stun" }
-            self:ApplyStun(run, rec.instanceId, 1, rec.entity)
-            self:ApplyHitPlan(run, def, { hit }, playerEntity)
-            log("[MonsterStub] 벽궁! (" .. fromCell.col .. "," .. fromCell.row .. ") 추가 데미지 "
-                .. tostring(hit.damagePerHit))
-        end
+        if run.flow.monsterStatus == nil then run.flow.monsterStatus = {} end
     end
 
     @ExecSpace("ServerOnly")
     method integer SpawnWave(any run, any def, integer count)
-        -- 빈 칸에 몬스터 count마리 스폰 (빈 칸 부족 시 있는 만큼 — 규칙서 §4.1). 스폰 수 반환.
+        -- 빈 칸에 몬스터 count마리 스폰 (빈 칸 부족 시 있는 만큼 — SYS-SPAWN §2). 스폰 수 반환.
         self:EnsureFlow(run)
         local board = run.board
         local cells = _BoardService:ResolvePlacement(run, def, { place = "random", count = count }, "unit")
@@ -104,7 +51,6 @@ script MonsterStubLogic extends Logic
                 _BoardService:SpawnLayerVisual(run, def, cell[1], cell[2], "unit", payload)
                 local rec = _BoardService:GetCellLayer(board, cell[1], cell[2], "unit")
                 if rec ~= nil and isvalid(rec.entity) then
-                    -- 주황버섯 stand 애니메이션 적용 (animationclip RUID는 SpriteRUID에서 루프 재생)
                     local sr = rec.entity.SpriteRendererComponent
                     if isvalid(sr) then sr.SpriteRUID = self.StandRuid end
                 end
@@ -118,35 +64,144 @@ script MonsterStubLogic extends Logic
     end
 
     @ExecSpace("ServerOnly")
+    method void ApplyOnHitStatus(any run, string instanceId, string statusId, number casterAtk, Entity visual)
+        -- 온히트 상태이상 적용 (SYS-COMBAT §6): 명중 시 100% 적용(확률 필드 예약), 재적용=지속 리셋.
+        -- 적용 턴 보호: 지속 +1로 저장 — 그 턴 S4 일괄 차감 후에도 명시 지속만큼 온전히 남는다.
+        self:EnsureFlow(run)
+        local st = run.flow.monsterStatus[instanceId]
+        if st == nil then
+            st = {}
+            run.flow.monsterStatus[instanceId] = st
+        end
+        if statusId == "stun" then
+            st.stun = self.StunTurns + 1
+            if isvalid(visual) then
+                local sr = visual.SpriteRendererComponent
+                if isvalid(sr) then sr.Color = Color(0.6, 0.6, 0.66, 1) end
+            end
+        elseif statusId == "freeze" then
+            st.freeze = self.FreezeTurns + 1
+            if isvalid(visual) then
+                local sr = visual.SpriteRendererComponent
+                if isvalid(sr) then sr.Color = Color(0.55, 0.75, 1, 1) end
+            end
+        elseif statusId == "poison" then
+            st.poison = self.PoisonTurns + 1
+            st.poisonDmg = casterAtk * self.PoisonCoef   -- 시전 시점 ATK 기준 고정
+            if isvalid(visual) then
+                local sr = visual.SpriteRendererComponent
+                if isvalid(sr) then sr.Color = Color(0.6, 0.9, 0.5, 1) end
+            end
+        else
+            return
+        end
+        log("[MonsterStub] 상태이상 적용: " .. statusId .. " -> " .. tostring(instanceId))
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean IsCounterFrozen(any run, string instanceId)
+        -- 몬스터 스킬 카운터 정지 여부 (스턴·빙결 — SYS-COMBAT §7 소비 계약. 몬스터 담당이 사용).
+        self:EnsureFlow(run)
+        local st = run.flow.monsterStatus[instanceId]
+        if st == nil then return false end
+        return (st.stun ~= nil and st.stun > 0) or (st.freeze ~= nil and st.freeze > 0)
+    end
+
+    @ExecSpace("ServerOnly")
+    method void TickStatusDurations(any run)
+        -- S4 마지막(다음 젠 터치 직전) 일괄 해제 판정: 활성 상태이상 잔여 −1, 0이면 해제 (SYS-COMBAT §6-1).
+        self:EnsureFlow(run)
+        for instanceId, st in pairs(run.flow.monsterStatus) do
+            local active = false
+            for _, key in ipairs({ "stun", "freeze", "poison" }) do
+                if st[key] ~= nil and st[key] > 0 then
+                    st[key] = st[key] - 1
+                    if st[key] > 0 then active = true end
+                end
+            end
+            if not active then
+                run.flow.monsterStatus[instanceId] = nil
+                -- 해제 비주얼 복원 (칸 조회 비용 대신 다음 피격/스폰 시 자연 복원 — 스텁 수준)
+            end
+        end
+    end
+
+    @ExecSpace("ServerOnly")
+    method void TickPoisonDoT(any run, any def, Entity playerEntity)
+        -- S1 서브스텝 ① 중독 DoT (SYS-COMBAT §6): 매 젠 S1 시작 시 poisonDmg 피해, 처치도 정상 정산.
+        self:EnsureFlow(run)
+        local dots = {}
+        for instanceId, st in pairs(run.flow.monsterStatus) do
+            if st.poison ~= nil and st.poison > 0 and st.poisonDmg ~= nil then
+                table.insert(dots, instanceId)
+            end
+        end
+        for _, instanceId in ipairs(dots) do
+            local rec = self:FindMonsterCell(run, instanceId)
+            if rec ~= nil then
+                local st = run.flow.monsterStatus[instanceId]
+                local hit = { skillId = "POISON_DOT", cell = { col = rec.col, row = rec.row },
+                    occupantId = "stubmon", instanceId = instanceId,
+                    hitCount = 1, damages = { st.poisonDmg },
+                    isCrit = false, element = "poison", elementStacks = 0, defPen = 0, onHitStatus = "" }
+                self:ApplyHitPlan(run, def, { hit }, playerEntity)
+            end
+        end
+    end
+
+    @ExecSpace("ServerOnly")
+    method any FindMonsterCell(any run, string instanceId)
+        -- instanceId로 몬스터 점유 칸 rec 조회 (없으면 nil).
+        for _, rec in pairs(run.board.cells) do
+            local unit = rec.layers ~= nil and rec.layers.unit or nil
+            if unit ~= nil and unit.instanceId == instanceId then
+                return { col = rec.col, row = rec.row, entity = unit.entity }
+            end
+        end
+        return nil
+    end
+
+    @ExecSpace("ServerOnly")
     method integer ApplyHitPlan(any run, any def, table hits, Entity playerEntity)
-        -- HitPlan 소비: HP 차감 -> 사망 시 점유 해제/비주얼 제거/EXP·전리품 지급. 처치 수 반환.
-        -- (속성 내성/상태이상 적용은 정식 몬스터 시스템 소관 — 스텁은 데미지만)
+        -- HitPlan 소비: HP 차감(타격별 damages 배열 합산) -> 온히트 상태이상 -> 사망 시 정산. 처치 수 반환.
+        -- 빙결 중 대상은 받는 모든 피해 ×FreezeAmp (SYS-COMBAT §6 — 턴 내 연계 셋업).
         self:EnsureFlow(run)
         local board = run.board
         local kills = 0
         for _, h in ipairs(hits) do
             local hp = run.flow.monsterHp[h.instanceId]
             if hp ~= nil then
-                local dmg = h.damagePerHit * h.hitCount
+                -- damages 배열 = HitPlan 대미지의 단일 진실 (타격별 크리 개별 반영 — SYS-COMBAT §5)
+                local dmg = 0
+                for _, d in ipairs(h.damages or {}) do dmg = dmg + d end
+                local st = run.flow.monsterStatus[h.instanceId]
+                if st ~= nil and st.freeze ~= nil and st.freeze > 0 then
+                    dmg = dmg * self.FreezeAmp
+                end
                 hp = hp - dmg
                 _CombatFxLogic:SpawnDamageNumbers(run, h)   -- 메이플 데미지 스킨 재생 (타격 수만큼)
                 if hp <= 0 then
                     local rec = _BoardService:GetCellLayer(board, h.cell.col, h.cell.row, "unit")
                     if rec ~= nil and rec.instanceId == h.instanceId and isvalid(rec.entity) then
-                        -- 사망 연출: die 애니메이션으로 교체 후 지연 제거 (칸 점유는 즉시 해제)
                         local sr = rec.entity.SpriteRendererComponent
                         if isvalid(sr) then sr.SpriteRUID = self.DieRuid end
                         rec.entity:Destroy(0.6)
                     end
                     _BoardService:Release(board, h.cell.col, h.cell.row, "unit", h.instanceId)
                     run.flow.monsterHp[h.instanceId] = nil
-                    run.flow.monsterStun[h.instanceId] = nil
+                    run.flow.monsterStatus[h.instanceId] = nil
                     kills = kills + 1
                 else
                     run.flow.monsterHp[h.instanceId] = hp
+                    -- 온히트 상태이상 (생존 대상에만 — 처치 시 무의미)
+                    if h.onHitStatus ~= nil and h.onHitStatus ~= "" then
+                        local rec = _BoardService:GetCellLayer(board, h.cell.col, h.cell.row, "unit")
+                        self:ApplyOnHitStatus(run, h.instanceId, h.onHitStatus, h.casterAtk or 0,
+                            rec ~= nil and rec.entity or nil)
+                    end
                 end
-                log("[MonsterStub] 피격: " .. h.skillId .. " " .. tostring(h.damagePerHit)
-                    .. "x" .. tostring(h.hitCount) .. (h.isCrit and " CRIT" or "")
+                log("[MonsterStub] 피격: " .. h.skillId .. " dmg=" .. tostring(dmg)
+                    .. " (" .. tostring(h.hitCount) .. "타)" .. (h.isCrit and " CRIT" or "")
                     .. " -> hp=" .. tostring(hp > 0 and hp or 0) .. (hp <= 0 and " (처치)" or ""))
             end
         end

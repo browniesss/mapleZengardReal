@@ -9,12 +9,18 @@ script InGameChoiceController extends Component
     property ButtonComponent btnChoice1 = "4e346e25-899e-45fc-8991-c2099d22b1ac"
     property ButtonComponent btnChoice2 = "295592d3-ae37-4bbd-8032-f42c7875f780"
     property ButtonComponent btnChoice3 = "70a1c2d6-2b1e-47dc-8091-9e897780a103"
+    property ButtonComponent btnChoice4 = "d82768fd-ca94-4425-bd6c-96158ce75e41"   -- 슬롯 5 교체 오버레이용 (선택지는 3중1 — UUID는 빌더 bind 주입)
+    property ButtonComponent btnChoice5 = "00422dc2-ed71-4772-8ff5-90211763284e"
     property SpriteGUIRendererComponent iconChoice1 = "48c65d4b-ec30-4369-be57-92b70f6c7d62"
     property SpriteGUIRendererComponent iconChoice2 = "893dc2a6-69fd-4763-a59b-b3d3b3128b4a"
     property SpriteGUIRendererComponent iconChoice3 = "83fe9acc-f322-40e0-bd67-be67ce6335de"
+    property SpriteGUIRendererComponent iconChoice4 = "c8f8f7cb-ef98-40e2-b084-f4c8db8e9f9e"
+    property SpriteGUIRendererComponent iconChoice5 = "ba53d267-c598-4c87-8998-748b92c77250"
     property TextComponent descChoice1 = "a0fd6283-66aa-4bec-b0bd-e1de9c1b3681"
     property TextComponent descChoice2 = "64b1cee3-0899-48e5-ba0e-f210636c7cc0"
     property TextComponent descChoice3 = "949dd69a-5fb0-4440-9b63-13070f15bf87"
+    property TextComponent descChoice4 = "2f54063a-7931-4338-8451-08e04ce9882f"
+    property TextComponent descChoice5 = "4564be1f-affc-42a1-8235-713f9492d99b"
     property ButtonComponent btnReplaceCancel = "f891aa09-2b84-4ecc-8c0f-8fae449cea26"
     property ButtonComponent btnAdvance = "2525300d-e250-45bc-95d2-4c74a285d619"
 
@@ -31,6 +37,8 @@ script InGameChoiceController extends Component
         self:Wire(self.btnChoice1, function() self:CommitChoice(1) end)
         self:Wire(self.btnChoice2, function() self:CommitChoice(2) end)
         self:Wire(self.btnChoice3, function() self:CommitChoice(3) end)
+        self:Wire(self.btnChoice4, function() self:CommitChoice(4) end)
+        self:Wire(self.btnChoice5, function() self:CommitChoice(5) end)
         self:Wire(self.btnReplaceCancel, self.OnReplaceCancelClicked)
         self:Wire(self.btnAdvance, self.OnAdvanceClicked)
         if isvalid(self.btnReplaceCancel) then self.btnReplaceCancel.Entity.Enable = false end
@@ -66,8 +74,7 @@ script InGameChoiceController extends Component
         -- 선택지 카드 배경색 — 종류/레어도가 한눈에 구분되도록 (가독성).
         -- 종이 카드 스프라이트 위에 곱연산 틴트로 적용되므로 밝은 계열 사용 (v14 리스킨)
         if rarity == "장비" then return Color(0.45, 0.95, 1.00, 1) end
-        if rarity == "합성" then return Color(1.00, 0.72, 0.45, 1) end
-        if rarity == "능력치" then return Color(0.62, 0.95, 0.68, 1) end
+        if rarity == "이동" then return Color(0.62, 0.95, 0.68, 1) end
         if rarity == "R" then return Color(0.62, 0.78, 1.00, 1) end
         if rarity == "E" then return Color(0.80, 0.62, 1.00, 1) end
         if rarity == "U" then return Color(1.00, 0.82, 0.42, 1) end
@@ -79,7 +86,7 @@ script InGameChoiceController extends Component
         -- 카드 개수에 따라 중앙 정렬 재배치 (시작 2중1은 2장, 평시 3장 — 2026-07-10 개선).
         -- 보이는 카드 i의 x = (i - (n+1)/2) × 간격. 카드 슬롯 자체는 3개 고정, 위치만 유동.
         local spacing = 300
-        local buttons = { self.btnChoice1, self.btnChoice2, self.btnChoice3 }
+        local buttons = { self.btnChoice1, self.btnChoice2, self.btnChoice3, self.btnChoice4, self.btnChoice5 }
         for i = 1, visibleCount do
             local btn = buttons[i]
             if btn ~= nil and isvalid(btn) then
@@ -93,12 +100,12 @@ script InGameChoiceController extends Component
 
     @ExecSpace("ClientOnly")
     method void RenderCard(integer index, boolean visible, string title, string desc, Color bgColor, string iconRuid)
-        -- 카드 1장 렌더 (일반 선택지/교체 대상 공용).
-        local buttons = { self.btnChoice1, self.btnChoice2, self.btnChoice3 }
-        local icons = { self.iconChoice1, self.iconChoice2, self.iconChoice3 }
-        local descs = { self.descChoice1, self.descChoice2, self.descChoice3 }
+        -- 카드 1장 렌더 (일반 선택지/교체 대상 공용 — 교체는 슬롯 5 대응 최대 5장).
+        local buttons = { self.btnChoice1, self.btnChoice2, self.btnChoice3, self.btnChoice4, self.btnChoice5 }
+        local icons = { self.iconChoice1, self.iconChoice2, self.iconChoice3, self.iconChoice4, self.iconChoice5 }
+        local descs = { self.descChoice1, self.descChoice2, self.descChoice3, self.descChoice4, self.descChoice5 }
         local btn = buttons[index]
-        if btn == nil then return end
+        if btn == nil or not isvalid(btn) then return end
         btn.Entity.Enable = visible
         if not visible then return end
         btn.Entity.TextComponent.Text = title
@@ -119,7 +126,7 @@ script InGameChoiceController extends Component
         self:SetReplaceMode(false)
         self.choiceCount = #event.choices
         self.choiceTitle.Text = event.isFirstEntry and "시작 스킬 선택" or "레벨 업 — 선택"
-        for i = 1, 3 do
+        for i = 1, 5 do
             local choice = event.choices[i]
             if choice ~= nil then
                 self:RenderCard(i, true, choice.name .. " [" .. choice.rarity .. "]",
@@ -236,7 +243,7 @@ script InGameChoiceController extends Component
         self:SetReplaceMode(true)
         self.choiceCount = #event.slots
         self.choiceTitle.Text = "교체할 스킬 선택 — " .. event.newSkillName .. " 장착"
-        for i = 1, 3 do
+        for i = 1, 5 do
             local slot = event.slots[i]
             if slot ~= nil then
                 self:RenderCard(i, true, slot.name .. " Lv." .. tostring(slot.level),

@@ -55,12 +55,16 @@ script CombatResolveLogic extends Logic
         -- count/range는 중첩 가산(사양서 §3-3). 유효 element는 최다 중첩 우선, 동률이면 나중 태그
         -- (잠정 규칙 — 태그 다중 속성 우선순위는 기획 확정 대기, 설계서 §9). elementStacks는
         -- "같은 속성 중복 시 효과 강화" 소비자(몬스터 측)용 중첩 수.
-        local eff = { castAdd = 0, rangeAdd = 0, pierce = false, element = nil, elementStacks = {} }
+        local eff = { castAdd = 0, rangeAdd = 0, pierce = false, ignoreResist = false, element = nil, elementStacks = {} }
         for _, tagId in ipairs(inst.tags) do
             local def = _SkillCatalogLogic:GetTagDefRO(tagId)
             if def ~= nil then
                 if def.effect.castAdd ~= nil then
                     eff.castAdd = eff.castAdd + math.floor(def.effect.castAdd)
+                end
+                if def.effect.ignoreResist == true or def.effect.defIgnore == true then
+                    -- 구 '방어무시' 상태 → ignore_resist 스킬 플래그로 재분류 (SYS-COMBAT §5·§6 — 속성 배율 1 고정)
+                    eff.ignoreResist = true
                 end
                 if def.effect.rangeAdd ~= nil then
                     eff.rangeAdd = eff.rangeAdd + math.floor(def.effect.rangeAdd)
@@ -147,22 +151,23 @@ script CombatResolveLogic extends Logic
     end
 
     @ExecSpace("ServerOnly")
-    method table SelectTargets(string attackType, any eff, integer targetCount, table cells, any run, any boardDef, any playerCell)
-        -- 공격 타입별 해석(사양서 §4-4). 반환 [{col,row,occupantId,instanceId}].
+    method table SelectTargets(any skillDef, any eff, integer targetCount, table cells, any run, any boardDef, any playerCell)
+        -- 대상 선정 (SYS-COMBAT §3-2·§4). 반환 [{col,row,occupantId,instanceId}].
+        -- "범위 = 어느 칸 / 타겟 수 = 몇 체 / target_select = 누구" 3분리 — 초과 시 스킬별
+        -- targetSelect 필드(nearest 기본/random/lowest_hp)로 선정. 거리 = 맨해튼, 동률 랜덤.
         -- targetCount < 1은 1로 보정 — projectile(첫 적 1체)과 target/area 간 최소 동작 통일.
         if targetCount < 1 then targetCount = 1 end
+        local attackType = skillDef.attackType
         local board = run.board
         local targets = {}
         if attackType == "projectile" then
-            -- 전방 가까운 순 경로 스캔: 차단 오브젝트에서 중단, 첫 적에서 멈춤(관통 태그 시 통과).
+            -- 투사체: 전방 가까운 순 경로 스캔 — 첫 적에서 정지(관통 태그 시 경로 전체).
+            -- 지형(점유형)은 투사체를 막지 않음(SYS-COMBAT §3-2) — 차단 판정은 차단형 지형(P1) 도입 시.
             table.sort(cells, function(a, b)
                 if a.fwd ~= b.fwd then return a.fwd < b.fwd end
                 return a.side < b.side
             end)
             for _, cell in ipairs(cells) do
-                if _BoardService:BlocksSkill(boardDef, board, cell.col, cell.row) then
-                    break
-                end
                 local mon = self:MonsterAt(board, cell.col, cell.row)
                 if mon ~= nil then
                     table.insert(targets, { col = cell.col, row = cell.row, occupantId = mon.occupantId, instanceId = mon.instanceId })
@@ -171,15 +176,42 @@ script CombatResolveLogic extends Logic
                 end
             end
         else
-            -- target(범위 내 선택) / area(범위 내 전체) — 둘 다 플레이어 최근접 순으로 targetCount 상한.
+            -- target(대상 지정) / area(범위 내 전체) — 후보 수집 후 targetSelect 규칙으로 상한 선정.
             for _, cell in ipairs(cells) do
                 local mon = self:MonsterAt(board, cell.col, cell.row)
                 if mon ~= nil then
-                    local dist = math.max(math.abs(cell.col - playerCell.col), math.abs(cell.row - playerCell.row))
+                    local dist = math.abs(cell.col - playerCell.col) + math.abs(cell.row - playerCell.row)
                     table.insert(targets, { col = cell.col, row = cell.row, occupantId = mon.occupantId, instanceId = mon.instanceId, dist = dist })
                 end
             end
-            table.sort(targets, function(a, b) return a.dist < b.dist end)
+            local mode = skillDef.targetSelect ~= nil and skillDef.targetSelect or "nearest"
+            if mode == "random" then
+                -- 균등 랜덤: 셔플 후 상한 절단
+                for i = #targets, 2, -1 do
+                    local j = _UtilLogic:RandomIntegerRange(1, i)
+                    targets[i], targets[j] = targets[j], targets[i]
+                end
+            elseif mode == "lowest_hp" then
+                -- 현재 HP 낮은 순 (몬스터 HP는 run.flow — 스텁 계약. 미추적 개체는 뒤로). 동률 랜덤.
+                local hpMap = (run.flow ~= nil and run.flow.monsterHp ~= nil) and run.flow.monsterHp or {}
+                for _, t in ipairs(targets) do
+                    t.sortHp = hpMap[t.instanceId] or 99999
+                    t.tie = _UtilLogic:RandomDouble()
+                end
+                table.sort(targets, function(a, b)
+                    if a.sortHp ~= b.sortHp then return a.sortHp < b.sortHp end
+                    return a.tie < b.tie
+                end)
+            else
+                -- nearest (기본값): 맨해튼 오름차순, 동률 랜덤 타이브레이크
+                for _, t in ipairs(targets) do
+                    t.tie = _UtilLogic:RandomDouble()
+                end
+                table.sort(targets, function(a, b)
+                    if a.dist ~= b.dist then return a.dist < b.dist end
+                    return a.tie < b.tie
+                end)
+            end
             while #targets > targetCount do
                 table.remove(targets)
             end
@@ -212,18 +244,12 @@ script CombatResolveLogic extends Logic
                     else
                         local eff = self:BuildTagEffects(inst)
                         local cells = self:ComputeRangeCells(pattern, eff, ctx.facing, ctx.playerCell, boardDef)
-                        local targets = self:SelectTargets(skillDef.attackType, eff, skillDef.targetCount, cells, run, boardDef, ctx.playerCell)
+                        local targets = self:SelectTargets(skillDef, eff, skillDef.targetCount, cells, run, boardDef, ctx.playerCell)
 
                         -- 연타(castAdd)는 여기서 타수에 더하지 않는다 — 발동 반복은 공격 체인이
                         -- cast 단위 큐로 수행(TurnFlowStub.StartAttackChain). 타수는 스킬 고유 다단만.
                         local totalHits = skillDef.hitCount
                         if totalHits < 1 then totalHits = 1 end
-                        local perHit = ctx.stats.atk * skillDef.perHitCoefLv3 * _SkillCatalogLogic:LevelFactor(inst.level)
-                            * (ctx.dmgMult or 1)   -- AI 자동 조작 효율 패널티 (회의 §3: 수동 대비 60%)
-                        local isCrit = _UtilLogic:RandomDouble() < ctx.stats.critRate
-                        if isCrit then
-                            perHit = perHit * (1 + ctx.stats.critDmg)
-                        end
                         -- 유효 속성: 태그 우선, 없으면 마스터 element 폴백 (속성 스킬은 데이터상
                         -- 동일 속성 baseTag를 함께 들고 있어 태그 경로가 표준이고 폴백은 방어용).
                         local element = eff.element
@@ -236,20 +262,42 @@ script CombatResolveLogic extends Logic
                                 elementStacks = 1
                             end
                         end
-
+                        -- 대미지 (SYS-COMBAT §5): 타격 1회 = ATK × 계수(타격당·레벨별) × 크리 배율 × 속성 배율.
+                        -- 크리는 타격 1회마다 개별 굴림. 속성 배율 = 1 − max(0, 내성 − 방관) — 스텁 몬스터는
+                        -- 내성 데이터 미보유(P1)라 내성 0 전제(배율 1). ignore_resist 스킬은 항상 1.
+                        local basePerHit = ctx.stats.atk * skillDef.perHitCoefLv3 * _SkillCatalogLogic:LevelFactor(inst.level)
                         for _, t in ipairs(targets) do
+                            local resist = 0   -- 몬스터별 {속성: 내성%} 조회 훅 — 몬스터 데이터(P1) 도입 시 배선
+                            local elementMul = 1
+                            if not eff.ignoreResist and element ~= nil and element ~= "none" then
+                                elementMul = 1 - math.max(0, resist - ctx.stats.defPen)
+                            end
+                            local damages = {}
+                            local total = 0
+                            local anyCrit = false
+                            for hitIdx = 1, totalHits do
+                                local dmg = basePerHit * elementMul
+                                if _UtilLogic:RandomDouble() < ctx.stats.critRate then
+                                    dmg = dmg * (1 + ctx.stats.critDmg)
+                                    anyCrit = true
+                                end
+                                dmg = math.max(1, dmg)   -- 최소 대미지 1 보장 (§5)
+                                table.insert(damages, dmg)
+                                total = total + dmg
+                            end
                             table.insert(result.hits, {
                                 skillId = inst.skillId,
                                 cell = { col = t.col, row = t.row },
                                 occupantId = t.occupantId,
                                 instanceId = t.instanceId,
                                 hitCount = totalHits,
-                                damagePerHit = perHit,
-                                isCrit = isCrit,
+                                damages = damages,   -- 타격별 대미지 (크리 개별 반영) — HitPlan 대미지의 단일 진실
+                                isCrit = anyCrit,
                                 element = element,
                                 elementStacks = elementStacks,
                                 defPen = ctx.stats.defPen,
                                 onHitStatus = skillDef.onHitStatus,
+                                casterAtk = ctx.stats.atk,         -- 중독 DoT 기준(시전 시점 ATK — §6)
                             })
                         end
                         table.insert(result.fired, { skillId = inst.skillId, cooldownTurns = skillDef.cooldownTurns })
@@ -266,9 +314,11 @@ script CombatResolveLogic extends Logic
         -- HitPlan 로그 문자열.
         local desc = ""
         for _, h in ipairs(hits) do
+            local total = 0
+            for _, d in ipairs(h.damages or {}) do total = total + d end
             desc = desc .. "[" .. h.skillId .. "->" .. tostring(h.occupantId)
                 .. "@" .. h.cell.col .. "_" .. h.cell.row
-                .. " x" .. tostring(h.hitCount) .. " dmg=" .. tostring(h.damagePerHit)
+                .. " x" .. tostring(h.hitCount) .. " dmg=" .. tostring(total)
                 .. " crit=" .. tostring(h.isCrit) .. " elem=" .. tostring(h.element) .. "]"
         end
         return desc
