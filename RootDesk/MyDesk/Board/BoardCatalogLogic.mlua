@@ -16,6 +16,7 @@ script BoardCatalogLogic extends Logic
     property any dropTableCache = nil    -- dropTableId -> def (MONSTER-SPEC §2.5)
     property any lootTypeCache = nil     -- lootId -> def (LOOT-SPEC §2)
     property any enemySkillCache = nil   -- skillId -> def (MONSTER-SPEC §8.1)
+    property any stageDecorCache = nil   -- decorSetId -> def (REGION-SPEC §2.3)
 
     @ExecSpace("ServerOnly")
     method void OnBeginPlay()
@@ -382,6 +383,38 @@ script BoardCatalogLogic extends Logic
             end
         end
         return self:DeepCopy(self.enemySkillCache[skillId])
+    end
+
+    @ExecSpace("ServerOnly")
+    method any GetStageDecor(string decorSetId)
+        -- decorSetId -> {decorSetId, elements[]} (deep-copy). 미존재 시 nil (REGION-SPEC §2.3).
+        -- elements = {ruid, pos:[x,y], scale?, flipX?, order?} — StageDecorService가 소비.
+        if self.stageDecorCache == nil then
+            self.stageDecorCache = {}
+            local ds = _DataService:GetTable("StageDecors")
+            if ds == nil then
+                log_error("[BoardCatalog] StageDecors 데이터셋 없음")
+            else
+                for _, row in ipairs(ds:GetAllRow()) do
+                    local id = row:GetItem("decorSetId")
+                    if id ~= nil and id ~= "" then
+                        local def = {
+                            decorSetId = id,
+                            elements = self:ParseJsonCell(row:GetItem("elements"), {}),
+                        }
+                        -- 비주얼 폴리시: ruid 누락 = 보이지 않는 소품(무증상) — 적재 시 경고
+                        for i, el in ipairs(def.elements) do
+                            if el.ruid == nil or el.ruid == "" then
+                                log_warning("[BoardCatalog] StageDecors '" .. id .. "' elements[" .. tostring(i) .. "] ruid 누락")
+                            end
+                        end
+                        self.stageDecorCache[id] = def
+                    end
+                end
+                log("[BoardCatalog] StageDecors 적재: " .. tostring(self:CountKeys(self.stageDecorCache)) .. "세트")
+            end
+        end
+        return self:DeepCopy(self.stageDecorCache[decorSetId])
     end
 
     -- ===== BoardDef =====

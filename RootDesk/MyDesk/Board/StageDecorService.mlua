@@ -1,0 +1,107 @@
+@Logic
+script StageDecorService extends Logic
+    -- 스테이지 데코 연출(REGION-SPEC §6): 스폰·슬라이드 전환·정리.
+    -- 무상태 @Logic — 데코 핸들은 run.board.decorRootRef/decorSetId에만(런 간 누수 방지, BoardService 패턴).
+    -- 렌더: StageDecor 밴드(BOARD-SPEC §1.5 개정 — Layer1과 BoardGround 사이) 소속 StageDecorProp 스폰.
+
+    property number SlideDuration = 0.8    -- 전환 슬라이드 시간(초 — REGION-SPEC §10-2 초안)
+    property number SlideDistance = 14     -- 화면 밖 이동 거리(월드 단위 — PC 뷰폭 12.8 초과)
+
+    @ExecSpace("ServerOnly")
+    method void OnBeginPlay()
+        -- 무상태라 초기화 없음. 준비 로그만.
+        log("[StageDecor] ready")
+    end
+
+    @ExecSpace("ServerOnly")
+    method Entity SpawnDecorRoot(any run, string decorSetId, number offsetX)
+        -- 데코 루트(BoardRoot 앵커 재사용) + StageDecors.elements 소품 스폰. 루트 반환(실패 nil).
+        -- offsetX = 초기 x 위치(0=제자리, SlideDistance=화면 밖 대기 — 슬라이드 인용).
+        local def = _BoardCatalogLogic:GetStageDecor(decorSetId)
+        if def == nil then
+            log_warning("[StageDecor] 알수없는 decorSetId: " .. tostring(decorSetId))
+            return nil
+        end
+        if run.board == nil or run.board.mapEntityRef == nil or not isvalid(run.board.mapEntityRef) then
+            log_warning("[StageDecor] 맵 엔티티 없음 — 데코 스폰 생략 (" .. decorSetId .. ")")
+            return nil
+        end
+        local root = _SpawnService:SpawnByModelId("BoardRoot", "Decor_" .. decorSetId, Vector3(offsetX, 0, 0), run.board.mapEntityRef)
+        if not isvalid(root) then
+            log_warning("[StageDecor] 데코 루트 스폰 실패 (" .. decorSetId .. ")")
+            return nil
+        end
+        local spawned = 0
+        for i, el in ipairs(def.elements) do
+            local x = 0
+            local y = 0
+            if el.pos ~= nil then
+                x = tonumber(el.pos[1]) or 0
+                y = tonumber(el.pos[2]) or 0
+            end
+            local prop = _SpawnService:SpawnByModelId("stagedecorprop", "prop_" .. tostring(i), Vector3(x, y, 0), root)
+            if isvalid(prop) then
+                local sr = prop.SpriteRendererComponent
+                if el.ruid ~= nil and el.ruid ~= "" then sr.SpriteRUID = el.ruid end
+                -- 서열: BoardGround 밴드 음수 대역(-20 + order) — 평지 타일(0)·강조 타일(1~9)보다 뒤.
+                -- ⚠️ 전용 StageDecor 밴드는 파일 삽입만으로 정렬 미등록(Maker 패널 등록 대기) — 등록 후 밴드 복귀 예정.
+                sr.OrderInLayer = -20 + math.floor(tonumber(el.order) or 0)
+                if el.flipX == true then sr.FlipX = true end
+                local s = tonumber(el.scale) or 1
+                if s ~= 1 then
+                    prop.TransformComponent.Scale = Vector3(s, s, 1)
+                end
+                spawned = spawned + 1
+            end
+        end
+        log("[StageDecor] 스폰: " .. decorSetId .. " props=" .. tostring(spawned) .. "/" .. tostring(#def.elements)
+            .. " x=" .. tostring(offsetX))
+        return root
+    end
+
+    @ExecSpace("ServerOnly")
+    method void SetDecor(any run, string decorSetId)
+        -- 초기 진입(연출 없음): 기존 데코 즉시 파괴 후 제자리 스폰. run 핸들에 기록.
+        self:DestroyDecor(run)
+        local root = self:SpawnDecorRoot(run, decorSetId, 0)
+        if root ~= nil then
+            run.board.decorRootRef = root
+            run.board.decorSetId = decorSetId
+        end
+    end
+
+    @ExecSpace("ServerOnly")
+    method void SlideTransition(any run, string toSetId)
+        -- 스테이지 전환 연출(REGION-SPEC §6): 현 데코 좌로 슬라이드 아웃(+지연 파괴),
+        -- 새 데코 우측 화면 밖에서 슬라이드 인. 완료 대기는 호출측(StageTransition 페이즈)이 타이머로 관리.
+        local old = nil
+        if run.board ~= nil then old = run.board.decorRootRef end
+        local newRoot = self:SpawnDecorRoot(run, toSetId, self.SlideDistance)
+        if newRoot == nil then
+            log_warning("[StageDecor] 전환 대상 스폰 실패 — 기존 데코 유지 (" .. tostring(toSetId) .. ")")
+            return
+        end
+        run.board.decorRootRef = newRoot
+        run.board.decorSetId = toSetId
+        _TweenLogic:MoveTo(newRoot, Vector2(0, 0), self.SlideDuration, EaseType.CubicEaseInOut)
+        if old ~= nil and isvalid(old) then
+            _TweenLogic:MoveTo(old, Vector2(-self.SlideDistance, 0), self.SlideDuration, EaseType.CubicEaseInOut)
+            local doomed = old   -- 레지스트리에선 이미 분리 — 타이머 로컬 레퍼런스만(§8.3 사망 연출과 동일 패턴)
+            _TimerService:SetTimerOnce(function()
+                if isvalid(doomed) then doomed:Destroy() end
+            end, self.SlideDuration + 0.1)
+        end
+        log("[StageDecor] 슬라이드 전환 → " .. toSetId .. " (" .. tostring(self.SlideDuration) .. "s)")
+    end
+
+    @ExecSpace("ServerOnly")
+    method void DestroyDecor(any run)
+        -- 데코 정리(멱등). 동적맵 파괴로도 연쇄되지만 run 참조 정리를 명시적으로(DestroyBoard 패턴).
+        if run.board == nil then return end
+        if run.board.decorRootRef ~= nil and isvalid(run.board.decorRootRef) then
+            run.board.decorRootRef:Destroy()
+        end
+        run.board.decorRootRef = nil
+        run.board.decorSetId = nil
+    end
+end

@@ -163,6 +163,7 @@ run.region = {
 | — | UI 캔버스 | (무변경 — 체계 밖) |
 
 - 밴드 신설은 BOARD-SPEC §1.5 **정본 절차**(MapleMapLayer_N + 짝 RectTileMap_N 쌍, Maker 패널 등록) 필수.
+- ⚠️ **구현 실측(2026-07-14): 파일 삽입만으로는 밴드 렌더 순서가 미적용** — `MapleMapLayer_5`(StageDecor) 쌍을 파일로 삽입(+LayerSortOrder 재부여·엔티티 배열 재배열)해도 데코가 BoardGround 앞에 그려짐(정렬 레이어 등록 순서는 Maker 패널 소유로 추정 — BOARD-SPEC의 "파일 단독 주입 = 패널 미등록" 경고와 동일 계열). **임시 우회 확정: 데코는 `BoardGround` 밴드 음수 서열(-20+order)** — 평지 타일(0)·강조 타일(1~9)보다 뒤, 배경보다 앞 보장(밴드 내 서열은 우리 소유). `MapleMapLayer_5` 쌍은 맵에 박제해 둠 — **Maker 패널에서 StageDecor 레이어 위치 확인/드래그(사용자 작업) 후** StageDecorProp의 SortingLayer를 StageDecor로 복귀.
 - 하이어라키: `BoardMap_runN > Decor(루트, StageDecorService 소유) > 소품들` — `Board` 루트의 형제. 슬라이드 = `Decor` 루트 1개 이동(보드 전체 이동 = Board 루트 1개 이동과 동일한 설계 사상).
 
 ---

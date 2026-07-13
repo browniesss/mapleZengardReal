@@ -162,6 +162,91 @@
         }
       },
       {
+        "id": "e1580069-66c5-4965-b569-d00dade7b86e",
+        "path": "/maps/BoardMap/MapleMapLayer_5",
+        "componentNames": "MOD.Core.MapLayerComponent",
+        "jsonString": {
+          "name": "MapleMapLayer_5",
+          "path": "/maps/BoardMap/MapleMapLayer_5",
+          "nameEditable": false,
+          "enable": true,
+          "visible": true,
+          "localize": false,
+          "displayOrder": 15,
+          "pathConstraints": "///",
+          "revision": 1,
+          "origin": {
+            "type": "Model",
+            "entry_id": "maplemaplayer",
+            "sub_entity_id": null,
+            "root_entity_id": null,
+            "replaced_model_id": null
+          },
+          "modelId": "maplemaplayer",
+          "@components": [
+            {
+              "@type": "MOD.Core.MapLayerComponent",
+              "IsVisible": true,
+              "LayerSortOrder": 1,
+              "Locked": false,
+              "MapLayerName": "StageDecor",
+              "Thumbnail": "",
+              "Enable": true
+            }
+          ],
+          "@version": 1
+        }
+      },
+      {
+        "id": "23c2c140-2237-4dce-8de3-5a360c596390",
+        "path": "/maps/BoardMap/RectTileMap_5",
+        "componentNames": "MOD.Core.TransformComponent,MOD.Core.RectTileMapComponent",
+        "jsonString": {
+          "name": "RectTileMap_5",
+          "path": "/maps/BoardMap/RectTileMap_5",
+          "nameEditable": false,
+          "enable": true,
+          "visible": true,
+          "localize": false,
+          "displayOrder": 16,
+          "pathConstraints": "///",
+          "revision": 1,
+          "origin": {
+            "type": "Model",
+            "entry_id": "recttilemap",
+            "sub_entity_id": null,
+            "root_entity_id": null,
+            "replaced_model_id": null
+          },
+          "modelId": "recttilemap",
+          "@components": [
+            {
+              "@type": "MOD.Core.TransformComponent",
+              "Position": {
+                "x": 0,
+                "y": 0,
+                "z": 1000
+              },
+              "QuaternionRotation": {
+                "x": 0,
+                "y": 0,
+                "z": 0,
+                "w": 1
+              },
+              "Enable": true
+            },
+            {
+              "@type": "MOD.Core.RectTileMapComponent",
+              "SortingLayer": "MapLayer5",
+              "TileSetRUID": "",
+              "Enable": true,
+              "tileMap": []
+            }
+          ],
+          "@version": 1
+        }
+      },
+      {
         "id": "ae57bded-9857-4afb-9424-b73835ec7ff8",
         "path": "/maps/BoardMap/MapleMapLayer_1",
         "componentNames": "MOD.Core.MapLayerComponent",
@@ -187,7 +272,7 @@
             {
               "@type": "MOD.Core.MapLayerComponent",
               "IsVisible": true,
-              "LayerSortOrder": 1,
+              "LayerSortOrder": 2,
               "Locked": false,
               "MapLayerName": "BoardGround",
               "Thumbnail": "",
@@ -272,7 +357,7 @@
             {
               "@type": "MOD.Core.MapLayerComponent",
               "IsVisible": true,
-              "LayerSortOrder": 2,
+              "LayerSortOrder": 3,
               "Locked": false,
               "MapLayerName": "BoardProp",
               "Thumbnail": "",
@@ -357,7 +442,7 @@
             {
               "@type": "MOD.Core.MapLayerComponent",
               "IsVisible": true,
-              "LayerSortOrder": 3,
+              "LayerSortOrder": 4,
               "Locked": false,
               "MapLayerName": "BoardUnit",
               "Thumbnail": "",
@@ -442,7 +527,7 @@
             {
               "@type": "MOD.Core.MapLayerComponent",
               "IsVisible": true,
-              "LayerSortOrder": 4,
+              "LayerSortOrder": 5,
               "Locked": false,
               "MapLayerName": "BoardOverlay",
               "Thumbnail": "",
