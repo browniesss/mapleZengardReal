@@ -1,4 +1,4 @@
-lootId,name,iconRuid,rarity,currency,maxStack,pickupSound,grade,jobMaterial
+﻿lootId,name,iconRuid,rarity,currency,maxStack,pickupSound,grade,jobMaterial
 mushroomCap,주황버섯의 갓,b871877a7c394eafb176a9fed9b7c415,common,false,99,f399837e702843abb2c8196829101982,bronze,false
 meso,메소,02a489cccff24a139a6c3582a5871f58,common,true,0,25e9b2779bd540fd9c8bb931d8363439,,false
 blackOrb,검은 구슬,12f9f1f63c754667aff43127b7988daf,rare,false,99,f399837e702843abb2c8196829101982,,true
