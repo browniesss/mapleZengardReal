@@ -17,12 +17,22 @@ script LootInventoryLogic extends Logic
     property Entity panelLoot = "67cd8916-b11e-4825-b5a0-15b1882999ad"                   -- 전리품 탭 내용(고정 카드+등급 탭+소재 목록)
     property Entity toastGroup = "2a2d0ae4-b817-4065-9baf-f22d8d150ec2"                  -- 획득 토스트 컨테이너
     property TextComponent toastText = "4b3c038b-1036-43f2-8364-17b044fe954b"            -- 토스트 문구
+    property TextComponent mesoText = "bd591986-835a-45b0-82c6-f3fdf52827fc"                                                 -- 패널 하단 베이크 메소 필드 위 표기(빌더 bind 주입)
 
     property integer MatRows = 5                     -- 소재 목록 표시 행 수
     property number MagnetDuration = 0.5             -- 자석 흡입 시간(초)
     property number ToastDuration = 2.0              -- 토스트 표시 시간(초)
     property string ClickSoundRuid = "972843e759204d3e9ad84e7d3fa94f83"   -- 표준 UI 클릭음
     property string HoverSoundRuid = "159bf70a74634bfc8e91a29e527a4be5"   -- 표준 UI 호버음
+
+    -- 옛메 정본 스킨 프레임 RUID(계정 리소스 zengard_omv2_*, GMS v83 원본 조각 합성)
+    -- 탭/등급탭 활성 강조는 이미지 스왑 방식. 등급 구분은 텍스트 색으로(프레임은 공용 선택 탭).
+    property string TabActiveRuid = "d42c7f740cdd410abcd93adbd6524863"
+    property string TabInactiveRuid = "0727a8485c5147c6a45d0d227b1b8f08"
+    property string GradeTabBronzeRuid = "a26b540b57b345499b19561a79d66997"
+    property string GradeTabSilverRuid = "a26b540b57b345499b19561a79d66997"
+    property string GradeTabGoldRuid = "a26b540b57b345499b19561a79d66997"
+    property string GradeTabInactiveRuid = "e015c1f222e9479fa51644d9e75869d8"
 
     property any handlers = nil                      -- {entity, event, handler} 목록(일괄 해제)
     property integer toastTimerId = 0
@@ -126,16 +136,17 @@ script LootInventoryLogic extends Logic
 
     @ExecSpace("ClientOnly")
     method void SetTabVisual(ButtonComponent btn, boolean active)
-        -- 활성 탭 = 밝은 배경/짙은 글씨, 비활성 = 반투명(기획서 목업).
+        -- 옛메 스킨: 활성 = 흰 탭 프레임(남색 테두리)+짙은 글씨, 비활성 = 회청 프레임+회색 글씨.
         local ent = btn.Entity
         local sp = ent.SpriteGUIRendererComponent
         local tx = ent.TextComponent
         if active then
-            sp.Color = Color(0.95, 0.96, 0.98, 1)
-            tx.FontColor = Color(0.09, 0.17, 0.30, 1)
+            sp.ImageRUID = DataRef(self.TabActiveRuid)
+            tx.FontColor = Color(0.13, 0.21, 0.36, 1)
         else
-            sp.Color = Color(1, 1, 1, 0.08)
-            tx.FontColor = Color(1, 1, 1, 0.65)
+            -- 비활성 탭은 남색 그라데이션 프레임 → 밝은 글씨
+            sp.ImageRUID = DataRef(self.TabInactiveRuid)
+            tx.FontColor = Color(0.87, 0.91, 0.96, 1)
         end
     end
 
@@ -197,9 +208,11 @@ script LootInventoryLogic extends Logic
             local cnt = jobCard:GetChildByName("JobCount", false)
             if cnt ~= nil and isvalid(cnt) then cnt.TextComponent.Text = "보유 " .. tostring(jobCount) end
         end
-        -- 3) 등급 탭 라벨 + 개수
+        -- 3) 등급 탭 라벨 + 개수 (옛메 스킨: 활성 = 등급색 테두리 프레임 + 등급색 글씨)
         local gradeKeys = { "bronze", "silver", "gold" }
         local gradeNames = { "브론즈", "실버", "골드" }
+        local gradeRuids = { self.GradeTabBronzeRuid, self.GradeTabSilverRuid, self.GradeTabGoldRuid }
+        local gradeColors = { Color(0.69, 0.42, 0.16, 1), Color(0.42, 0.47, 0.56, 1), Color(0.65, 0.53, 0.16, 1) }
         for i = 1, 3 do
             local tabEnt = self.panelLoot:GetChildByName("GradeTab_" .. i, false)
             if tabEnt ~= nil and isvalid(tabEnt) then
@@ -208,9 +221,12 @@ script LootInventoryLogic extends Logic
                 tabEnt.TextComponent.Text = gradeNames[i] .. " " .. tostring(total)
                 local sp = tabEnt.SpriteGUIRendererComponent
                 if i == self.activeGrade then
-                    sp.Color = Color(1, 1, 1, 0.18)
+                    sp.ImageRUID = DataRef(gradeRuids[i])
+                    tabEnt.TextComponent.FontColor = gradeColors[i]
                 else
-                    sp.Color = Color(1, 1, 1, 0.06)
+                    -- 비활성 등급 탭도 남색 프레임 → 밝은 글씨
+                    sp.ImageRUID = DataRef(self.GradeTabInactiveRuid)
+                    tabEnt.TextComponent.FontColor = Color(0.80, 0.85, 0.92, 1)
                 end
             end
         end
@@ -249,9 +265,9 @@ script LootInventoryLogic extends Logic
         if self.lastCurrency ~= nil and self.lastCurrency["meso"] ~= nil then
             meso = self.lastCurrency["meso"]
         end
-        local mesoEnt = self.panelLoot:GetChildByName("MesoLine", false)
-        if mesoEnt ~= nil and isvalid(mesoEnt) then
-            mesoEnt.TextComponent.Text = "메소 " .. tostring(meso)
+        -- 옛메 스킨: 패널 하단 베이크된 메소 필드 위의 mesoText(바인딩)에 표기
+        if self.mesoText ~= nil and isvalid(self.mesoText.Entity) then
+            self.mesoText.Text = "메소 " .. tostring(meso)
         end
     end
 
