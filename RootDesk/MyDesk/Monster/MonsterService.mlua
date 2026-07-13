@@ -8,6 +8,7 @@ script MonsterService extends Logic
     property boolean RunSelfTest = false   -- OnBeginPlay 자가검증(데이터 경로). 본배선 검증 완료로 off(필요시 on).
     property number HitFxDuration = 0.45   -- 피격 클립 노출 시간(초) — 경과 후 stand 복귀(§8.3)
     property number DieFxDuration = 0.8    -- 사망 클립 재생 후 비주얼 파괴까지 지연(초, §8.3)
+    property number AttackFxDuration = 0.6 -- 공격 클립 노출 시간(초) — 경과 후 stand 복귀(§8.1)
 
     @ExecSpace("ServerOnly")
     method void OnBeginPlay()
@@ -30,12 +31,16 @@ script MonsterService extends Logic
         local turnEvent = nil
         local clips = nil
         local sounds = nil
+        local atkMin = nil
+        local atkMax = nil
         if monsterDef ~= nil then
             hp = monsterDef.maxHp
             maxHp = monsterDef.maxHp
             dropTableId = monsterDef.dropTableId
             clips = monsterDef.clips     -- 피격/사망 연출 소비(§8.3 — hit/die 클립 재생)
             sounds = monsterDef.sounds
+            atkMin = monsterDef.atkMin   -- 공격력 범위(§8.1 basic_attack 데미지 굴림 소비)
+            atkMax = monsterDef.atkMax
             -- 마나 = 턴이벤트 충전량(§8.1 스케줄 소비): 첫 turnEvents 엔트리의 N이 최대치.
             -- {"every":N} = N턴마다 반복 충전, {"turn":N} = N턴째 1회. N턴이면 1턴당 1/N씩 찬다.
             local evs = monsterDef.turnEvents
@@ -68,8 +73,10 @@ script MonsterService extends Logic
             mana = mana,           -- 턴이벤트 없는 유닛은 nil(게이지 마나바 숨김)
             manaMax = manaMax,
             turnEvent = turnEvent,
-            clips = clips,         -- 상태별 클립 RUID(stand/hit/die…) — 연출 소비(§8.3)
+            clips = clips,         -- 상태별 클립 RUID(stand/hit/die/attack…) — 연출 소비(§8.3/§8.1)
             sounds = sounds,       -- 피격/사망음 RUID
+            atkMin = atkMin,       -- 공격력 범위(§8.1) — 몬스터만, player는 nil
+            atkMax = atkMax,
             dropTableId = dropTableId,
             entityRef = entityRef, -- 프리팹 루트(위치·생명주기 진실, 파괴 시 자식 연쇄)
             bodyRef = nil,         -- Body 자식(클립 스프라이트 — 연출이 RUID 주입하는 대상)
@@ -220,6 +227,27 @@ script MonsterService extends Logic
     end
 
     @ExecSpace("ServerOnly")
+    method void PlayAttackFx(any unit)
+        -- 공격 연출(§8.1): Body에 attack 클립 잠깐 재생 후 stand 복귀. 클립 없는 몬스터는 조용히 생략.
+        -- hitSeq 토큰을 피격 연출과 공유 — 공격/피격 경합 시 마지막 연출만 stand 복귀 담당(PlayHitFx와 동일 보호).
+        local body = unit.bodyRef
+        if body == nil or not isvalid(body) then return end
+        local clips = unit.clips
+        if clips == nil or clips.attack == nil or clips.attack == "" then return end
+        body.SpriteRendererComponent.SpriteRUID = clips.attack
+        unit.hitSeq = (unit.hitSeq or 0) + 1
+        local seq = unit.hitSeq
+        local restore = function()
+            if not unit.alive or unit.hitSeq ~= seq then return end
+            if unit.bodyRef == nil or not isvalid(unit.bodyRef) then return end
+            if clips.stand ~= nil and clips.stand ~= "" then
+                unit.bodyRef.SpriteRendererComponent.SpriteRUID = clips.stand
+            end
+        end
+        _TimerService:SetTimerOnce(restore, self.AttackFxDuration)
+    end
+
+    @ExecSpace("ServerOnly")
     method void KillUnit(any run, string instanceId)
         -- 사망(§5): alive=false → unit 점유 해제 → 드랍 추첨 → 사망 연출(§8.3) → 비주얼 지연 파괴.
         -- 점유/드랍/게이지 정리는 즉시(로직) — die 클립·사운드 재생만 연출로 지연 파괴.
@@ -334,8 +362,8 @@ script MonsterService extends Logic
     @ExecSpace("ServerOnly")
     method integer TickTurn(any run)
         -- 턴(공격 라운드) 경과: 턴이벤트를 가진 alive 몬스터/보스의 마나 +1 (N턴이면 1턴당 1/N 충전).
-        -- 가득 차면 턴이벤트 도달 — 스킬 발동(EnemySkills)은 §8.1 미확정이라 로그만 남긴다.
-        -- mode="every"(N턴마다)는 0부터 재충전, mode="turn"(N턴째 1회)은 가득 찬 채 유지(재발동 없음).
+        -- 여기는 충전 + turnEventReady 마킹까지만(§8.1 — 상태 소유). 발동·마나 리셋은 MonsterAct
+        -- 페이즈의 ActTurnEvents 소유(페이즈·연출 순서 소유) — 충전/발동 소유 분리.
         -- BoardFlowLogic.OnEnterPostAttack이 라운드 증가 직후 호출. 틱한 유닛 수 반환.
         local ticked = 0
         if run.units == nil then return 0 end
@@ -344,21 +372,53 @@ script MonsterService extends Logic
                 and unit.manaMax ~= nil and unit.manaMax > 0 and not unit.turnEventDone then
                 unit.mana = math.min(unit.mana + 1, unit.manaMax)
                 ticked = ticked + 1
-                if unit.mana >= unit.manaMax then
+                if unit.mana >= unit.manaMax and not unit.turnEventReady then
+                    unit.turnEventReady = true
                     local ev = unit.turnEvent
-                    log("[MonsterService] 턴이벤트 도달: " .. unit.occupantId .. " id=" .. unit.instanceId
-                        .. " skillId=" .. tostring(ev and ev.skillId or "nil")
-                        .. " (§8.1 스킬 발동 미구현 — 로그만)")
-                    if ev ~= nil and ev.mode == "every" then
-                        unit.mana = 0
-                    else
-                        unit.turnEventDone = true
-                    end
+                    log("[MonsterService] 턴이벤트 도달(ready): " .. unit.occupantId .. " id=" .. unit.instanceId
+                        .. " skillId=" .. tostring(ev and ev.skillId or "nil") .. " — MonsterAct에서 발동")
                 end
                 self:UpdateGauge(unit)
             end
         end
         return ticked
+    end
+
+    @ExecSpace("ServerOnly")
+    method integer ActTurnEvents(any run)
+        -- MonsterAct 페이즈(§8.1): turnEventReady 유닛 순회 → EnemySkills 조회 → 계열 핸들러 Execute.
+        -- 성공 시 마나 리셋(every) / 1회성 완료 마킹(turn). 실행 실패는 ready 유지(다음 라운드 재시도),
+        -- 스킬 데이터 결함(카탈로그 미존재)은 재시도 무의미 — 이벤트 영구 비활성. 발동 수 반환.
+        local fired = 0
+        if run.units == nil then return 0 end
+        for _, unit in pairs(run.units) do
+            if unit.alive and (unit.kind == "monster" or unit.kind == "boss") and unit.turnEventReady then
+                local ev = unit.turnEvent
+                local skillDef = nil
+                if ev ~= nil and ev.skillId ~= nil and ev.skillId ~= "" then
+                    skillDef = _BoardCatalogLogic:GetEnemySkill(ev.skillId)
+                end
+                if skillDef == nil then
+                    log_warning("[MonsterService] 턴이벤트 스킬 없음 → 비활성: " .. tostring(ev and ev.skillId or "nil")
+                        .. " (" .. unit.occupantId .. " id=" .. unit.instanceId .. ")")
+                    unit.turnEventReady = false
+                    unit.turnEventDone = true
+                elseif _EnemySkillService:Execute(run, unit, skillDef) then
+                    fired = fired + 1
+                    unit.turnEventReady = false
+                    if ev.mode == "every" then
+                        unit.mana = 0
+                    else
+                        unit.turnEventDone = true
+                    end
+                    self:UpdateGauge(unit)
+                else
+                    log_warning("[MonsterService] 턴이벤트 실행 실패(다음 라운드 재시도): " .. tostring(ev.skillId)
+                        .. " (" .. unit.occupantId .. " id=" .. unit.instanceId .. ")")
+                end
+            end
+        end
+        return fired
     end
 
     -- ===== 질의 (§5 — Attack/PostAttack/DecideNext 소비) =====
@@ -437,9 +497,9 @@ script MonsterService extends Logic
             .. " CountAlive=" .. tostring(self:CountAlive(run, "monster")))
 
         local hp1 = self:ApplyDamage(run, iid, 30)
-        local hp2 = self:ApplyDamage(run, iid, 80)   -- 누적 110 ≥ 100 → 사망
+        local hp2 = self:ApplyDamage(run, iid, 80)   -- 누적 110 ≥ 90 → 사망
         local hp3 = self:ApplyDamage(run, iid, 10)   -- late-kill → nil
-        log("[MonsterService][SelfTest] 피해 70→" .. tostring(hp1) .. " kill→" .. tostring(hp2)
+        log("[MonsterService][SelfTest] 피해 60→" .. tostring(hp1) .. " kill→" .. tostring(hp2)
             .. " late-kill nil OK=" .. tostring(hp3 == nil)
             .. " 점유해제 OK=" .. tostring(_BoardService:GetCellLayer(run.board, 1, 1, "unit") == nil)
             .. " GetUnitAt nil OK=" .. tostring(self:GetUnitAt(run, 1, 1) == nil)
@@ -461,17 +521,24 @@ script MonsterService extends Logic
         log("[MonsterService][SelfTest] sweep=" .. tostring(removed) .. "(6 기대)"
             .. " unitsEmpty OK=" .. tostring(self:CountAlive(run, "monster") == 0))
 
-        -- 마나/턴이벤트: turnEvents({"every":7}) 기반 manaMax=7, TickTurn 1회당 +1, 7틱째 도달+리셋
+        -- 마나/턴이벤트: turnEvents({"every":3}, basic_attack) 기반 manaMax=3, TickTurn 1회당 +1,
+        -- 3틱째 ready 마킹(리셋 없음) → ActTurnEvents가 발동(§8.1) + every 마나 리셋.
         local iid4 = _BoardService:TryOccupy(def, run.board, 2, 5, "unit", { occupantId = "orangemushroom", occupantKind = "monster" })
         self:RegisterUnit(run, iid4, "orangemushroom", "monster", 2, 5, nil, mdef)
         local u4 = run.units[iid4]
-        log("[MonsterService][SelfTest] 마나 등록 manaMax=" .. tostring(u4.manaMax) .. "(7 기대)"
-            .. " mana=" .. tostring(u4.mana) .. "(0 기대)")
-        for t = 1, 6 do
-            self:TickTurn(run)
-        end
-        log("[MonsterService][SelfTest] 6틱 후 mana=" .. tostring(u4.mana) .. "(6 기대)")
-        self:TickTurn(run)   -- 7틱째: 턴이벤트 도달 로그 + every라 0으로 리셋
-        log("[MonsterService][SelfTest] 7틱 후 mana=" .. tostring(u4.mana) .. "(0 기대 — every 리셋)")
+        log("[MonsterService][SelfTest] 마나 등록 manaMax=" .. tostring(u4.manaMax) .. "(3 기대)"
+            .. " mana=" .. tostring(u4.mana) .. "(0 기대)"
+            .. " atk=" .. tostring(u4.atkMin) .. "~" .. tostring(u4.atkMax) .. "(12~17 기대)")
+        self:TickTurn(run)
+        self:TickTurn(run)
+        log("[MonsterService][SelfTest] 2틱 후 mana=" .. tostring(u4.mana) .. "(2 기대)"
+            .. " ready=" .. tostring(u4.turnEventReady == true) .. "(false 기대)")
+        self:TickTurn(run)   -- 3틱째: ready 마킹(발동은 MonsterAct 소유 — 마나 유지)
+        log("[MonsterService][SelfTest] 3틱 후 mana=" .. tostring(u4.mana) .. "(3 기대 — 발동 전 유지)"
+            .. " ready=" .. tostring(u4.turnEventReady == true) .. "(true 기대)")
+        local fired = self:ActTurnEvents(run)   -- basic_attack 발동(데미지 로그 스텁) + every 리셋
+        log("[MonsterService][SelfTest] ActTurnEvents fired=" .. tostring(fired) .. "(1 기대)"
+            .. " mana=" .. tostring(u4.mana) .. "(0 기대 — every 리셋)"
+            .. " ready=" .. tostring(u4.turnEventReady == true) .. "(false 기대)")
     end
 end

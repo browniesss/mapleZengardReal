@@ -15,6 +15,7 @@ script BoardCatalogLogic extends Logic
     property any monsterTypeCache = nil  -- monsterId -> def (MONSTER-SPEC §2)
     property any dropTableCache = nil    -- dropTableId -> def (MONSTER-SPEC §2.5)
     property any lootTypeCache = nil     -- lootId -> def (LOOT-SPEC §2)
+    property any enemySkillCache = nil   -- skillId -> def (MONSTER-SPEC §8.1)
 
     @ExecSpace("ServerOnly")
     method void OnBeginPlay()
@@ -253,13 +254,22 @@ script BoardCatalogLogic extends Logic
                     clips = self:ParseJsonCell(row:GetItem("clips"), {}),
                     sounds = self:ParseJsonCell(row:GetItem("sounds"), {}),
                     dropTableId = row:GetItem("dropTableId"),
-                    -- 이하 예약 컬럼(§2 정책: 파싱만, 소비 코드 없음 — §8.1/§8.2)
-                    atk = tonumber(row:GetItem("atk")) or 0,
+                    -- 공격력 범위(§8.1 소비 — basic_attack 데미지 굴림. 2026-07-14 atk 스칼라 → Min~Max 확장)
+                    atkMin = tonumber(row:GetItem("atkMin")) or 0,
+                    atkMax = tonumber(row:GetItem("atkMax")) or 0,
+                    -- 턴 트리거 스킬 스케줄(§2/§8.1 소비 — 마나 충전 + MonsterAct 발동)
                     turnEvents = self:ParseJsonCell(row:GetItem("turnEvents"), {}),
+                    -- 이하 예약 컬럼(§2 정책: 파싱만, 소비 코드 없음 — §8.2)
                     tags = self:ParseJsonCell(row:GetItem("tags"), {}),
                     resists = self:ParseJsonCell(row:GetItem("resists"), {}),
                     statusImmune = self:ParseJsonCell(row:GetItem("statusImmune"), {}),
                 }
+                -- atk 범위 정합: max < min이면 min으로 클램프(적재 시 교정)
+                if def.atkMax < def.atkMin then
+                    log_warning("[BoardCatalog] MonsterTypes '" .. id .. "' atkMax(" .. tostring(def.atkMax)
+                        .. ") < atkMin(" .. tostring(def.atkMin) .. ") — atkMin으로 클램프")
+                    def.atkMax = def.atkMin
+                end
                 -- 비주얼 폴리시: clips.stand 필수(빈값 = "보이지 않는 몬스터" 무증상 실패)
                 if def.clips.stand == nil or def.clips.stand == "" then
                     log_warning("[BoardCatalog] MonsterTypes '" .. id .. "' clips.stand 누락 — 스폰 시 보이지 않음")
@@ -268,6 +278,12 @@ script BoardCatalogLogic extends Logic
                 if def.dropTableId ~= nil and def.dropTableId ~= "" then
                     if self:GetDropTable(def.dropTableId) == nil then
                         log_error("[BoardCatalog] MonsterTypes '" .. id .. "' 알수없는 dropTableId: " .. def.dropTableId)
+                    end
+                end
+                -- turnEvents.skillId → EnemySkills 존재 검증(§8.1 이중 검증 ① — occupantId 검증과 동일 패턴)
+                for _, ev in ipairs(def.turnEvents) do
+                    if ev.skillId ~= nil and ev.skillId ~= "" and self:GetEnemySkill(ev.skillId) == nil then
+                        log_error("[BoardCatalog] MonsterTypes '" .. id .. "' 알수없는 turnEvents.skillId: " .. tostring(ev.skillId))
                     end
                 end
                 result[id] = def
@@ -332,6 +348,40 @@ script BoardCatalogLogic extends Logic
             end
         end
         return self:DeepCopy(self.dropTableCache[dropTableId])
+    end
+
+    @ExecSpace("ServerOnly")
+    method any GetEnemySkill(string skillId)
+        -- skillId -> EnemySkillDef(deep-copy). 미존재 시 nil (MONSTER-SPEC §8.1).
+        -- 행 = {skillId, name, family, params}. family = 계열 핸들러 라우팅 키, params = 스킬별 자유 스키마.
+        -- 적재 시 이중 검증 ②: family 핸들러 존재(_EnemySkillService:HasFamily) — 없으면 행 제외.
+        if self.enemySkillCache == nil then
+            self.enemySkillCache = {}
+            local ds = _DataService:GetTable("EnemySkills")
+            if ds == nil then
+                log_error("[BoardCatalog] EnemySkills 데이터셋 없음")
+            else
+                for _, row in ipairs(ds:GetAllRow()) do
+                    local id = row:GetItem("skillId")
+                    if id ~= nil and id ~= "" then
+                        local def = {
+                            skillId = id,
+                            name = row:GetItem("name"),
+                            family = row:GetItem("family"),
+                            params = self:ParseJsonCell(row:GetItem("params"), {}),
+                        }
+                        if def.family == nil or def.family == "" or not _EnemySkillService:HasFamily(def.family) then
+                            log_error("[BoardCatalog] EnemySkills '" .. id .. "' 핸들러 없는 family: "
+                                .. tostring(def.family) .. " — 행 제외")
+                        else
+                            self.enemySkillCache[id] = def
+                        end
+                    end
+                end
+                log("[BoardCatalog] EnemySkills 적재: " .. tostring(self:CountKeys(self.enemySkillCache)) .. "종")
+            end
+        end
+        return self:DeepCopy(self.enemySkillCache[skillId])
     end
 
     -- ===== BoardDef =====
@@ -600,7 +650,17 @@ script BoardCatalogLogic extends Logic
         m1.clips.stand = "tampered"
         local m2 = self:GetMonsterType("orangemushroom")
         log("[BoardCatalog][SelfTest] monster deep-copy 격리 OK="
-            .. tostring(m2 ~= nil and m2.maxHp == 100 and m2.clips.stand ~= "tampered"))
+            .. tostring(m2 ~= nil and m2.maxHp == 90 and m2.clips.stand ~= "tampered"))
+        -- 메이플 아일랜드 9종 + atkMin/atkMax + EnemySkills(§8.1) 적재 확인
+        local sn = self:GetMonsterType("snail")
+        local rp = self:GetMonsterType("ribbonpig")
+        log("[BoardCatalog][SelfTest] snail hp=" .. tostring(sn and sn.maxHp or "nil") .. "(8 기대)"
+            .. " atk=" .. tostring(sn and sn.atkMin or "nil") .. "~" .. tostring(sn and sn.atkMax or "nil") .. "(1~2 기대)"
+            .. " ribbonpig hp=" .. tostring(rp and rp.maxHp or "nil") .. "(120 기대)"
+            .. " drop=" .. tostring(rp and rp.dropTableId or "nil") .. "(islandTier3 기대)")
+        local sk = self:GetEnemySkill("basic_attack")
+        log("[BoardCatalog][SelfTest] enemyskill basic_attack family=" .. tostring(sk and sk.family or "nil") .. "(basic 기대)"
+            .. " 미존재스킬 nil OK=" .. tostring(self:GetEnemySkill("no_such_skill") == nil))
         local st = self:GetStageDef("stage01")
         log("[BoardCatalog][SelfTest] stage01 maxWave=" .. tostring(st and st.maxWave or "nil"))
     end

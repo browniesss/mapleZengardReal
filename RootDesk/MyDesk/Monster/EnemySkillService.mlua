@@ -1,0 +1,31 @@
+@Logic
+script EnemySkillService extends Logic
+    -- 몬스터 스킬 디스패처(MONSTER-SPEC §8.1): family → 계열 핸들러 라우팅 + 공통 로그만, 구현 없음.
+    -- 새 계열 추가 = Skills/{Family}SkillLogic.mlua 파일 1개 + 아래 HasFamily/Execute 라우팅 1줄씩.
+    -- 무상태 @Logic — run 핸들 관통(BoardService 패턴). 카탈로그 적재 검증이 HasFamily를 소비.
+
+    @ExecSpace("ServerOnly")
+    method void OnBeginPlay()
+        -- 무상태라 초기화 없음. 준비 로그만.
+        log("[EnemySkill] ready")
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean HasFamily(string family)
+        -- 카탈로그 적재 검증용(§8.1 이중 검증 ②): 이 family의 핸들러 존재 여부.
+        if family == "basic" then return true end
+        return false
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean Execute(any run, any unit, any skillDef)
+        -- 공통 계약: Execute(run, unit, skillDef) → boolean(성공). 성공 시 호출측(ActTurnEvents)이 마나 리셋.
+        if skillDef == nil or skillDef.family == nil then return false end
+        if skillDef.family == "basic" then
+            return _BasicSkillLogic:Execute(run, unit, skillDef)
+        end
+        log_warning("[EnemySkill] 핸들러 없는 family: " .. tostring(skillDef.family)
+            .. " skillId=" .. tostring(skillDef.skillId))
+        return false
+    end
+end

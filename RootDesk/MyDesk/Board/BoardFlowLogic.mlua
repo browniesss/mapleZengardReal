@@ -18,6 +18,7 @@ script BoardFlowLogic extends Logic
             WaveGen     = "WaveGen",      -- 젠: 플레이어 재배치 + 웨이브 몬스터 스폰
             PlayerReady = "PlayerReady",  -- 공격 대기: 스킬 순서 + 공격 방향 선택
             Attack      = "Attack",       -- 공격 타임: 스킬 발동 / 데미지 계산
+            MonsterAct  = "MonsterAct",   -- 몬스터 행동: 턴이벤트 도달(ready) 유닛 스킬 발동(MONSTER-SPEC §8.1)
             PostAttack  = "PostAttack",   -- 후처리: 사망 / 픽업 / 버프만료 / 승패 판정
             Result      = "Result",       -- 종료: 승 / 패
         }
@@ -54,6 +55,7 @@ script BoardFlowLogic extends Logic
         elseif phase == self.Phase.WaveGen then self:OnEnterWaveGen(run)
         elseif phase == self.Phase.PlayerReady then self:OnEnterPlayerReady(run)
         elseif phase == self.Phase.Attack then self:OnEnterAttack(run)
+        elseif phase == self.Phase.MonsterAct then self:OnEnterMonsterAct(run)
         elseif phase == self.Phase.PostAttack then self:OnEnterPostAttack(run)
         elseif phase == self.Phase.Result then self:OnEnterResult(run)
         else log_error("[BoardFlow] 알수없는 phase(enter): " .. tostring(phase)) end
@@ -198,6 +200,14 @@ script BoardFlowLogic extends Logic
         -- [스텁] 공격 타임: 스킬 발동 순서대로 범위/타겟 판정 + 데미지 계산. 처리 페이즈.
         -- TODO: 범위마스크(상대좌표+방향회전) → BlocksSkill 조회 → OnUnitEnter Modifier 집계 → 데미지.
         log("[BoardFlow] (Attack) 스킬 발동/데미지 계산 예정")
+        self:EnterPhase(run, self.Phase.MonsterAct)
+    end
+
+    method void OnEnterMonsterAct(any run)
+        -- 몬스터 행동(MONSTER-SPEC §8.1): 이전 라운드 PostAttack에서 turnEventReady로 마킹된 유닛의
+        -- 스킬을 발동(플레이어 공격 다음, 사망 정리 전 — 충전↔발동 소유 분리). 처리 페이즈.
+        local fired = _MonsterService:ActTurnEvents(run)
+        log("[BoardFlow] (MonsterAct) 턴이벤트 발동=" .. tostring(fired))
         self:EnterPhase(run, self.Phase.PostAttack)
     end
 
@@ -258,7 +268,7 @@ script BoardFlowLogic extends Logic
         self:RequestGen(run)
         log("[BoardFlow][SelfTest] phase=" .. tostring(run.phase) .. " wave=" .. tostring(run.wave) .. " (PlayerReady/1 기대)")
 
-        log("[BoardFlow][SelfTest] --- RequestAttack (Attack→PostAttack→SkillSelect 기대) ---")
+        log("[BoardFlow][SelfTest] --- RequestAttack (Attack→MonsterAct→PostAttack→SkillSelect 기대) ---")
         self:RequestAttack(run)
         log("[BoardFlow][SelfTest] phase=" .. tostring(run.phase) .. " round=" .. tostring(run.round) .. " (SkillSelect/1 기대)")
 

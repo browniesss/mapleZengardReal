@@ -5,7 +5,13 @@ script JsonUtil extends Logic
 
     method table Decode(string text)
         -- JSON 문자열 -> Lua 테이블. 빈/누락 입력("" 또는 nil)은 빈 테이블로 방어(빈 셀 대비).
+        -- 빈 컨테이너 "{}"/"[]"도 빈 테이블로 우회 — _HttpService:JSONDecode가 빈 객체를
+        -- LEA-3001 'JsonToLuaTable.UnknownType'으로 던지는 실측(2026-07-14, EnemySkills.params) 방어.
         if text == nil or text == "" then
+            return {}
+        end
+        local trimmed, subCount = string.gsub(text, "%s", "")
+        if trimmed == "{}" or trimmed == "[]" then
             return {}
         end
         return _HttpService:JSONDecode(text)

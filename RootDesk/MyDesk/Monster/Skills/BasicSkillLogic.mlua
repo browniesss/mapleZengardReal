@@ -1,0 +1,30 @@
+@Logic
+script BasicSkillLogic extends Logic
+    -- basic 계열 몬스터 스킬(MONSTER-SPEC §8.1): 계열당 파일 1개, 내부는 skillId 분기 + 계열 공통 헬퍼.
+    -- 경계: 보드/몬스터 API 호출만 — 데미지 공식·플레이어 피해 적용은 전투/효과 사양 소유(확정 전 스텁).
+
+    @ExecSpace("ServerOnly")
+    method boolean Execute(any run, any unit, any skillDef)
+        -- 계열 공통 계약(§8.1): 성공 시 true → 호출측이 마나 리셋/완료 마킹.
+        if skillDef.skillId == "basic_attack" then
+            return self:BasicAttack(run, unit, skillDef)
+        end
+        log_warning("[BasicSkill] 미구현 skillId: " .. tostring(skillDef.skillId))
+        return false
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean BasicAttack(any run, any unit, any skillDef)
+        -- 기본 공격: atkMin~atkMax 데미지 굴림 + 공격 연출(clips.attack, 없으면 생략).
+        local lo = math.floor(tonumber(unit.atkMin) or 0)
+        local hi = math.floor(tonumber(unit.atkMax) or 0)
+        if hi < lo then hi = lo end
+        local dmg = lo
+        if hi > lo then dmg = _UtilLogic:RandomIntegerRange(lo, hi) end
+        _MonsterService:PlayAttackFx(unit)
+        -- ⛔ 스텁(2026-07-14 확정): 플레이어 HP·피해 적용은 전투/효과 사양 소유 — 확정 시 이 로그 지점만 교체.
+        log("[BasicSkill] basic_attack: " .. tostring(unit.occupantId) .. " id=" .. tostring(unit.instanceId)
+            .. " dmg=" .. tostring(dmg) .. " (플레이어 피해 적용은 전투 사양 확정 시 — 스텁)")
+        return true
+    end
+end
