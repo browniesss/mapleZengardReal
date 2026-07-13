@@ -1,11 +1,22 @@
 @Logic
 script LootService extends Logic
-    -- 런 전용 전리품 인벤토리(LOOT-SPEC §3/§4): 드랍 수신·run.lootBag 적립·질의.
-    -- 무상태: 가방은 run.lootBag(런별 휘발)에만 산다 — Logic 전역 상태 금지, DataStorage 미사용(런 종료 = 소멸).
+    -- 런 전용 전리품 인벤토리(LOOT-SPEC §3/§4): 드랍 수신·가방 적립·질의.
+    -- 무상태: 가방은 run.bags(런별 휘발)에만 산다 — Logic 전역 상태 금지, DataStorage 미사용(런 종료 = 소멸).
     -- 추첨(무엇이 몇 개)은 MonsterService.KillUnit 소유 — 여기는 당첨된 loot의 적립·연출·질의만.
+    --
+    -- ▣ 가방 소유 모델(2026-07-12, PvP 개인 / 협동 공유 대비 이음새):
+    --   run.mode = "pvp_personal" | "coop_shared"   -- 매치 설정에서 주입, 기본 개인
+    --   run.members = { userId, ... }                 -- 개인-단독: {owner} / 협동: 동적맵 전원
+    --   run.bags = { bagKey -> {slots,currency,totalGained} }
+    --   · 어느 가방에 적립되나 = BagKeyForActor(run, actorUserId, def)  (리졸버 A)
+    --   · 누가 push를 받나     = RecipientsForBag(run, bagKey)         (리졸버 B) — 항상 명시 리스트, 브로드캐스트 금지
+    --   · 재화/전직재료(계정 귀속)는 협동에서도 항상 개인 가방(아이템 종류 단위 예외)
+    --   현재 배선: 단일 멤버 + personal → 동작은 종전과 동일, 이음새만 확보. actor 전파는 combat 확정 시.
 
     property boolean RunSelfTest = false   -- OnBeginPlay 자가검증. 본배선 검증 완료로 off(필요시 on).
     property integer MaxSlots = 24         -- 인벤 슬롯 수(LOOT-SPEC §5 — 4열×6행). 초과분은 totalGained에만 기록.
+    property string SharedBagKey = "_shared"   -- 협동 공유 가방 키(멤버 개인 userId와 충돌 없는 예약 키)
+    property string SoloBagKey = "_solo"       -- owner 미상(더미 run/타이밍) 저장 버킷 — push 대상 아님(격리 저장만)
 
     @ExecSpace("ServerOnly")
     method void OnBeginPlay()
@@ -14,25 +25,93 @@ script LootService extends Logic
         if self.RunSelfTest then self:SelfTest() end
     end
 
-    method any EnsureBag(any run)
-        -- run.lootBag 보장(런 시작 = 빈 가방, LOOT-SPEC §3). BuildBoard 초기화 + 방어적 lazy-init 이중화.
-        if run.lootBag == nil then
-            run.lootBag = { slots = {}, currency = {}, totalGained = {} }
+    -- ===== 런/가방 구조 보장 =====
+
+    method void EnsureRun(any run)
+        -- 가방 소유 모델 필드 방어적 lazy-init(BuildBoard 미경유 더미 run 포함).
+        if run.mode == nil then run.mode = "pvp_personal" end
+        if run.members == nil then run.members = {} end
+        -- members가 비어있으면 owner로 시드(BuildBoard가 {}로 선세팅하는 경로 대응).
+        -- 협동전은 동적맵 전원을 외부에서 채우며, 그땐 이미 비어있지 않아 이 시드는 스킵된다.
+        if #run.members == 0 and run.ownerUserId ~= nil and run.ownerUserId ~= "" then
+            table.insert(run.members, run.ownerUserId)
         end
-        return run.lootBag
+        if run.bags == nil then run.bags = {} end
     end
 
+    method any EnsureBag(any run, string bagKey)
+        -- bagKey 가방 보장(런 시작 = 빈 가방, LOOT-SPEC §3). 빈 키는 SoloBagKey 버킷으로 격리 저장.
+        self:EnsureRun(run)
+        local key = bagKey
+        if key == nil or key == "" then key = self.SoloBagKey end
+        if run.bags[key] == nil then
+            run.bags[key] = { slots = {}, currency = {}, totalGained = {} }
+        end
+        return run.bags[key]
+    end
+
+    -- ===== 리졸버(모드 전환 지점) =====
+
+    method string ResolveActorKey(any run, string actorUserId)
+        -- 개인 가방 키 결정: 명시 actor > run.ownerUserId > members[1] > "" (미상).
+        if actorUserId ~= nil and actorUserId ~= "" then return actorUserId end
+        if run.ownerUserId ~= nil and run.ownerUserId ~= "" then return run.ownerUserId end
+        if run.members ~= nil and #run.members > 0 and run.members[1] ~= "" then return run.members[1] end
+        return ""
+    end
+
+    method string BagKeyForActor(any run, string actorUserId, any def)
+        -- 리졸버 A: 이 드랍이 어느 가방에 적립되나.
+        self:EnsureRun(run)
+        local personalKey = self:ResolveActorKey(run, actorUserId)
+        -- 재화·전직재료는 계정 귀속 → 협동이어도 항상 개인 가방(아이템 종류 단위 예외).
+        if def ~= nil and (def.currency == true or def.jobMaterial == true) then
+            return personalKey
+        end
+        if run.mode == "coop_shared" then return self.SharedBagKey end
+        return personalKey
+    end
+
+    method string PrimaryBagKey(any run)
+        -- 런의 대표 가방 키(초기 빈 push / 요약용). 개인=owner, 협동=공유.
+        self:EnsureRun(run)
+        if run.mode == "coop_shared" then return self.SharedBagKey end
+        return self:ResolveActorKey(run, "")
+    end
+
+    method table RecipientsForBag(any run, string bagKey)
+        -- 리졸버 B: 이 가방 변경을 어느 클라가 받나. 항상 명시 리스트 — 빈 리스트면 push skip(브로드캐스트 금지).
+        self:EnsureRun(run)
+        local out = {}
+        if bagKey == nil or bagKey == "" or bagKey == self.SoloBagKey then
+            return out   -- owner 미상: 아무에게도 안 보냄(개인화 누수 차단)
+        end
+        if bagKey == self.SharedBagKey then
+            for _, uid in ipairs(run.members) do
+                if uid ~= nil and uid ~= "" then table.insert(out, uid) end
+            end
+            return out
+        end
+        -- 개인 가방: bagKey 자체가 소유 userId
+        table.insert(out, bagKey)
+        return out
+    end
+
+    -- ===== 적립 =====
+
     @ExecSpace("ServerOnly")
-    method boolean GainLoot(any run, integer col, integer row, string lootId, integer count)
-        -- 드랍 수신(LOOT-SPEC §4): LootTypes 검증 → 적립(재화/슬롯 분기) → 연출·UI 동기화.
-        -- (col,row) = 죽은 칸 — 자석 연출 시작점(§4 PlayMagnetFx, UI 단계에서 배선).
+    method boolean GainLoot(any run, string actorUserId, integer col, integer row, string lootId, integer count)
+        -- 드랍 수신(LOOT-SPEC §4): LootTypes 검증 → 가방 라우팅(리졸버 A) → 적립(재화/슬롯 분기) → 연출·UI 동기화.
+        -- actorUserId = 드랍을 유발한 유저(막타). 미상("")이면 리졸버가 run 소유자로 폴백.
+        -- (col,row) = 죽은 칸 — 자석 연출 시작점(§4).
         if count <= 0 then return false end
         local def = _BoardCatalogLogic:GetLootType(lootId)
         if def == nil then
             log_error("[LootService] 알수없는 lootId: " .. tostring(lootId) .. " — 획득 무시")
             return false
         end
-        local bag = self:EnsureBag(run)
+        local bagKey = self:BagKeyForActor(run, actorUserId, def)
+        local bag = self:EnsureBag(run, bagKey)
         if def.currency then
             -- 재화(메소 등): 슬롯 미점유·상한 없음(2026-07-11 확정)
             bag.currency[lootId] = (bag.currency[lootId] or 0) + count
@@ -62,7 +141,7 @@ script LootService extends Logic
         bag.totalGained[lootId] = (bag.totalGained[lootId] or 0) + count
         log("[LootService] 획득: " .. tostring(def.name) .. " x" .. tostring(count)
             .. " @ " .. tostring(col) .. "_" .. tostring(row)
-            .. " (누계 " .. tostring(bag.totalGained[lootId]) .. ")")
+            .. " → bag[" .. tostring(bagKey) .. "] (누계 " .. tostring(bag.totalGained[lootId]) .. ")")
         -- 연출 + UI 동기화(LOOT-SPEC §4/§5): 죽은 칸 → 아바타 자석 흡입 + 토스트/사운드 + 슬롯 push.
         -- run.def/board 없는 더미 run(SelfTest)은 연출 생략 — 적립 로직만 검증.
         if run.def ~= nil and run.board ~= nil then
@@ -70,23 +149,27 @@ script LootService extends Logic
             local josa = "개를"
             if def.currency then josa = "을(를)" end
             local toastMsg = tostring(def.name) .. " " .. tostring(count) .. josa .. " 얻었습니다."
-            -- 런 소유 유저에게만 연출(멀티 표시 격리, 2026-07-12): Client RPC는 호출부 마지막 인자로
-            -- UserId를 붙이면 단일 클라 타깃(msw-scripting §6 — 선언에는 추가하지 않는다).
-            if run.ownerUserId ~= nil and run.ownerUserId ~= "" then
-                _LootInventoryLogic:NotifyGain(toastMsg, tostring(def.iconRuid or ""), tostring(def.pickupSound or ""), pos.x, pos.y, run.ownerUserId)
+            local recipients = self:RecipientsForBag(run, bagKey)
+            if #recipients == 0 then
+                -- 수신자 미상: 연출/동기화 skip(브로드캐스트 금지, 2026-07-12 개인화 누수 차단)
+                log_warning("[LootService] push 수신자 없음 — 연출/동기화 skip (bag=" .. tostring(bagKey) .. ")")
             else
-                _LootInventoryLogic:NotifyGain(toastMsg, tostring(def.iconRuid or ""), tostring(def.pickupSound or ""), pos.x, pos.y)
+                for _, uid in ipairs(recipients) do
+                    _LootInventoryLogic:NotifyGain(toastMsg, tostring(def.iconRuid or ""), tostring(def.pickupSound or ""), pos.x, pos.y, uid)
+                end
+                self:PushBag(run, bagKey)
             end
-            self:PushBag(run)
         end
         return true
     end
 
     @ExecSpace("ServerOnly")
-    method void PushBag(any run)
-        -- 가방 스냅샷을 클라 UI에 push(LOOT-SPEC §4 동기화). 클라는 serveronly 데이터셋을 못 읽으므로
-        -- 표시 데이터(icon)를 서버가 채워 보낸다. run.ownerUserId 있으면 그 유저에게만 타깃(2026-07-12).
-        local bag = self:EnsureBag(run)
+    method void PushBag(any run, string bagKey)
+        -- 가방 스냅샷을 수신자 클라 UI에 push(LOOT-SPEC §4). 클라는 serveronly 데이터셋을 못 읽으므로
+        -- 표시 데이터(icon/name/grade/job)를 서버가 채워 보낸다. 수신자는 리졸버 B — 항상 명시 타깃.
+        local recipients = self:RecipientsForBag(run, bagKey)
+        if #recipients == 0 then return end   -- 수신자 미상 → skip(브로드캐스트 금지)
+        local bag = self:EnsureBag(run, bagKey)
         local slots = {}
         for i, slot in ipairs(bag.slots) do
             local def = _BoardCatalogLogic:GetLootType(slot.lootId)
@@ -100,24 +183,32 @@ script LootService extends Logic
                 if def.grade ~= nil then grade = def.grade end
                 job = def.jobMaterial == true
             end
-            -- 표시 데이터 동봉(클라는 serveronly 데이터셋 미접근): 이름/등급/전직 플래그(인벤 v0.2 분류용)
             slots[i] = { lootId = slot.lootId, count = slot.count, icon = icon, name = dispName, grade = grade, job = job }
         end
         local currency = {}
         for k, v in pairs(bag.currency) do currency[k] = v end
-        if run.ownerUserId ~= nil and run.ownerUserId ~= "" then
-            _LootInventoryLogic:SyncBag(slots, currency, run.ownerUserId)
-        else
-            _LootInventoryLogic:SyncBag(slots, currency)
+        for _, uid in ipairs(recipients) do
+            _LootInventoryLogic:SyncBag(slots, currency, uid)
+        end
+    end
+
+    @ExecSpace("ServerOnly")
+    method void PushAllBags(any run)
+        -- 런의 모든 가방을 각 수신자에게 push(초기화/전체 갱신용). 대표 가방은 비어도 보장 push.
+        self:EnsureRun(run)
+        local primary = self:PrimaryBagKey(run)
+        self:EnsureBag(run, primary)   -- 대표 가방 보장(빈 스냅샷 초기화)
+        for bagKey, _ in pairs(run.bags) do
+            self:PushBag(run, bagKey)
         end
     end
 
     -- ===== 질의 (UI·Result가 소비) =====
 
     @ExecSpace("ServerOnly")
-    method any GetBag(any run)
-        -- 가방 스냅샷(deep-copy) — 소비측이 내부 상태를 오염시키지 않게.
-        local bag = self:EnsureBag(run)
+    method any GetBag(any run, string bagKey)
+        -- 지정 가방 스냅샷(deep-copy) — 소비측이 내부 상태를 오염시키지 않게.
+        local bag = self:EnsureBag(run, bagKey)
         local out = { slots = {}, currency = {}, totalGained = {} }
         for i, slot in ipairs(bag.slots) do
             out.slots[i] = { lootId = slot.lootId, count = slot.count }
@@ -128,9 +219,9 @@ script LootService extends Logic
     end
 
     @ExecSpace("ServerOnly")
-    method integer CountLoot(any run, string lootId)
-        -- 보유 수량: 재화면 currency, 아니면 슬롯 합산.
-        local bag = self:EnsureBag(run)
+    method integer CountLoot(any run, string bagKey, string lootId)
+        -- 지정 가방 보유 수량: 재화면 currency, 아니면 슬롯 합산.
+        local bag = self:EnsureBag(run, bagKey)
         if bag.currency[lootId] ~= nil then return bag.currency[lootId] end
         local n = 0
         for _, slot in ipairs(bag.slots) do
@@ -139,31 +230,56 @@ script LootService extends Logic
         return n
     end
 
+    @ExecSpace("ServerOnly")
+    method integer GetRunTotals(any run)
+        -- 런 전체(모든 가방) 전리품 획득 누계 합 — Result 요약용(개인/공유 무관 집계).
+        self:EnsureRun(run)
+        local gained = 0
+        for _, bag in pairs(run.bags) do
+            if bag.totalGained ~= nil then
+                for _, n in pairs(bag.totalGained) do gained = gained + n end
+            end
+        end
+        return gained
+    end
+
     -- ===== 자가검증(임시) =====
 
     @ExecSpace("ServerOnly")
     method void SelfTest()
-        -- 더미 run으로 적립 규칙 확인: 재화 무상한 / 스택 합산 / maxStack 경계 / 슬롯 상한 경고.
+        -- 더미 run(owner 미상)으로 적립 규칙 확인: SoloBagKey 버킷에 격리 저장됨.
         local run = {}
-        local ok1 = self:GainLoot(run, 0, 0, "meso", 30)
-        self:GainLoot(run, 1, 0, "meso", 25)
-        local ok2 = self:GainLoot(run, 2, 0, "mushroomCap", 98)
-        self:GainLoot(run, 3, 0, "mushroomCap", 3)   -- 98+3 → 99 만석 + 새 슬롯 2
-        local okBad = self:GainLoot(run, 0, 0, "no_such_loot", 1)
-        log("[LootService][SelfTest] meso=" .. tostring(self:CountLoot(run, "meso")) .. " (55 기대)"
-            .. " cap=" .. tostring(self:CountLoot(run, "mushroomCap")) .. " (101 기대)"
-            .. " slots=" .. tostring(#run.lootBag.slots) .. " (2 기대: 99+2)"
+        local K = self.SoloBagKey
+        local ok1 = self:GainLoot(run, "", 0, 0, "meso", 30)
+        self:GainLoot(run, "", 1, 0, "meso", 25)
+        local ok2 = self:GainLoot(run, "", 2, 0, "mushroomCap", 98)
+        self:GainLoot(run, "", 3, 0, "mushroomCap", 3)   -- 98+3 → 99 만석 + 새 슬롯 2
+        local okBad = self:GainLoot(run, "", 0, 0, "no_such_loot", 1)
+        log("[LootService][SelfTest] meso=" .. tostring(self:CountLoot(run, K, "meso")) .. " (55 기대)"
+            .. " cap=" .. tostring(self:CountLoot(run, K, "mushroomCap")) .. " (101 기대)"
+            .. " slots=" .. tostring(#run.bags[K].slots) .. " (2 기대: 99+2)"
             .. " ok=" .. tostring(ok1 and ok2) .. " 미존재 무시 OK=" .. tostring(okBad == false))
-        -- 슬롯 상한: 서로 다른 lootId가 없으므로 mushroomCap 만석 슬롯으로 채워 상한 경고 확인
         for i = 1, self.MaxSlots do
-            self:GainLoot(run, 4, 0, "mushroomCap", 99)
+            self:GainLoot(run, "", 4, 0, "mushroomCap", 99)
         end
-        log("[LootService][SelfTest] 상한 후 slots=" .. tostring(#run.lootBag.slots)
+        log("[LootService][SelfTest] 상한 후 slots=" .. tostring(#run.bags[K].slots)
             .. " (" .. tostring(self.MaxSlots) .. " 초과 금지)"
-            .. " 누계=" .. tostring(run.lootBag.totalGained["mushroomCap"]))
+            .. " 누계=" .. tostring(run.bags[K].totalGained["mushroomCap"]))
         -- GetBag 격리: 반환본 변형이 원본에 영향 없어야 함
-        local snap = self:GetBag(run)
+        local snap = self:GetBag(run, K)
         snap.currency["meso"] = -999
-        log("[LootService][SelfTest] GetBag 격리 OK=" .. tostring(self:CountLoot(run, "meso") == 55))
+        log("[LootService][SelfTest] GetBag 격리 OK=" .. tostring(self:CountLoot(run, K, "meso") == 55))
+        -- 리졸버 검증: 재화/전직재료는 협동에서도 개인, 일반 아이템은 공유
+        run.mode = "coop_shared"
+        run.members = { "userA", "userB" }
+        run.ownerUserId = "userA"
+        local kMeso = self:BagKeyForActor(run, "userB", { currency = true })
+        local kItem = self:BagKeyForActor(run, "userB", { currency = false, jobMaterial = false })
+        local kOrb = self:BagKeyForActor(run, "userB", { jobMaterial = true })
+        local recShared = self:RecipientsForBag(run, self.SharedBagKey)
+        log("[LootService][SelfTest] 협동 라우팅: 재화→" .. kMeso .. " (userB 기대)"
+            .. " 아이템→" .. kItem .. " (" .. self.SharedBagKey .. " 기대)"
+            .. " 전직재료→" .. kOrb .. " (userB 기대)"
+            .. " 공유수신자=" .. tostring(#recShared) .. " (2 기대)")
     end
 end

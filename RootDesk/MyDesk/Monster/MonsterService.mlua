@@ -187,7 +187,7 @@ script MonsterService extends Logic
         log("[MonsterService] 피해: " .. unit.occupantId .. " id=" .. instanceId
             .. " -" .. tostring(amount) .. " → hp=" .. tostring(unit.hp))
         if unit.hp <= 0 then
-            self:KillUnit(run, instanceId)   -- 사망이 우선 — 피격 연출은 생략(die 연출이 대체)
+            self:KillUnit(run, instanceId, "")   -- 사망이 우선 — 피격 연출은 생략(die 연출이 대체). 막타 userId 전파는 combat 확정 시(현재 미상="")
             return 0
         end
         self:PlayHitFx(unit)
@@ -220,17 +220,18 @@ script MonsterService extends Logic
     end
 
     @ExecSpace("ServerOnly")
-    method void KillUnit(any run, string instanceId)
+    method void KillUnit(any run, string instanceId, string actorUserId)
         -- 사망(§5): alive=false → unit 점유 해제 → 드랍 추첨 → 사망 연출(§8.3) → 비주얼 지연 파괴.
         -- 점유/드랍/게이지 정리는 즉시(로직) — die 클립·사운드 재생만 연출로 지연 파괴.
         -- run.units에서 즉시 제거하지 않음(같은 라운드 중복 참조 보호) — 라운드 경계의 SweepDead가 제거(§6).
+        -- actorUserId = 막타 유저(가방 라우팅용, LootService 리졸버 A). 미상이면 "" — LootService가 run 소유자로 폴백.
         if run.units == nil then return end
         local unit = run.units[instanceId]
         if unit == nil or not unit.alive then return end
         unit.alive = false
         _BoardService:Release(run.board, unit.col, unit.row, "unit", instanceId)
-        self:RollDrop(run, unit)
-        self:RollBlackOrb(run, unit)
+        self:RollDrop(run, unit, actorUserId)
+        self:RollBlackOrb(run, unit, actorUserId)
         -- 게이지 자식은 즉시 제거(사망 유닛 위에 바를 남기지 않음 — 루트 파괴는 연출 뒤라 별도 파괴)
         if unit.gaugeRef ~= nil and isvalid(unit.gaugeRef) then
             unit.gaugeRef:Destroy()
@@ -265,7 +266,7 @@ script MonsterService extends Logic
     end
 
     @ExecSpace("ServerOnly")
-    method void RollDrop(any run, any unit)
+    method void RollDrop(any run, any unit, string actorUserId)
         -- 사망 드랍(§2.5, monster/boss만): 정규화 가중치 추첨 → boardItem은 죽은 칸에 기존 item 배치 경로 재사용.
         -- 배치 실패(칸에 이미 아이템 등) → 소실 + 경고(1차 정책). loot/equip → §8.7 확정 전까지 log-skip.
         if unit.kind ~= "monster" and unit.kind ~= "boss" then return end
@@ -309,7 +310,7 @@ script MonsterService extends Logic
             if lo > 0 and hi >= lo then
                 count = _UtilLogic:RandomIntegerRange(lo, hi)
             end
-            _LootService:GainLoot(run, unit.col, unit.row, picked.id, count)
+            _LootService:GainLoot(run, actorUserId, unit.col, unit.row, picked.id, count)
         else
             -- equip: 보상 풀 미확정(§8.7) — 기록만 남기고 skip
             log("[MonsterService] 드랍 skip(kind=" .. tostring(picked.kind) .. ", §8.7 미구현): " .. tostring(picked.id))
@@ -317,7 +318,7 @@ script MonsterService extends Logic
     end
 
     @ExecSpace("ServerOnly")
-    method void RollBlackOrb(any run, any unit)
+    method void RollBlackOrb(any run, any unit, string actorUserId)
         -- 검은 구슬(MONSTER-SPEC §5.5): 모든 몬스터가 드랍테이블과 **독립**으로 굴리는 추가 드랍.
         -- 확률은 스테이지 소유(run.blackOrbRate), 엘리트는 확정(1.0). 획득은 LootService 파이프 재사용.
         if unit.kind ~= "monster" and unit.kind ~= "boss" then return end
@@ -325,7 +326,7 @@ script MonsterService extends Logic
         if unit.elite then rate = 1 end
         if rate <= 0 then return end
         if rate >= 1 or _UtilLogic:RandomDouble() < rate then
-            _LootService:GainLoot(run, unit.col, unit.row, "blackOrb", 1)
+            _LootService:GainLoot(run, actorUserId, unit.col, unit.row, "blackOrb", 1)
         end
     end
 
@@ -451,7 +452,7 @@ script MonsterService extends Logic
             local id2 = _BoardService:TryOccupy(def, run.board, c, 3, "unit", { occupantId = "orangemushroom", occupantKind = "monster" })
             if id2 ~= nil then
                 self:RegisterUnit(run, id2, "orangemushroom", "monster", c, 3, nil, mdef)
-                self:KillUnit(run, id2)
+                self:KillUnit(run, id2, "")
                 if _BoardService:GetCellLayer(run.board, c, 3, "item") ~= nil then drops = drops + 1 end
             end
         end

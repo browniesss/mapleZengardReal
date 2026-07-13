@@ -124,7 +124,10 @@ script BoardRenderProbe extends Logic
             runMapName = runMapName,       -- 파괴 대상 동적맵 이름(TeardownRun이 소비, 2026-07-12)
             ownerUserId = ownerUserId,     -- 런 소유 유저(Loot RPC 타깃팅 — 멀티 대비 선반영)
             units = {},                    -- 유닛 인스턴스 레지스트리(MONSTER-SPEC §3, MonsterService 소유)
-            lootBag = { slots = {}, currency = {}, totalGained = {} },   -- 런 인벤(LOOT-SPEC §3, LootService 소유 — 빈 가방 시작)
+            -- 가방 소유 모델(LOOT-SPEC §3, LootService 소유 — 2026-07-12 PvP개인/협동공유 이음새):
+            mode = "pvp_personal",         -- 기본 개인 가방. 협동전 도입 시 "coop_shared" + members 전원.
+            members = {},                  -- 런 참여 유저(EnsureRun이 ownerUserId로 시드; 협동 시 동적맵 전원)
+            bags = {},                     -- bagKey -> 가방. 단일 lootBag 폐기(멀티 라우팅)
             maxWave = stageDef.maxWave,    -- 웨이브 소진 판정(MONSTER-SPEC §6 DecideNext)
             eliteRemaining = stageDef.eliteCount,       -- 엘리트 승격 잔여 상한(MONSTER-SPEC §5.5)
             monsterRemaining = stageDef.totalMonsters,  -- 승격 균등 배정 모수(남은엘리트/남은몬스터)
@@ -149,7 +152,8 @@ script BoardRenderProbe extends Logic
         -- 보드 빌드 완료 → 게임 사이클 FSM 시작(Init 진입). 이후 전이는 BoardFlowLogic 소유.
         _BoardFlowLogic:StartRun(run)
         -- 런 시작 시 빈 가방 스냅샷 push: 이전 런의 클라 캐시(lastSlots) 잔존 방지(2026-07-12 리뷰).
-        _LootService:PushBag(run)
+        -- PushAllBags = 대표 가방 보장 + 전 가방 각 수신자에게 타깃 push(브로드캐스트 없음).
+        _LootService:PushAllBags(run)
     end
 
     -- ===== 런 정리 (2026-07-12 생명주기 리뷰 — 동적맵은 생성됐다 사라져야 한다) =====
