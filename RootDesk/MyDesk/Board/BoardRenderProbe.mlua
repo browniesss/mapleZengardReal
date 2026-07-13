@@ -77,6 +77,16 @@ script BoardRenderProbe extends Logic
     end
 
     @ExecSpace("ServerOnly")
+    method any GetRunByUser(string userId)
+        -- 유저의 활성 런 핸들 해석(runsByUser → runs). 없으면 nil.
+        -- 클라 입력 RPC(젠/공격 버튼 등)가 senderUserId로 자기 런을 찾는 표준 진입점.
+        if userId == nil or userId == "" then return nil end
+        local mapName = self.runsByUser[userId]
+        if mapName == nil then return nil end
+        return self.runs[mapName]
+    end
+
+    @ExecSpace("ServerOnly")
     method Entity FindUserEntity(string userId)
         -- 입장한 플레이어 엔티티를 UserService에서 해석.
         for _, user in ipairs(_UserService.UserEntities.Values) do
