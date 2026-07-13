@@ -3,6 +3,7 @@
 > 상태: **초안 (draft, 2026-07-07) — 리뷰 전. 코드 착수는 이 사양 확정 후.** · 브랜치: `feature/monster-structure`
 > 이 문서가 몬스터 구조의 단일 진실(SSOT). 보드 점유·배치 규칙은 [BOARD-SPEC.md](BOARD-SPEC.md)가 SSOT이며 이 문서는 그 계약을 소비만 한다(재정의 금지).
 > 1차 범위 결정(2026-07-07): **정적 타겟** — 몬스터는 공격·이동하지 않는다. 스탯·행동 확장은 자리만 예약(§8).
+> 행동 1단계 확정(2026-07-14): **턴이벤트 공격 파이프라인 구현** — `MonsterAct` 페이즈 + `EnemySkills` 데이터셋 + 계열 핸들러 + atkMin~Max 데미지 굴림·공격 연출까지. **플레이어 피해 적용만 로그 스텁**(전투/효과 사양 확정 시 그 지점만 교체, §8.1). 메이플 아일랜드 몬스터 8종 추가(총 9종).
 
 ---
 
@@ -46,8 +47,8 @@
 | `clips` | `{"stand":"a95c…","hit":"5ebb…","die":"dddb…","move":"8257…"}` | JSON | ✅ | 상태별 animationclip RUID. 키는 정규화 어휘 `stand/move/hit/die/attack/skill`(MSW 몹 팩의 `stand/move/jump/hit1/die1/attack1/skill1`에서 매핑). **`stand`만 필수**(비주얼 폴리시 — 빈값·누락 시 적재 경고), 1차 소비도 `stand`뿐. `hit`/`die`는 §8.3 연출 확장 시 소비 |
 | `sounds` | `{"hit":"6eb2…","die":"c496…"}` | JSON | 예약 | 피격/사망음 RUID(팩의 `_audio/Damage`·`_audio/Die`). 데이터는 지금 채우되 소비는 §8.3 연출 확장 시 |
 | `dropTableId` | `mushroomTier` | 스칼라 | ✅ | 사망 드랍 테이블 참조(§2.5 `DropTables`). **빈값 = 드랍 없음.** 적재 시 존재 검증 |
-| `atk` | `10` | 스칼라(number) | 예약 | 몬스터 공격력. 1차 정적 타겟에선 미사용 — 행동 확정(§8.1) 시 소비 |
-| `turnEvents` | `[{"when":{"every":7},"skillId":"spore_burst"}]` | JSON | 🔶 부분 | 턴 트리거 스킬 스케줄. `when`은 객체(`{"turn":N}` / `{"every":N}` / 후일 `{"hpBelow":0.5}` 등 확장). **스케줄은 마나 게이지가 소비**(2026-07-09, §8.3): 첫 엔트리의 N = `manaMax`, 1턴(라운드)당 마나 +1 → 가득 = 이벤트 도달(`every`는 0부터 재충전, `turn`은 1회성 유지). **스킬 발동은 여전히 예약** — `skillId`는 행동 기획 확정 시 신설할 `EnemySkills` 데이터셋(§8.1) 참조, 도달 시 현재는 로그만 |
+| `atkMin` / `atkMax` | `12` / `17` | 스칼라(number)×2 | ✅ | 몬스터 공격력 범위(2026-07-14 `atk` 스칼라에서 확장 — 옛메 몬스터 공격력이 Min~Max 범위 소유). `basic_attack` 발동 시 이 범위로 데미지 굴림(§8.1). 적재 시 `atkMax < atkMin`이면 클램프+경고 |
+| `turnEvents` | `[{"when":{"every":3},"skillId":"basic_attack"}]` | JSON | ✅ | 턴 트리거 스킬 스케줄. `when`은 객체(`{"turn":N}` / `{"every":N}` / 후일 `{"hpBelow":0.5}` 등 확장). **스케줄은 마나 게이지가 소비**(2026-07-09, §8.3): 첫 엔트리의 N = `manaMax`, 1턴(라운드)당 마나 +1 → 가득 = `turnEventReady` 마킹(`every`는 발동 후 0부터 재충전, `turn`은 1회성). **발동 구현됨(2026-07-14, §8.1)**: `skillId` → `EnemySkills` 데이터셋 참조(적재 시 존재 검증), `MonsterAct` 페이즈가 ready 유닛을 발동 |
 | `tags` | `["boss"]` | JSON | 예약 | 분류 태그(스킬 태그 시스템과 별개 — 몬스터 분류용). 1차 미사용 |
 | `resists` | `{"fire":0.5}` | JSON | 예약 | 속성 내성(기획 미확정 — 속성 6종). 1차 미사용 |
 | `statusImmune` | `["stun"]` | JSON | 예약 | 상태이상 면역(기획 미확정 — 5종). 1차 미사용 |
@@ -55,14 +56,25 @@
 - **예약 컬럼 정책:** 컬럼은 지금 만들되(마이그레이션 회피) 로더가 파싱만 하고 소비처는 없다. 예약 컬럼의 *의미 확정*은 기획서(속성·상태이상·몬스터 행동) 확정과 함께 — 그 전에 소비 코드를 작성하지 않는다.
 - **`occupantKind`와의 관계:** `monster` vs `boss` 구분(BOARD-SPEC §4.2 kind 집합)은 배치 데이터의 `occupantKind`가 소유. MonsterTypes는 kind를 갖지 않는다 — 같은 몬스터를 일반/보스 웨이브 양쪽에 쓸 수 있게 분리 유지.
 
-### 초기 데이터 (1차)
+### 초기 데이터 — 메이플 아일랜드 9종 (2026-07-14 확장)
 
-`msw-search` 리소스 팩 `mob/1210102.img`(클래식 Orange Mushroom)에서 확보(2026-07-07). 대안 팩: `mob/9010026.img`(추억의), `mob/2300102.img`(시니컬한) — 클립 구성 동일.
+외부 몬스터 목록(카톡 수신 이미지 `KakaoTalk_20260713_231126079.png` — HP/공격력 Min~Max 표)에서 스탯을 적재하고, `msw-search`로 각 팩의 클립/사운드 RUID를 확보. 전체 행은 `MonsterTypes.csv` 참조.
 
-```csv
-monsterId,name,maxHp,model,packId,clips,sounds,dropTableId,atk,turnEvents,tags,resists,statusImmune
-orangemushroom,주황버섯,100,,mob/1210102.img,"{""stand"":""a95cfed2c8fe4d2cb64cbb62db051f92"",""move"":""8257566e41aa4234929e81c6c2dab2e4"",""hit"":""5ebbdaf503964f3e87de155d16650805"",""die"":""dddbe2f162184ec89add7440da56eb75""}","{""hit"":""6eb2ef8a783c4393bd7ee6a2c199bda7"",""die"":""c49646f7299e4c6e81e953c96e20b294""}",mushroomTier,10,,,,
-```
+| monsterId | 이름 | HP | atk | 팩 | dropTableId | 비고 |
+|---|---|--:|:--|---|---|---|
+| `snail` | 달팽이 | 8 | 1~2 | `mob/0100100.img` | islandTier1 | attack 클립 보유 |
+| `bluesnail` | 파란 달팽이 | 15 | 2~3 | `mob/0100101.img` | islandTier1 | attack 클립 보유 |
+| `spore` | 스포아 | 20 | 3~4 | `mob/0120100.img` | islandTier1 | |
+| `redsnail` | 빨간 달팽이 | 40 | 5~7 | `mob/0130101.img` | islandTier2 | attack 클립 보유 |
+| `stump` | 스텀프 | 45 | 5~8 | `mob/0130100.img` | islandTier2 | |
+| `slime` | 슬라임 | 50 | 7~10 | `mob/0210100.img` | islandTier2 | |
+| `pig` | 돼지 | 75 | 10~14 | `mob/1210100.img` | islandTier3 | |
+| `orangemushroom` | 주황버섯 | 90 | 12~17 | `mob/1210102.img` | mushroomTier | 기존 행 — HP 100→90 표 반영 |
+| `ribbonpig` | 리본돼지 | 120 | 16~22 | `mob/1210101.img` | islandTier3 | |
+
+- 이미지의 `빅뱅 전/후`·`대표 출몰 맵` 컬럼은 미사용(현 구조에 소비처 없음 — 스테이지 구성은 StageDefs 소유).
+- `turnEvents`는 전 몬스터 `[{"when":{"every":3},"skillId":"basic_attack"}]`(기본값 — CSV에서 개별 튜닝).
+- 스테이지 배치는 무변경(stage01 = 주황버섯) — 신규 몬스터의 웨이브 편성은 스테이지 기획과 함께.
 
 > RUID는 반드시 `msw-search`로 확보한 실물만 적재(placeholder 금지) — 빈/가짜 RUID는 "보이지 않는 몬스터" 무증상 실패를 만든다. 참고: 보스급 팩(예: 머쉬맘 `mob/6130101.img`)은 `attack1`/`skill1` 클립과 `_audio/Attack1`/`_audio/Skill1`을 추가 제공 — `clips.attack`/`clips.skill` 키로 수용.
 
@@ -93,6 +105,14 @@ orangemushroom,주황버섯,100,,mob/1210102.img,"{""stand"":""a95cfed2c8fe4d2cb
 ```csv
 dropTableId,entries
 mushroomTier,"[{""kind"":""boardItem"",""id"":""atkPotion"",""weight"":30},{""weight"":70}]"
+```
+
+메이플 아일랜드 티어 테이블(2026-07-14 — 소액 메소 loot, 드랍 기획 확정 전 기본값):
+
+```csv
+islandTier1,"[{""kind"":""loot"",""id"":""meso"",""weight"":40,""min"":3,""max"":8},{""weight"":60}]"
+islandTier2,"[{""kind"":""loot"",""id"":""meso"",""weight"":50,""min"":10,""max"":25},{""weight"":50}]"
+islandTier3,"[{""kind"":""loot"",""id"":""meso"",""weight"":55,""min"":25,""max"":60},{""weight"":45}]"
 ```
 
 ---
@@ -161,10 +181,17 @@ KillUnit(run, instanceId)
    --     — CanPlaceItem/픽업을 재구현하지 않는다. 배치 실패 → 소실 + 경고 로그(§2.5).
    --   당첨 kind="loot"/"equip" → 런 보상 풀 적립(§8.7 확정 전까지 log만 남기고 skip).
 
--- 턴 경과 (PostAttack이 소비 — 2026-07-09 추가)
+-- 턴 경과 (PostAttack이 소비 — 2026-07-09 추가, 2026-07-14 충전/발동 분리)
 TickTurn(run) → 틱한 유닛 수
-   -- alive 몬스터/보스 중 manaMax>0 유닛의 mana +1. 가득 = 턴이벤트 도달(발동은 §8.1 예약 — 로그만).
-   --   every: 0부터 재충전 / turn: 1회성(가득 유지, turnEventDone 마킹). 게이지 @Sync 갱신 포함.
+   -- alive 몬스터/보스 중 manaMax>0 유닛의 mana +1. 가득 = turnEventReady 마킹까지만(발동·리셋 없음).
+   --   게이지 @Sync 갱신 포함. 충전(상태)은 여기, 발동(페이즈·연출 순서)은 ActTurnEvents 소유(§8.1).
+ActTurnEvents(run) → 발동한 유닛 수 (MonsterAct 페이즈가 소비 — 2026-07-14 추가)
+   -- turnEventReady 유닛 순회 → GetEnemySkill(skillId) → _EnemySkillService:Execute(run, unit, skillDef).
+   --   성공: every = 마나 0 리셋 / turn = turnEventDone 마킹. 실행 실패: ready 유지(다음 라운드 재시도).
+   --   스킬 데이터 결함(카탈로그 미존재): 경고 + 이벤트 영구 비활성(재시도 무의미).
+PlayAttackFx(unit)
+   -- 공격 연출(§8.1): Body에 clips.attack 재생 후 stand 복귀(hitSeq 토큰 공유 — 피격 연출과 경합 보호).
+   --   attack 클립 없는 몬스터는 조용히 생략.
 UpdateGauge(unit)
    -- run.units 상태(hp/maxHp/mana/manaMax) → script.UnitGauge @Sync 반영. 페인트는 클라(§8.3).
 
@@ -205,8 +232,9 @@ CountAlive(run, kind) → integer                 -- DecideNext 승패 판정용
 |---|---|
 | `Init` | (변경 없음) 플레이어 착석 시 `run.units`에 player 등록만 추가 |
 | `WaveGen` | `ApplyWavePlacements` → unit 스펙이 `SpawnMonster` 경로로 흐름(§5). 웨이브 소진 판정용으로 `run.maxWave`(stageDef의 최대 wave 번호)를 카탈로그가 계산해 둔다 |
-| `Attack` | (전투 사양 소유) 스킬 판정 결과가 `ApplyDamage(run, instanceId, amount)` 호출 |
-| `PostAttack` | `TickTurn`(마나/턴이벤트 충전, 1라운드=1턴) → 사망 sweep(`alive=false` 유닛을 `run.units`에서 제거) → `DecideNext` |
+| `Attack` | (전투 사양 소유) 스킬 판정 결과가 `ApplyDamage(run, instanceId, amount)` 호출 → `MonsterAct`로 전이 |
+| `MonsterAct` | **(2026-07-14 신설, §8.1)** `ActTurnEvents` — 이전 라운드에 `turnEventReady`로 마킹된 유닛의 스킬 발동(플레이어 공격 다음, 사망 정리 전) |
+| `PostAttack` | `TickTurn`(마나/턴이벤트 충전 + ready 마킹, 1라운드=1턴) → 사망 sweep(`alive=false` 유닛을 `run.units`에서 제거) → `DecideNext` |
 | `DecideNext` | 승리: `CountAlive(run,"monster")==0 ∧ run.wave >= run.maxWave` → Result. 패배 조건(플레이어 사망)은 전투 사양 확정 후. 그 외 계속 |
 | `Result` | `DestroyBoard` 정리에 몬스터 비주얼 포함(slot 자식이라 slot 파괴로 연쇄 — 별도 순회 불필요, 구현 시 확인) |
 
@@ -224,8 +252,8 @@ CountAlive(run, kind) → integer                 -- DecideNext 승패 판정용
 
 ## 8. 확장 예약 / Deferred
 
-- **8.1 몬스터 행동(공격·이동):** 기획 미확정(몬스터 MP·방해스킬 포함). 확정 시 `MonsterAct` 페이즈 신설 + `atk`·`turnEvents` 소비 + **`EnemySkills` 데이터셋 신설**(스킬 *정의* — 효과 내용·데미지 공식은 전투/효과 사양 소유이므로 그 확정과 함께 스키마를 잡는다. `turnEvents.skillId`가 참조, 적재 시 존재 검증은 §5 occupantId 검증과 동일 패턴). 스케줄(MonsterTypes.turnEvents) ↔ 정의(EnemySkills) 분리 결정: 2026-07-07. 이 사양의 어떤 부분도 "몬스터는 행동하지 않는다"에 구조적으로 의존하지 않게 유지(= run.units·API는 행동 추가 시 그대로).
-  - **구현 구조 확정(2026-07-09, family 단위로 조정 2026-07-09 — 코드는 기획 확정 후):** 스킬 구현은 몬스터별도, 추상 행동별도 아닌 **몬스터 계열(family: 버섯/골렘/…)별 분리**. 몬스터마다 전부 다르게 구현하면 스킬 수가 폭발하므로 계열이 구현 단위 — 같은 계열 안에서 스킬 여러 개 확장 가능.
+- **8.1 몬스터 행동(공격·이동):** 🔶 **공격 파이프라인 구현됨(2026-07-14)** — `MonsterAct` 페이즈 신설(Attack↔PostAttack 사이), `EnemySkills` 데이터셋 신설(`Zengard/Data/`, `{skillId,name,family,params}` — 초기 행 `basic_attack`/family `basic`), `atkMin`·`atkMax`·`turnEvents` 소비, 디스패처 `Monster/EnemySkillService.mlua` + 계열 핸들러 `Monster/Skills/BasicSkillLogic.mlua`, 공격 연출 `PlayAttackFx`(clips.attack). **남은 스텁: 플레이어 피해 적용** — `BasicSkillLogic.BasicAttack`이 데미지를 굴린 뒤 로그만 남긴다(플레이어 HP·패배 판정은 전투/효과 사양 소유 — 확정 시 그 지점만 교체). 몬스터 *이동*은 여전히 미구현(기획 미확정). 스케줄(MonsterTypes.turnEvents) ↔ 정의(EnemySkills) 분리 결정: 2026-07-07.
+  - **구현 구조(2026-07-09 확정, 2026-07-14 코드 반영):** 스킬 구현은 몬스터별도, 추상 행동별도 아닌 **몬스터 계열(family: 버섯/골렘/…)별 분리**. 몬스터마다 전부 다르게 구현하면 스킬 수가 폭발하므로 계열이 구현 단위 — 같은 계열 안에서 스킬 여러 개 확장 가능.
     1. *데이터*: `EnemySkills` 행 = `{skillId, name, family, params(JSON)}`. family = 계열(핸들러 라우팅 키, 스킬 행이 소유 — MonsterTypes 컬럼 추가 불필요), params = 스킬별 자유 스키마. 확장 3축: 같은 스킬 다른 수치 = 데이터 1행(params) · 계열에 새 스킬 = 계열 파일에 메서드 1개 + 데이터 1행 · 새 계열 = 파일 1개 + 라우팅 1줄.
     2. *카탈로그*: `BoardCatalogLogic.GetEnemySkill` — 기존 게터 패턴(파싱·캐시·deep-copy). 적재 시 ① turnEvents.skillId → EnemySkills 존재 ② family → 핸들러 레지스트리 존재(`_EnemySkillService:HasFamily`) 이중 검증.
     3. *실행*: `Monster/EnemySkillService.mlua`(디스패처 — family→핸들러 라우팅 테이블 + 공통 로그만, 구현 없음) + `Monster/Skills/{Family}SkillLogic.mlua`(계열당 파일 1개, 공통 계약 `Execute(run, unit, skillDef) → boolean`, 계열 내부는 skillId 분기 + 계열 공통 헬퍼 공유). 여러 계열이 같은 패턴을 반복하게 되면 그때 공용 헬퍼로 추출(선제 일반화 금지).

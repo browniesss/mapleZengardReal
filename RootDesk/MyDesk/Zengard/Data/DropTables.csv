@@ -1,2 +1,5 @@
 dropTableId,entries
 mushroomTier,"[{""kind"":""boardItem"",""id"":""atkPotion"",""weight"":30},{""kind"":""loot"",""id"":""mushroomCap"",""weight"":40,""min"":1,""max"":2},{""kind"":""loot"",""id"":""meso"",""weight"":20,""min"":10,""max"":30},{""weight"":10}]"
+islandTier1,"[{""kind"":""loot"",""id"":""meso"",""weight"":40,""min"":3,""max"":8},{""weight"":60}]"
+islandTier2,"[{""kind"":""loot"",""id"":""meso"",""weight"":50,""min"":10,""max"":25},{""weight"":50}]"
+islandTier3,"[{""kind"":""loot"",""id"":""meso"",""weight"":55,""min"":25,""max"":60},{""weight"":45}]"
