@@ -3,6 +3,19 @@ script BasicSkillLogic extends Logic
     -- basic 계열 몬스터 스킬(MONSTER-SPEC §8.1): 계열당 파일 1개, 내부는 skillId 분기 + 계열 공통 헬퍼.
     -- 경계: 보드/몬스터 API 호출만 — 데미지 공식·플레이어 피해 적용은 전투/효과 사양 소유(확정 전 스텁).
 
+    -- ⛔⛔ [DUMMY-TEST — 커밋 금지 블록] 플레이어 HP는 다른 브랜치 작업분 — 병합 전 임시 검증용.
+    --      제거: git restore RootDesk/MyDesk/Monster/Skills/BasicSkillLogic.mlua (이 파일에만 존재)
+    property boolean DummyPlayerTest = true    -- true = 공격이 더미 플레이어 HP(run.dummyPlayerHp)를 실제 차감
+    property number DummyPlayerMaxHp = 100     -- 더미 플레이어 최대 HP(런 시작 시 lazy-init, 런별 휘발)
+    property boolean RunSelfTest = true        -- OnBeginPlay 더미 전투 루프 자가검증
+    -- ⛔⛔ [DUMMY-TEST 끝]
+
+    @ExecSpace("ServerOnly")
+    method void OnBeginPlay()
+        -- ⛔ [DUMMY-TEST — 커밋 금지] 더미 검증 진입점. 본 파일의 정식 코드는 무상태라 초기화 없음.
+        if self.RunSelfTest then self:SelfTestDummy() end
+    end
+
     @ExecSpace("ServerOnly")
     method boolean Execute(any run, any unit, any skillDef)
         -- 계열 공통 계약(§8.1): 성공 시 true → 호출측이 마나 리셋/완료 마킹.
@@ -22,9 +35,49 @@ script BasicSkillLogic extends Logic
         local dmg = lo
         if hi > lo then dmg = _UtilLogic:RandomIntegerRange(lo, hi) end
         _MonsterService:PlayAttackFx(unit)
+        -- ⛔ [DUMMY-TEST — 커밋 금지] 더미 플레이어 HP 차감 경로. 제거 시 아래 스텁 로그만 남는다.
+        if self.DummyPlayerTest then
+            return self:ApplyDummyPlayerDamage(run, unit, dmg)
+        end
         -- ⛔ 스텁(2026-07-14 확정): 플레이어 HP·피해 적용은 전투/효과 사양 소유 — 확정 시 이 로그 지점만 교체.
         log("[BasicSkill] basic_attack: " .. tostring(unit.occupantId) .. " id=" .. tostring(unit.instanceId)
             .. " dmg=" .. tostring(dmg) .. " (플레이어 피해 적용은 전투 사양 확정 시 — 스텁)")
         return true
     end
+
+    -- ===== ⛔⛔ [DUMMY-TEST — 커밋 금지 블록] ===================================================
+
+    @ExecSpace("ServerOnly")
+    method boolean ApplyDummyPlayerDamage(any run, any unit, number dmg)
+        -- [DUMMY] 더미 플레이어 HP 차감(런 핸들에 lazy-init — 런별 휘발, 전역 상태 금지 패턴 유지).
+        if run.dummyPlayerHp == nil then run.dummyPlayerHp = self.DummyPlayerMaxHp end
+        run.dummyPlayerHp = math.max(0, run.dummyPlayerHp - dmg)
+        log("[BasicSkill][DUMMY] basic_attack: " .. tostring(unit.occupantId) .. " id=" .. tostring(unit.instanceId)
+            .. " dmg=" .. tostring(dmg)
+            .. " → 더미 플레이어 HP " .. tostring(run.dummyPlayerHp) .. "/" .. tostring(self.DummyPlayerMaxHp))
+        if run.dummyPlayerHp <= 0 then
+            log("[BasicSkill][DUMMY] 더미 플레이어 사망 — 패배(Result) 전이는 전투 사양 확정 시 배선")
+        end
+        return true
+    end
+
+    @ExecSpace("ServerOnly")
+    method void SelfTestDummy()
+        -- [DUMMY] 더미 전투 루프: 가짜 유닛(주황버섯 스탯 12~17)이 더미 플레이어(HP 100)를 사망까지 공격.
+        -- 기대: 매 발동 12~17 차감, 6~9회에 HP 0 도달 + 사망 로그. 보드/스폰 없이 데이터 경로만 검증.
+        local run = {}
+        local unit = { occupantId = "orangemushroom", instanceId = "dummy_1", kind = "monster",
+                       alive = true, atkMin = 12, atkMax = 17 }
+        local skillDef = { skillId = "basic_attack", family = "basic" }
+        local rounds = 0
+        while rounds < 20 do
+            rounds = rounds + 1
+            self:Execute(run, unit, skillDef)
+            if run.dummyPlayerHp ~= nil and run.dummyPlayerHp <= 0 then break end
+        end
+        log("[BasicSkill][DUMMY][SelfTest] 더미 플레이어 사망까지 " .. tostring(rounds) .. "회 공격"
+            .. " (6~9회 기대) 최종HP=" .. tostring(run.dummyPlayerHp) .. "(0 기대)")
+    end
+
+    -- ===== ⛔⛔ [DUMMY-TEST 끝] =================================================================
 end
