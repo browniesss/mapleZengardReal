@@ -104,17 +104,24 @@ script PlayerMailBootstrapComponent extends Component
                     .. tostring(rewardType) .. " Count=" .. tostring(item.ItemCount))
                 return false
             end
-            table.insert(rewards, { rewardType = rewardType, amount = amount })
+            table.insert(rewards, {
+                rewardType = rewardType,
+                rewardExtra = "",
+                amount = amount,
+            })
         end
         if #rewards == 0 then
             return true
         end
         local result = _RewardServiceLogic:GrantRewards(userId, rewards)
-        if result == nil or #result == 0 then
-            log_error("[MailBootstrap] GrantRewards 실패 userId=" .. tostring(userId))
+        if type(result) ~= "table" or result.ok ~= true or type(result.entries) ~= "table" then
+            local reason = type(result) == "table" and tostring(result.reason) or "unavailable"
+            log_error("[MailBootstrap] GrantRewards 실패 userId=" .. tostring(userId)
+                .. " reason=" .. reason)
             return false
         end
-        log("[MailBootstrap] granted userId=" .. tostring(userId) .. " types=" .. tostring(#result))
+        log("[MailBootstrap] granted userId=" .. tostring(userId)
+            .. " types=" .. tostring(#result.entries))
         return true
     end
 
