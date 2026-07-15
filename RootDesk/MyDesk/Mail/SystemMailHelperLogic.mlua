@@ -172,13 +172,44 @@ script SystemMailHelperLogic extends Logic
 
     @ExecSpace("Server")
     method void RequestSendTestMailToSelf()
-        -- 클라 테스트용: 호출한 유저 본인에게 테스트 메일을 보낸다.
+        -- 클라 테스트용: 호출한 유저 본인에게 테스트 메일을 보낸 뒤 즉시 staging handoff 한다.
         local userId = senderUserId
         if userId == nil or userId == "" then
             log_error("[SystemMail] RequestSendTestMailToSelf: senderUserId 없음")
             return
         end
-        self:SendTestRewardMailToUser(userId)
+        if not self:SendTestRewardMailToUser(userId) then
+            return
+        end
+
+        local player = _UserService:GetUserEntityByUserId(userId)
+        if not isvalid(player) then
+            log_warning("[SystemMail] online player 없음 — 다음 open/refresh 때 handoff")
+            return
+        end
+        local bootstrap = player:GetComponent("script.PlayerMailBootstrapComponent")
+        if bootstrap == nil then
+            bootstrap = player.PlayerMailBootstrapComponent
+        end
+        if bootstrap == nil then
+            log_error("[SystemMail] PlayerMailBootstrapComponent 없음 userId=" .. tostring(userId))
+            return
+        end
+
+        local playerMail = player:GetComponent("script.PlayerMail")
+        if playerMail == nil then
+            playerMail = player.PlayerMail
+        end
+        if playerMail == nil then
+            log_error("[SystemMail] PlayerMail 없음 userId=" .. tostring(userId))
+            return
+        end
+
+        -- ServerOnly handoff 는 소유 부트스트랩 큐에 넣어 동시 영속 쓰기와 직렬화한다.
+        playerMail:EnqueueMailboxOperation(function()
+            bootstrap:RefreshStagingMailsFromDB()
+        end)
+        log("[SystemMail] test mail handoff queued userId=" .. tostring(userId))
     end
 
 end
