@@ -1,0 +1,33 @@
+{
+  "Id": "",
+  "GameId": "",
+  "EntryKey": "codeblock://dc8bbef8-7289-4bbf-a83c-3c688ac7ae25",
+  "ContentType": "x-mod/codeblock",
+  "Content": "",
+  "Usage": 0,
+  "UsePublish": 1,
+  "UseService": 0,
+  "CoreVersion": "26.5.0.0",
+  "StudioVersion": "",
+  "DynamicLoading": 0,
+  "ContentProto": {
+    "Use": "Json",
+    "Json": {
+      "CoreVersion": {
+        "Major": 0,
+        "Minor": 2
+      },
+      "ScriptVersion": {
+        "Major": 1,
+        "Minor": 1
+      },
+      "Description": "",
+      "Id": "dc8bbef8-7289-4bbf-a83c-3c688ac7ae25",
+      "Language": 1,
+      "Name": "UIMailBox",
+      "Type": 1,
+      "Source": 0,
+      "Target": null
+    }
+  }
+}

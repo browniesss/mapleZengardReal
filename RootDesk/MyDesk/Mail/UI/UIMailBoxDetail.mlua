@@ -1,0 +1,419 @@
+@Component
+script UIMailBoxDetail extends Component
+    -- 우편 상세 패널. 본문/첨부 표시와 보상 획득을 담당한다.
+
+    property Entity Text_Title = nil
+    property Entity Text_Message = nil
+    property Entity Text_Sender = nil
+    property Entity Text_DueDate = nil
+    property Entity Text_IsRead = nil
+    property GridViewComponent GridView = nil
+    property Entity BtnReceive = nil
+    property Entity BtnClose = nil
+
+    property table Items = {}
+    property string UUID = ""
+    property any MailData = nil
+    property any claimHandler = nil
+    property any closeHandler = nil
+    property boolean IsClaiming = false
+
+    @ExecSpace("ClientOnly")
+    method void OnBeginPlay()
+        -- 상세 패널 참조 확보, 첨부 리스트/보상 버튼을 연결한다.
+        local entity = self.Entity
+
+        self.Text_Title = entity:GetChildByName("Text_Title")
+        self.Text_Message = entity:GetChildByName("Text_Message")
+        self.Text_Sender = entity:GetChildByName("Text_Sender")
+        self.Text_DueDate = entity:GetChildByName("Text_DueDate")
+        self.Text_IsRead = entity:GetChildByName("Text_IsRead")
+
+        local gridEntity = entity:GetChildByName("GridView")
+        if gridEntity ~= nil then
+            self.GridView = gridEntity.GridViewComponent
+            local itemUI = entity:GetChildByName("ItemUI")
+            if itemUI == nil then
+                itemUI = entity:GetChildByName("ItemUI", true)
+            end
+            if self.GridView ~= nil and itemUI ~= nil then
+                if itemUI:GetComponent("script.UIGMMailTool_ItemInfo") == nil and itemUI.UIGMMailTool_ItemInfo == nil then
+                    itemUI:AddComponent("script.UIGMMailTool_ItemInfo")
+                end
+                self.GridView.ItemEntity = itemUI
+                self.GridView.OnRefresh = self.OnRefresh
+                self.GridView.OnClear = self.OnClear
+            end
+        end
+
+        self.BtnReceive = entity:GetChildByName("BtnReceive")
+        if self.BtnReceive ~= nil then
+            self:SetClaimButtonLabel("보상 받기")
+            self.claimHandler = self.BtnReceive:ConnectEvent(ButtonClickEvent, function(evt)
+                self:OnClaimClicked()
+            end)
+        end
+
+        self:EnsureCloseButton()
+        self:ApplyReadableLayout()
+        if self.BtnClose ~= nil then
+            self.closeHandler = self.BtnClose:ConnectEvent(ButtonClickEvent, self.OnCloseClicked)
+        end
+    end
+    @ExecSpace("ClientOnly")
+    method void OnEndPlay()
+        -- 상세 팝업 이벤트 연결을 해제한다.
+        if self.claimHandler ~= nil then
+            if isvalid(self.BtnReceive) then
+                self.BtnReceive:DisconnectEvent(ButtonClickEvent, self.claimHandler)
+            end
+            self.claimHandler = nil
+        end
+        if self.closeHandler ~= nil then
+            if isvalid(self.BtnClose) then
+                self.BtnClose:DisconnectEvent(ButtonClickEvent, self.closeHandler)
+            end
+            self.closeHandler = nil
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void EnsureCloseButton()
+        -- 상세 팝업 상단 우측 닫기 버튼을 확보한다.
+        self.BtnClose = self.Entity:GetChildByName("BtnClose")
+        if self.BtnClose ~= nil then
+            return
+        end
+
+        local panel = self.Entity.Parent
+        if panel == nil then
+            log_warning("[MailDetail] parent panel 없음")
+            return
+        end
+
+        local title = panel:GetChildByName("Title")
+        local closeTemplate = nil
+        if title ~= nil then
+            closeTemplate = title:GetChildByName("Btn_Exit")
+        end
+        if closeTemplate == nil then
+            log_warning("[MailDetail] close template 없음")
+            return
+        end
+
+        self.BtnClose = _SpawnService:SpawnByEntity(closeTemplate, "BtnClose", Vector3.zero, self.Entity)
+        if self.BtnClose == nil then
+            log_error("[MailDetail] close button spawn 실패")
+            return
+        end
+        log("[MailDetail] close button spawned")
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnCloseClicked(ButtonClickEvent event)
+        -- 상세 팝업만 닫는다.
+        self:Clear()
+        log("[MailDetail] close clicked")
+    end
+
+    @ExecSpace("ClientOnly")
+    method void ApplyReadableLayout()
+        -- 리스트 팝업의 Page 패널과 같은 톤/크기로 상세를 재배치한다.
+        local rootTr = self.Entity.UITransformComponent
+        local rootSprite = self.Entity.SpriteGUIRendererComponent
+        local panel = self.Entity.Parent
+        local page = nil
+        if panel ~= nil then
+            page = panel:GetChildByName("Page")
+        end
+
+        if rootTr ~= nil then
+            rootTr.AlignmentOption = AlignmentType.Center
+            rootTr.AnchorsMin = Vector2(0.5, 0.5)
+            rootTr.AnchorsMax = Vector2(0.5, 0.5)
+            rootTr.Pivot = Vector2(0.5, 0.5)
+            rootTr.anchoredPosition = Vector2(0, -55)
+            rootTr.RectSize = Vector2(1706, 743)
+            if page ~= nil and page.UITransformComponent ~= nil then
+                local pageTr = page.UITransformComponent
+                rootTr.AlignmentOption = pageTr.AlignmentOption
+                rootTr.AnchorsMin = pageTr.AnchorsMin
+                rootTr.AnchorsMax = pageTr.AnchorsMax
+                rootTr.Pivot = pageTr.Pivot
+                rootTr.anchoredPosition = pageTr.anchoredPosition
+                rootTr.RectSize = pageTr.RectSize
+            end
+        end
+
+        if rootSprite ~= nil and page ~= nil and page.SpriteGUIRendererComponent ~= nil then
+            rootSprite.ImageRUID = page.SpriteGUIRendererComponent.ImageRUID
+            rootSprite.Color = page.SpriteGUIRendererComponent.Color
+            rootSprite.Type = page.SpriteGUIRendererComponent.Type
+        end
+
+        self:PlaceText(self.Text_Title, -470, 248, 940, 70, 40, 3, true)
+        self:PlaceText(self.Text_Sender, -492, 174, 430, 40, 22, 3, false)
+        self:PlaceText(self.Text_DueDate, -12, 174, 420, 40, 22, 4, false)
+        self:PlaceText(self.Text_IsRead, 460, 174, 360, 40, 22, 5, true)
+        self:PlaceText(self.Text_Message, 0, 18, 1460, 230, 26, 0, false)
+
+        if panel ~= nil then
+            local popupTitle = panel:GetChildByName("Text_Title", true)
+            if popupTitle ~= nil and popupTitle.TextComponent ~= nil and self.Text_Title ~= nil and self.Text_Title.TextComponent ~= nil then
+                self.Text_Title.TextComponent.FontColor = popupTitle.TextComponent.FontColor
+            end
+        end
+        if self.BtnClose ~= nil then
+            local closeTr = self.BtnClose.UITransformComponent
+            if closeTr ~= nil then
+                closeTr.AlignmentOption = AlignmentType.TopRight
+                closeTr.anchoredPosition = Vector2(-32, -32)
+                closeTr.RectSize = Vector2(84, 84)
+            end
+        end
+
+        if self.GridView ~= nil and self.GridView.Entity ~= nil then
+            local gridTr = self.GridView.Entity.UITransformComponent
+            if gridTr ~= nil then
+                gridTr.anchoredPosition = Vector2(0, -168)
+                gridTr.RectSize = Vector2(1160, 110)
+            end
+            self.GridView.CellSize = Vector2(180, 100)
+            self.GridView.Spacing = Vector2(20, 0)
+        end
+
+        if self.BtnReceive ~= nil then
+            local btnTr = self.BtnReceive.UITransformComponent
+            if btnTr ~= nil then
+                btnTr.anchoredPosition = Vector2(0, -287)
+                btnTr.RectSize = Vector2(260, 64)
+            end
+            if self.BtnReceive.TextComponent ~= nil then
+                self.BtnReceive.TextComponent.FontSize = 24
+                self.BtnReceive.TextComponent.Alignment = 4
+                self.BtnReceive.TextComponent.Bold = true
+            end
+        end
+
+        if rootTr ~= nil then
+            log("[MailDetail] layout synced pos="
+                .. tostring(math.floor(rootTr.anchoredPosition.x)) .. "," .. tostring(math.floor(rootTr.anchoredPosition.y))
+                .. " size=" .. tostring(math.floor(rootTr.RectSize.x)) .. "x" .. tostring(math.floor(rootTr.RectSize.y)))
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void PlaceText(Entity target, number x, number y, number w, number h, integer fontSize, integer alignment, boolean bold)
+        -- 텍스트 위치/크기/스타일을 한 번에 적용한다.
+        if target == nil then
+            return
+        end
+        local tr = target.UITransformComponent
+        if tr ~= nil then
+            tr.anchoredPosition = Vector2(x, y)
+            tr.RectSize = Vector2(w, h)
+        end
+        local text = target.TextComponent
+        if text ~= nil then
+            text.FontSize = fontSize
+            text.Alignment = alignment
+            text.Bold = bold
+            text.Overflow = 2
+            text.LineSpacing = 1.1
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void SetClaimButtonLabel(string label)
+        -- 보상 버튼 라벨을 설정한다.
+        if self.BtnReceive == nil then
+            return
+        end
+        if self.BtnReceive.TextComponent ~= nil then
+            self.BtnReceive.TextComponent.Text = label
+            return
+        end
+        local textChild = self.BtnReceive:GetChildByName("Text")
+        if textChild ~= nil and textChild.TextComponent ~= nil then
+            textChild.TextComponent.Text = label
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void Apply(any mail)
+        -- 상세 내용을 읽기 쉬운 텍스트와 버튼 상태로 채운다.
+        if mail == nil then
+            self:Clear()
+            return
+        end
+
+        self.MailData = mail
+        self.UUID = mail.UUID or ""
+        self.IsClaiming = false
+        self.Items = mail.Items or {}
+
+        local itemCount = 0
+        if type(self.Items) == "table" then
+            itemCount = #self.Items
+            if itemCount == 0 then
+                for _, __ in pairs(self.Items) do
+                    itemCount = itemCount + 1
+                end
+            end
+        end
+
+        if self.Text_Title ~= nil and self.Text_Title.TextComponent ~= nil then
+            self.Text_Title.TextComponent.Text = tostring(mail.Title or "")
+        end
+        if self.Text_Message ~= nil and self.Text_Message.TextComponent ~= nil then
+            local message = tostring(mail.Message or "")
+            if message == "" then
+                message = "내용이 없는 우편입니다."
+            end
+            self.Text_Message.TextComponent.Text = message
+            self.Text_Message:SetEnable(true)
+        end
+        if self.Text_Sender ~= nil and self.Text_Sender.TextComponent ~= nil then
+            self.Text_Sender.TextComponent.Text = "보낸 사람: " .. tostring(mail.Sender or "-")
+        end
+        if self.Text_DueDate ~= nil and self.Text_DueDate.TextComponent ~= nil then
+            local due = mail.DueDate or 0
+            if due > 0 then
+                self.Text_DueDate.TextComponent.Text = "만료: " .. DateTime(due):ToFormattedString("MM-dd HH:mm")
+            else
+                self.Text_DueDate.TextComponent.Text = "만료: -"
+            end
+        end
+        if self.Text_IsRead ~= nil and self.Text_IsRead.TextComponent ~= nil then
+            if itemCount > 0 then
+                self.Text_IsRead.TextComponent.Text = "첨부 보상 " .. tostring(itemCount) .. "건"
+            else
+                self.Text_IsRead.TextComponent.Text = "첨부 보상 없음"
+            end
+        end
+
+        if self.GridView ~= nil then
+            self.GridView.Entity:SetEnable(itemCount > 0)
+            self.GridView.TotalCount = itemCount
+            self.GridView:Refresh(true, true)
+        end
+
+        if self.BtnReceive ~= nil then
+            local canClaim = (not mail.IsRead)
+            self.BtnReceive:SetEnable(canClaim)
+            if mail.IsRead then
+                self:SetClaimButtonLabel("수령 완료")
+            elseif itemCount > 0 then
+                self:SetClaimButtonLabel("첨부 보상 받기")
+            else
+                self:SetClaimButtonLabel("읽고 닫기")
+            end
+        end
+
+        self.Entity:SetEnable(true)
+        log("[MailDetail] show uuid=" .. tostring(self.UUID) .. " items=" .. tostring(itemCount))
+    end
+
+    @ExecSpace("ClientOnly")
+    method void Clear()
+        -- 상세를 초기화하고 닫는다.
+        self.UUID = ""
+        self.MailData = nil
+        self.Items = {}
+        self.IsClaiming = false
+        if self.Text_Title ~= nil and self.Text_Title.TextComponent ~= nil then
+            self.Text_Title.TextComponent.Text = ""
+        end
+        if self.Text_Message ~= nil and self.Text_Message.TextComponent ~= nil then
+            self.Text_Message.TextComponent.Text = ""
+        end
+        if self.Text_Sender ~= nil and self.Text_Sender.TextComponent ~= nil then
+            self.Text_Sender.TextComponent.Text = ""
+        end
+        if self.Text_DueDate ~= nil and self.Text_DueDate.TextComponent ~= nil then
+            self.Text_DueDate.TextComponent.Text = ""
+        end
+        if self.Text_IsRead ~= nil and self.Text_IsRead.TextComponent ~= nil then
+            self.Text_IsRead.TextComponent.Text = ""
+        end
+        if self.GridView ~= nil then
+            self.GridView.TotalCount = 0
+            self.GridView:Refresh(true, true)
+            self.GridView.Entity:SetEnable(false)
+        end
+        if self.BtnReceive ~= nil then
+            self.BtnReceive:SetEnable(false)
+            self:SetClaimButtonLabel("보상 받기")
+        end
+        self.Entity:SetEnable(false)
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnRefresh(integer index, Entity entity)
+        -- 첨부 아이템 슬롯 갱신.
+        index = index + 1
+        local item = self.Items[index]
+        if item == nil then
+            return
+        end
+        local info = entity:GetComponent("script.UIGMMailTool_ItemInfo")
+        if info == nil then
+            info = entity.UIGMMailTool_ItemInfo
+        end
+        if info == nil then
+            entity:AddComponent("script.UIGMMailTool_ItemInfo")
+            info = entity:GetComponent("script.UIGMMailTool_ItemInfo")
+            if info == nil then
+                info = entity.UIGMMailTool_ItemInfo
+            end
+        end
+        if info ~= nil then
+            info:Apply(item, index, nil)
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnClear(integer index, Entity entity)
+        -- 첨부 슬롯 정리.
+        local info = entity:GetComponent("script.UIGMMailTool_ItemInfo")
+        if info == nil then
+            info = entity.UIGMMailTool_ItemInfo
+        end
+        if info ~= nil then
+            info:Clear()
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnClaimClicked()
+        -- 보상 획득(또는 읽음 처리) 요청.
+        if self.IsClaiming then
+            return
+        end
+        if _Util:IsNilorEmptyString(self.UUID) then
+            return
+        end
+        local player = _UserService.LocalPlayer
+        if player == nil then
+            log_error("[MailDetail] LocalPlayer 없음")
+            return
+        end
+        local playerMail = player:GetComponent("script.PlayerMail")
+        if playerMail == nil then
+            playerMail = player.PlayerMail
+        end
+        if playerMail == nil then
+            log_error("[MailDetail] PlayerMail 없음")
+            return
+        end
+
+        self.IsClaiming = true
+        if self.BtnReceive ~= nil then
+            self.BtnReceive:SetEnable(false)
+            self:SetClaimButtonLabel("처리 중...")
+        end
+        log("[MailDetail] claim uuid=" .. tostring(self.UUID))
+        playerMail:RequestReceiveMail(self.UUID)
+    end
+
+end

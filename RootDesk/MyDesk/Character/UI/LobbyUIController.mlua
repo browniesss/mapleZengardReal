@@ -4,6 +4,7 @@ script LobbyUIController extends Component
     -- UI 엔티티는 서버 RPC 호스팅 불가 — 시작 요청은 GameStartLogic(@Logic)의 Server 메서드로 위임.
 
     property ButtonComponent btnStart = "c509612e-ab2a-4792-bc4d-4ac228c1f328"
+    property ButtonComponent btnMail = "b90ffb1a-8474-4063-9fc8-3d4f69aa2962"
     property Entity lobbyPanel = "fc6f9124-6d50-4357-9b34-47dd46f40c87"
     property Entity jobPanel = "650a58ba-2820-4256-91a1-2e69b2c38597"
     property ButtonComponent btnJobWar = "a949fb37-e798-4451-86fb-e6cb09042985"
@@ -26,6 +27,7 @@ script LobbyUIController extends Component
         -- 버튼 구독 + 직업 패널 초기 숨김.
         self.handlers = {}
         self:Wire(self.btnStart, self.OnStartClicked)
+        self:Wire(self.btnMail, self.OnMailClicked)
         self:Wire(self.btnJobWar, function() self:OnJobPicked("WAR") end)
         self:Wire(self.btnJobMag, function() self:OnJobPicked("MAG") end)
         self:Wire(self.btnJobArc, function() self:OnJobPicked("ARC") end)
@@ -38,6 +40,14 @@ script LobbyUIController extends Component
         if isvalid(self.jobPanel) then self.jobPanel.Enable = false end
         self:LoadShopProducts()
         self:RefreshCurrencyDisplay()
+        log("[LobbyUI] ready")
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnMailClicked()
+        -- 우편함 UI를 연다.
+        log("[LobbyUI] 우편함 열기")
+        _MailBoxUILogic:OpenMailBox()
     end
 
     @ExecSpace("ClientOnly")

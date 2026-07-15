@@ -1,0 +1,387 @@
+@Component
+script PlayerMailBootstrapComponent extends Component
+    -- PlayerMail 영속화, 스테이징 handoff, 첨부 보상 수령을 관리한다.
+
+    property integer TimerId = 0
+    property boolean IsLoadSuccess = false
+    property integer SavePeriodSeconds = 60
+    property boolean MailPersistenceBusy = false
+    property boolean RefreshInFlight = false
+
+    @ExecSpace("ServerOnly")
+    method void OnBeginPlay()
+        -- 보상 수령을 연결하고 초기 로드와 주기 저장을 시작한다.
+        self:WireRewardHandler()
+        if not self:LoadFromDB() then
+            log_error("[MailBootstrap] 초기 로드 실패")
+            return
+        end
+        local period = self.SavePeriodSeconds
+        if period < 10 then
+            period = 10
+        end
+        self.TimerId = _TimerService:SetTimerRepeat(function()
+            self:SaveToDB(false)
+        end, period, period)
+        log("[MailBootstrap] ready userId=" .. tostring(self:ResolveUserId()))
+    end
+
+    @ExecSpace("ServerOnly")
+    method void OnEndPlay()
+        -- 타이머를 해제하고 같은 작업열에 퇴장 저장을 넣는다.
+        if self.TimerId ~= 0 then
+            _TimerService:ClearTimer(self.TimerId)
+            self.TimerId = 0
+        end
+        self:SaveToDB(true)
+    end
+
+    method any ResolveUserId()
+        -- 플레이어 UserId를 반환한다.
+        if self.Entity == nil or self.Entity.PlayerComponent == nil then
+            return nil
+        end
+        local userId = self.Entity.PlayerComponent.UserId
+        if userId == nil or userId == "" then
+            return nil
+        end
+        return userId
+    end
+
+    method any GetPlayerMail()
+        -- 같은 엔티티의 PlayerMail 컴포넌트를 조회하거나 런타임에 부착한다.
+        if self.Entity == nil then
+            return nil
+        end
+        local playerMail = self.Entity:GetComponent("script.PlayerMail")
+        if playerMail == nil then
+            playerMail = self.Entity.PlayerMail
+        end
+        if playerMail == nil then
+            self.Entity:AddComponent("script.PlayerMail")
+            playerMail = self.Entity:GetComponent("script.PlayerMail")
+            if playerMail == nil then
+                playerMail = self.Entity.PlayerMail
+            end
+            if playerMail ~= nil then
+                log("[MailBootstrap] PlayerMail runtime attach ok")
+            end
+        end
+        return playerMail
+    end
+
+    @ExecSpace("ServerOnly")
+    method void WireRewardHandler()
+        -- PlayerMail 보상 콜백을 RewardService 지급 함수에 연결한다.
+        local playerMail = self:GetPlayerMail()
+        if playerMail == nil then
+            log_error("[MailBootstrap] PlayerMail 컴포넌트 없음 — 보상 콜백 연결 실패")
+            return
+        end
+        playerMail.handleReceiveMailItems = function(items)
+            return self:ReceiveMailItems(items)
+        end
+        log("[MailBootstrap] reward handler wired")
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean ReceiveMailItems(table items)
+        -- 메일 첨부 ItemBase 목록을 RewardService로 지급한다.
+        local userId = self:ResolveUserId()
+        if userId == nil or type(items) ~= "table" then
+            log_error("[MailBootstrap] 지급 실패: 유효하지 않은 userId 또는 items")
+            return false
+        end
+        local rewards = {}
+        for _, item in pairs(items) do
+            if item == nil then
+                continue
+            end
+            local rewardType = item.ItemID
+            local amount = math.floor(tonumber(item.ItemCount) or 0)
+            if rewardType == nil or rewardType == "" or amount <= 0 then
+                log_error("[MailBootstrap] 잘못된 첨부 항목 ItemID="
+                    .. tostring(rewardType) .. " Count=" .. tostring(item.ItemCount))
+                return false
+            end
+            table.insert(rewards, {
+                rewardType = rewardType,
+                rewardExtra = "",
+                amount = amount,
+            })
+        end
+        if #rewards == 0 then
+            return true
+        end
+        local result = _RewardServiceLogic:GrantRewards(userId, rewards)
+        if type(result) ~= "table" or result.ok ~= true or type(result.entries) ~= "table" then
+            local reason = type(result) == "table" and tostring(result.reason) or "unavailable"
+            log_error("[MailBootstrap] GrantRewards 실패 userId=" .. tostring(userId)
+                .. " reason=" .. reason)
+            return false
+        end
+        log("[MailBootstrap] granted userId=" .. tostring(userId)
+            .. " types=" .. tostring(#result.entries))
+        return true
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean PersistMailAndConsumePending()
+        -- PMail 저장 성공 후 pending UUID만 staging CAS로 제거한다.
+        if self.MailPersistenceBusy or self.IsLoadSuccess == false then
+            return false
+        end
+        local playerMail = self:GetPlayerMail()
+        local userId = self:ResolveUserId()
+        if playerMail == nil or userId == nil then
+            return false
+        end
+        local ds = _DataStorageService:GetUserDataStorage(userId)
+        if ds == nil then
+            log_error("[MailBootstrap] UserDataStorage 없음 userId=" .. tostring(userId))
+            return false
+        end
+
+        self.MailPersistenceBusy = true
+        local saveData = {}
+        local dirty = playerMail:SaveToDB(saveData)
+        if dirty then
+            local writeCode = ds:SetAndWait(_GMMailLogic.PlayerMailStorage, saveData[_GMMailLogic.PlayerMailStorage])
+            if writeCode ~= 0 then
+                self.MailPersistenceBusy = false
+                log_error("[MailBootstrap] PMail 저장 실패 code=" .. tostring(writeCode))
+                return false
+            end
+        end
+
+        local pending = playerMail.PendingStagingUUIDs
+        if _Util:IsNilorEmptyTable(pending) then
+            playerMail:MarkMailPersistenceSucceeded({})
+            self.MailPersistenceBusy = false
+            return true
+        end
+
+        for attempt = 1, 3 do
+            local getCode, originalData = ds:GetAndWait(_GMMailLogic.PlayerStagingMailStorage)
+            if getCode ~= 0 then
+                self.MailPersistenceBusy = false
+                log_error("[MailBootstrap] staging 조회 실패 code=" .. tostring(getCode))
+                return false
+            end
+            if _Util:IsNilorEmptyString(originalData) then
+                playerMail:MarkMailPersistenceSucceeded(pending)
+                self.MailPersistenceBusy = false
+                return true
+            end
+            local payload = _HttpService:JSONDecode(originalData)
+            local stagingMails = payload["StagingMails"]
+            if not _Util:IsNilorEmptyTable(stagingMails) then
+                for uuid, _ in pairs(pending) do
+                    stagingMails[uuid] = nil
+                end
+                if _Util:IsNilorEmptyTable(stagingMails) then
+                    payload["StagingMails"] = nil
+                end
+            end
+            payload["SchemaVersion"] = 1
+            local remainingData = _HttpService:JSONEncode(payload)
+            local updateCode, updatedData = ds:UpdateAndWait(_GMMailLogic.PlayerStagingMailStorage, originalData, remainingData)
+            if updateCode == 0 then
+                playerMail:MarkMailPersistenceSucceeded(pending)
+                self.MailPersistenceBusy = false
+                return true
+            end
+        end
+        self.MailPersistenceBusy = false
+        log_error("[MailBootstrap] staging persistence failed")
+        return false
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean RefreshStagingMailsFromDB()
+        -- 현재 staging을 durable PMail handoff 뒤에만 클라이언트로 공개한다.
+        if self.RefreshInFlight then
+            return false
+        end
+        if not self:PersistMailAndConsumePending() then
+            return false
+        end
+        local playerMail = self:GetPlayerMail()
+        local userId = self:ResolveUserId()
+        if playerMail == nil or userId == nil then
+            return false
+        end
+        local ds = _DataStorageService:GetUserDataStorage(userId)
+        if ds == nil then
+            return false
+        end
+        self.RefreshInFlight = true
+        for attempt = 1, 3 do
+            local getCode, originalData = ds:GetAndWait(_GMMailLogic.PlayerStagingMailStorage)
+            if getCode ~= 0 then
+                self.RefreshInFlight = false
+                log_error("[MailBootstrap] staging refresh failed code=" .. tostring(getCode))
+                return false
+            end
+            if _Util:IsNilorEmptyString(originalData) then
+                -- Prime a nonempty JSON document so later producers can use CAS.
+                local initializeCode = ds:SetAndWait(
+                    _GMMailLogic.PlayerStagingMailStorage,
+                    _HttpService:JSONEncode({ SchemaVersion = 1 })
+                )
+                if initializeCode ~= 0 then
+                    self.RefreshInFlight = false
+                    log_error("[MailBootstrap] staging initialize failed code=" .. tostring(initializeCode))
+                    return false
+                end
+                playerMail:SyncInitMails(playerMail.Mails, userId)
+                self.RefreshInFlight = false
+                log("[MailBootstrap] staging refresh added=0")
+                return true
+            end
+            local payload = _HttpService:JSONDecode(originalData)
+            local snapshot = playerMail:BuildStagingRefreshSnapshot(payload, _DateTimeLogic:GetTimeElapsed())
+            local mailData = playerMail:SerializePersistentState(
+                snapshot.Mails,
+                snapshot.ScheduledMails,
+                playerMail.GlobalMailLastReadIndex
+            )
+            local saveCode = ds:SetAndWait(_GMMailLogic.PlayerMailStorage, mailData)
+            if saveCode ~= 0 then
+                self.RefreshInFlight = false
+                log_error("[MailBootstrap] staging refresh PMail 저장 실패 code=" .. tostring(saveCode))
+                return false
+            end
+            local stagingMails = payload["StagingMails"]
+            if not _Util:IsNilorEmptyTable(stagingMails) then
+                for uuid, _ in pairs(snapshot.ConsumedUUIDs) do
+                    stagingMails[uuid] = nil
+                end
+                if _Util:IsNilorEmptyTable(stagingMails) then
+                    payload["StagingMails"] = nil
+                end
+            end
+            payload["SchemaVersion"] = 1
+            local updateCode, updatedData = ds:UpdateAndWait(
+                _GMMailLogic.PlayerStagingMailStorage,
+                originalData,
+                _HttpService:JSONEncode(payload)
+            )
+            if updateCode == 0 then
+                playerMail:CommitStagingRefreshSnapshot(snapshot)
+                playerMail:MarkMailPersistenceSucceeded(snapshot.ConsumedUUIDs)
+                playerMail:SyncInitMails(snapshot.Mails, userId)
+                self.RefreshInFlight = false
+                log("[MailBootstrap] staging refresh added=" .. tostring(snapshot.AddedCount))
+                return true
+            end
+        end
+        self.RefreshInFlight = false
+        log_error("[MailBootstrap] staging refresh failed")
+        return false
+    end
+
+    @ExecSpace("ServerOnly")
+    method void SaveToDB(boolean isLeaving)
+        -- 같은 작업열에서 주기 및 퇴장 저장을 직렬화한다.
+        if self.IsLoadSuccess == false then
+            return
+        end
+        local playerMail = self:GetPlayerMail()
+        if playerMail == nil then
+            return
+        end
+        playerMail:EnqueueMailboxOperation(function()
+            self:PersistMailAndConsumePending()
+        end)
+    end
+
+    @ExecSpace("ServerOnly")
+    method boolean LoadFromDB()
+        -- PMail 전체 페이지를 로드한 뒤 같은 작업열에서 staging을 handoff한다.
+        local playerMail = self:GetPlayerMail()
+        local userId = self:ResolveUserId()
+        if playerMail == nil or userId == nil then
+            log_error("[MailBootstrap] Load 실패: PlayerMail 또는 userId 없음")
+            return false
+        end
+        local ds = _DataStorageService:GetUserDataStorage(userId)
+        if ds == nil then
+            log_error("[MailBootstrap] Load 실패: storage 없음")
+            return false
+        end
+        local loaded = false
+        playerMail:EnqueueMailboxOperation(function()
+            local loadKeys = {}
+            playerMail:LoadFromDB(loadKeys)
+            local returnCode, itemPages = ds:BatchGetAndWait(loadKeys)
+            if returnCode ~= 0 or itemPages == nil then
+                log_error("[MailBootstrap] BatchGet 실패 code=" .. tostring(returnCode))
+                return
+            end
+            local loadedData = {}
+            while true do
+                local datas = itemPages:GetCurrentPageDatas()
+                if datas == nil then
+                    log_error("[MailBootstrap] BatchGet 페이지 데이터 없음")
+                    return
+                end
+                for i = 1, #datas do
+                    loadedData[datas[i].KeyInfo.Key] = datas[i]
+                end
+                if itemPages.IsLastPage then
+                    break
+                end
+                local pageCode = itemPages:LoadNextPageAndWait()
+                if pageCode ~= 0 then
+                    log_error("[MailBootstrap] BatchGet 다음 페이지 실패 code=" .. tostring(pageCode))
+                    return
+                end
+                itemPages:MoveToNextPageAndWait()
+            end
+            if not playerMail:OnLoadedDataFromDB(loadedData) then
+                log_error("[MailBootstrap] PlayerMail 로드 실패")
+                return
+            end
+            self.IsLoadSuccess = true
+            if not self:RefreshStagingMailsFromDB() then
+                return
+            end
+            loaded = true
+            log("[MailBootstrap] loaded userId=" .. tostring(userId))
+        end)
+        return loaded
+    end
+
+    @ExecSpace("Server")
+    method void RequestRefreshStagingMails()
+        -- 요청자가 소유자인 경우에만 최신 staging handoff를 시작한다.
+        if senderUserId ~= self:ResolveUserId() then
+            log_error("[MailBootstrap] staging refresh denied")
+            return
+        end
+        local playerMail = self:GetPlayerMail()
+        if playerMail == nil then
+            log_error("[MailBootstrap] staging refresh PlayerMail 없음")
+            return
+        end
+        playerMail:EnqueueMailboxOperation(function()
+            self:RefreshStagingMailsFromDB()
+        end)
+    end
+
+    @ExecSpace("ServerOnly")
+    @EventSender("Service", "UserService")
+    handler HandleUserLeaveEvent(UserLeaveEvent event)
+        -- 소유 유저 퇴장 시 타이머를 해제하고 같은 저장 작업열을 사용한다.
+        if event.UserId ~= self:ResolveUserId() then
+            return
+        end
+        if self.TimerId ~= 0 then
+            _TimerService:ClearTimer(self.TimerId)
+            self.TimerId = 0
+        end
+        self:SaveToDB(true)
+    end
+
+end

@@ -1,0 +1,136 @@
+@Logic
+script MailBoxUILogic extends Logic
+    -- 플레이어 우편함 UI 스폰/오픈 매니저.
+    -- F10 또는 OpenMailBox() 로 로컬 우편함을 연다.
+
+    property Entity Root = nil
+    property Entity MailBoxUI = nil
+
+    @ExecSpace("ClientOnly")
+    method void OnBeginPlay()
+        -- 프로젝트 UI 루트(Lobby/InGame/Default) 아래 UIMailBox 를 확보한다.
+        self.Root = self:ResolveUiRoot()
+        if self.Root == nil then
+            log_error("[MailBoxUI] UI root 없음 (LobbyGroup/InGameGroup/DefaultGroup)")
+            return
+        end
+
+        self.MailBoxUI = _EntityService:GetEntityByPath(self.Root.Path .. "/UIMailBox")
+        if self.MailBoxUI == nil then
+            local modelId = _EntryService:GetModelIdByName("Model_UIMailBox")
+            if modelId == nil or modelId == "" then
+                log_error("[MailBoxUI] Model_UIMailBox 모델 ID 조회 실패")
+                return
+            end
+            self.MailBoxUI = _SpawnService:SpawnByModelId(modelId, "UIMailBox", Vector3.zero, self.Root)
+            if self.MailBoxUI == nil then
+                log_error("[MailBoxUI] UIMailBox 스폰 실패 root=" .. tostring(self.Root.Path))
+                return
+            end
+            self.MailBoxUI:SetEnable(false)
+        end
+
+        self:EnsureMailBoxScripts(self.MailBoxUI)
+        log("[MailBoxUI] ready root=" .. tostring(self.Root.Path))
+    end
+
+    method any ResolveUiRoot()
+        -- 존재하는 UI 그룹 루트를 우선순위로 찾는다.
+        local candidates = {
+            "/ui/LobbyGroup",
+            "/ui/InGameGroup",
+            "/ui/DefaultGroup",
+            "/ui/PopupGroup",
+        }
+        for _, path in ipairs(candidates) do
+            local e = _EntityService:GetEntityByPath(path)
+            if e ~= nil then
+                return e
+            end
+        end
+        return nil
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OpenMailBox()
+        -- 우편함 UI 를 연다. 이미 열려 있으면 무시.
+        if self.MailBoxUI == nil then
+            -- 늦은 초기화 재시도.
+            self:OnBeginPlay()
+        end
+        if self.MailBoxUI == nil then
+            log_error("[MailBoxUI] MailBoxUI nil")
+            return
+        end
+        if self.MailBoxUI.Enable then
+            return
+        end
+        self:EnsureMailBoxScripts(self.MailBoxUI)
+        local ui = self:GetOrAttachMailBoxComponent(self.MailBoxUI)
+        if ui == nil then
+            log_error("[MailBoxUI] UIMailBox 컴포넌트 없음")
+            return
+        end
+        ui:Open()
+        log("[MailBoxUI] open")
+    end
+
+    method any GetOrAttachMailBoxComponent(Entity box)
+        -- UIMailBox 스크립트 컴포넌트를 조회하고 없으면 런타임 부착한다.
+        if box == nil then
+            return nil
+        end
+        local ui = box:GetComponent("script.UIMailBox")
+        if ui == nil then
+            ui = box.UIMailBox
+        end
+        if ui == nil then
+            box:AddComponent("script.UIMailBox")
+            ui = box:GetComponent("script.UIMailBox")
+            if ui == nil then
+                ui = box.UIMailBox
+            end
+            if ui ~= nil then
+                log("[MailBoxUI] UIMailBox runtime attach ok")
+            end
+        end
+        return ui
+    end
+
+    method void EnsureMailBoxScripts(Entity box)
+        -- 모델 스폰 시 누락될 수 있는 스크립트 컴포넌트를 보정 부착한다.
+        if box == nil then
+            return
+        end
+        self:GetOrAttachMailBoxComponent(box)
+
+        local item = box:GetChildByName("Item", true)
+        if item ~= nil and item:GetComponent("script.UIMailBoxItem") == nil and item.UIMailBoxItem == nil then
+            item:AddComponent("script.UIMailBoxItem")
+            log("[MailBoxUI] UIMailBoxItem attach")
+        end
+
+        local itemUi = box:GetChildByName("ItemUI", true)
+        if itemUi ~= nil and itemUi:GetComponent("script.UIGMMailTool_ItemInfo") == nil and itemUi.UIGMMailTool_ItemInfo == nil then
+            itemUi:AddComponent("script.UIGMMailTool_ItemInfo")
+            log("[MailBoxUI] UIGMMailTool_ItemInfo attach")
+        end
+
+        local detail = box:GetChildByName("Detail", true)
+        if detail ~= nil and detail:GetComponent("script.UIMailBoxDetail") == nil and detail.UIMailBoxDetail == nil then
+            detail:AddComponent("script.UIMailBoxDetail")
+            log("[MailBoxUI] UIMailBoxDetail attach")
+        end
+    end
+
+    @ExecSpace("ClientOnly")
+    @EventSender("Service", "InputService")
+    handler HandleKeyDownEvent(KeyDownEvent event)
+        -- F10: 우편함 열기.
+        local key = event.key
+        if key == KeyboardKey.F10 then
+            self:OpenMailBox()
+        end
+    end
+
+end
